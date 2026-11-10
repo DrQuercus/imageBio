@@ -115,6 +115,14 @@ export function detailRequest(
   }
 }
 
+/** The plane index brought back inside a dataset of the given shape. */
+export function clampIndex<T extends { t: number; c: number; z: number }>(index: T, shape: { t: number; c: number; z: number }): T {
+  const t = clamp(index.t, 0, Math.max(0, shape.t - 1));
+  const c = clamp(index.c, 0, Math.max(0, shape.c - 1));
+  const z = clamp(index.z, 0, Math.max(0, shape.z - 1));
+  return t === index.t && c === index.c && z === index.z ? index : { ...index, t, c, z };
+}
+
 /** Whether `inner` lies inside `outer`. */
 export function regionContains(outer: Region, inner: Region): boolean {
   return (

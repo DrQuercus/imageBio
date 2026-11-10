@@ -150,7 +150,7 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
     ctx.fillRect(0, 0, w, h);
     if (!profile) return;
     const last = Math.max(2, Math.floor((profile.power.length - 1) / zoom)); // same extent as the image above
-    const logs = profile.power.map((p) => (p > 0 ? Math.log10(p) : NaN));
+    const logs = profile.power.map((p) => (p !== null && p > 0 ? Math.log10(p) : NaN));
     let lo = Infinity;
     let hi = -Infinity;
     for (let i = 2; i <= last; i++) {

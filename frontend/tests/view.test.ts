@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BASE_MAX_TEXELS,
   baseBin,
+  clampIndex,
   detailRequest,
   fitView,
   formatLength,
@@ -132,5 +133,16 @@ describe("lengths", () => {
     expect(formatLength(5000)).toBe("500 nm");
     expect(formatLength(25000)).toBe("2.50 µm");
     expect(formatLength(3e7)).toBe("3.00 mm");
+  });
+});
+
+describe("plane index", () => {
+  it("is brought back inside the dataset, and left alone when it already is", () => {
+    const shape = { t: 4, c: 1, z: 3 };
+    expect(clampIndex({ t: 20, c: 2, z: 1 }, shape)).toEqual({ t: 3, c: 0, z: 1 });
+    expect(clampIndex({ t: -1, c: 0, z: 9 }, shape)).toEqual({ t: 0, c: 0, z: 2 });
+    const inside = { t: 3, c: 0, z: 2 };
+    expect(clampIndex(inside, shape)).toBe(inside); // same object: nothing to re-render
+    expect(clampIndex({ t: 5, c: 5, z: 5 }, { t: 0, c: 0, z: 0 })).toEqual({ t: 0, c: 0, z: 0 });
   });
 });

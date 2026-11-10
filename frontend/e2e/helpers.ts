@@ -64,3 +64,12 @@ export function trackPlanes(page: Page) {
   page.on("requestfailed", done);
   return t;
 }
+
+/** Collect the API requests the server refused (status 400 and above). */
+export function trackRefused(page: Page): string[] {
+  const refused: string[] = [];
+  page.on("response", (r) => {
+    if (r.status() >= 400 && r.url().includes("/api/")) refused.push(`${r.status()} ${r.url()}`);
+  });
+  return refused;
+}

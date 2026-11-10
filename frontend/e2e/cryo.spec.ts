@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { hoverPixel, openFile, ready } from "./helpers";
+import { hoverPixel, openFile, ready, trackRefused } from "./helpers";
 
 /** Standard deviation of the plane on screen, as the Fichier panel shows it. */
 async function shownStd(page: Page): Promise<number> {
@@ -178,6 +178,30 @@ test("the power spectrum puts a 10 Å lattice on the 10 Å ring", async ({ page 
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
 
+test("regrouping a movie from its last frames asks for nothing that does not exist", async ({ page }) => {
+  // Regression: while the regrouped movie was being described, planes were requested with the
+  // new grouping and the old frame number (frame 21 of a movie that now has 4), and the
+  // server's refusal was shown as an error.
+  const refused = trackRefused(page);
+  await openFile(page, "demo/falcon.eer", "&t=20&avg=3"); // 24 frames of one fraction
+  await expect(page.getByTestId("t-label")).toHaveText("Frames 21–23 / 24");
+  await page.getByTestId("eer-group").fill("6");
+  await page.getByTestId("eer-group").press("Enter");
+  await expect(page.getByTestId("t-label")).toHaveText("Frame 4 / 4"); // the last frame, alone
+  await ready(page, "demo/falcon.eer");
+  await page.getByTestId("eer-group").fill("1");
+  await page.getByTestId("eer-group").press("Enter");
+  await expect(page.getByTestId("t-label")).toHaveText("Frames 4–6 / 24");
+  // from a movie to a single image: the frame range of the movie does not follow
+  await page.goto("/#path=demo%2Ffalcon.eer&t=20&avg=4");
+  await ready(page, "demo/falcon.eer");
+  await page.getByTestId("browser").getByRole("button", { name: "gradient.mrc" }).click();
+  await ready(page, "demo/gradient.mrc");
+  await page.waitForTimeout(300);
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
+});
+
 test("EER fractions are grouped from the panel, and filters wait for a pixel size", async ({ page }) => {
   await openFile(page, "demo/falcon.eer"); // 24 fractions, one electron on (20, 10) in each
   await expect(page.getByTestId("t-label")).toHaveText("Frame 1 / 24");
@@ -232,6 +256,7 @@ test("colour pictures have no Cryo tools", async ({ page }) => {
 });
 
 test("a gain stored upside down is noticed, and corrected in one click", async ({ page }) => {
+  const refused = trackRefused(page);
   // 24 fractions from a detector with a fixed pattern; the mean of all of them is on screen
   await openFile(page, "demo/falcon/pattern.eer", "&avg=24");
   await expect(page.getByTestId("t-label")).toHaveText("Frames 1–24 / 24");
@@ -283,4 +308,5 @@ test("a gain stored upside down is noticed, and corrected in one click", async (
   await expect(page.getByTestId("gain-select")).toHaveValue("");
   expect(sent.filter((u) => u.includes("aligned.mrc")).some((u) => u.includes("gain="))).toBe(false);
   await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]); // nor the frame range of the movie: nothing was asked that does not exist
 });

@@ -10,19 +10,26 @@ import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, proce
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
-import { clamp, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
+import { clamp, clampIndex, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
 
 const DEFAULT_DISPLAY: DisplaySettings = { min: 0, max: 1, gamma: 1, invert: false, lut: "grays", auto: true };
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** The description of a file, with the path and the reader options it was asked for. */
+interface Loaded {
+  requested: string;
+  options: ReaderOptions;
+  response: DatasetInfoResponse;
+}
 
 export function App() {
   const initial = useMemo<LinkState>(() => parseLink(window.location.hash), []);
   const [me, setMe] = useState<Me | null>(null);
   const [path, setPath] = useState<string | null>(initial.path ?? null);
   const [options, setOptions] = useState<ReaderOptions>(initial.options);
-  const [response, setResponse] = useState<DatasetInfoResponse | null>(null);
-  const [index, setIndex] = useState<PlaneIndex>(initial.index);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [requestedIndex, setIndex] = useState<PlaneIndex>(initial.index);
   const [view, setView] = useState<View | null>(initial.view ?? null);
   const [display, setDisplay] = useState<DisplaySettings>({ ...DEFAULT_DISPLAY, ...initial.display });
   const [userApix, setUserApix] = useState<number | null>(initial.apix ?? null);
@@ -39,9 +46,24 @@ export function App() {
   const [shown, setShown] = useState("");
   const [copied, setCopied] = useState(false);
 
+  // What is on screen. Every request for pixels is built from these values only: the file as
+  // the server described it, the options it was opened with and a plane that exists in it.
+  // While another file, other options or another plane are being loaded, `path`, `options` and
+  // `requestedIndex` already hold the new values; mixing the two gives requests that make no
+  // sense (frame 20 of a movie regrouped into 4 frames, the frame range of the previous file).
+  const onScreen = loaded && loaded.requested === path ? loaded : null;
+  const response = onScreen?.response ?? null;
+  const shownOptions = onScreen?.options ?? options;
   const optionsKey = JSON.stringify(options);
+  const shownOptionsKey = JSON.stringify(shownOptions);
   const info = response?.info ?? null;
   const etag = response?.file.etag ?? "";
+  const shape = info?.shape;
+  const index = useMemo<PlaneIndex>(
+    () => (shape ? clampIndex(requestedIndex, shape) : requestedIndex),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [requestedIndex.t, requestedIndex.c, requestedIndex.z, shape?.t, shape?.c, shape?.z],
+  );
   const onError = useCallback((m: string) => setError(m), []);
 
   // Pixel size in effect: the file's, else the one typed by the user. Filters and the frame
@@ -84,18 +106,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    setResponse(null);
-    setStats(null);
     if (!path) return;
     const controller = new AbortController();
     api
       .info(path, options, controller.signal)
       .then((r) => {
-        setResponse(r);
+        // one update: the file, its options and a plane that exists in it change together
+        setLoaded({ requested: path, options, response: r });
+        setStats(null);
         if (fitOnLoad.current) setView(null);
         fitOnLoad.current = false;
-        const s = r.info.shape;
-        setIndex((i) => ({ t: Math.min(i.t, s.t - 1), c: Math.min(i.c, s.c - 1), z: Math.min(i.z, s.z - 1) }));
+        setIndex((i) => clampIndex(i, r.info.shape));
       })
       .catch((e) => !isAbort(e) && setError(message(e)));
     return () => controller.abort();
@@ -124,11 +145,12 @@ export function App() {
 
   // ── statistics of the plane on screen: histogram and automatic window ──────
   const statsChannel = info?.rgb ? 0 : index.c;
+  const shownPath = response?.path ?? null;
   useEffect(() => {
-    if (!path || !etag) return;
+    if (!shownPath) return;
     const controller = new AbortController();
     api
-      .stats(path, { t: index.t, c: statsChannel, z: index.z }, options, controller.signal, proc)
+      .stats(shownPath, { t: index.t, c: statsChannel, z: index.z }, shownOptions, controller.signal, proc)
       .then((s) => {
         setStats(s);
         setDisplay((d) => (d.auto ? { ...d, min: s.auto[0], max: s.auto[1] } : d));
@@ -136,7 +158,7 @@ export function App() {
       .catch((e) => !isAbort(e) && setError(message(e)));
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, etag, optionsKey, index.t, index.z, statsChannel, procKey]);
+  }, [shownPath, etag, shownOptionsKey, index.t, index.z, statsChannel, procKey]);
 
   const changeDisplay = useCallback(
     (patch: Partial<DisplaySettings>) => {
@@ -162,7 +184,7 @@ export function App() {
   const indexKey = `${index.t},${index.c},${index.z}`;
   const advancedAt = useRef(0);
   useEffect(() => {
-    if (!playing || !info || shown !== `${path}|${indexKey}`) return;
+    if (!playing || !info || shown !== `${shownPath}|${indexKey}`) return;
     const axis = info.shape.t > 1 ? "t" : "z";
     const count = info.shape[axis];
     if (count < 2) {
@@ -175,7 +197,7 @@ export function App() {
       setIndex((i) => ({ ...i, [axis]: (i[axis] + 1) % count }));
     }, wait);
     return () => window.clearTimeout(timer);
-  }, [playing, shown, indexKey, path, info, fps]);
+  }, [playing, shown, indexKey, shownPath, info, fps]);
 
   const step = useCallback(
     (delta: number) => {
@@ -234,7 +256,7 @@ export function App() {
   }, [step, changeDisplay, display.invert, zoomBy]);
 
   const rulerText = ruler ? rulerLabel(Math.hypot(ruler.x1 - ruler.x0, ruler.y1 - ruler.y0), apix) : null;
-  const onShown = useCallback((i: PlaneIndex) => setShown(`${path}|${i.t},${i.c},${i.z}`), [path]);
+  const onShown = useCallback((i: PlaneIndex) => setShown(`${shownPath}|${i.t},${i.c},${i.z}`), [shownPath]);
 
   return (
     <div className="app">
@@ -269,12 +291,12 @@ export function App() {
           )}
           {response && info ? (
             <ViewerCanvas
-              key={`${response.path}|${etag}|${optionsKey}`}
+              key={`${response.path}|${etag}|${shownOptionsKey}`}
               path={response.path}
               etag={etag}
               info={info}
               index={index}
-              options={options}
+              options={shownOptions}
               proc={proc}
               display={display}
               lut={lut}
@@ -296,7 +318,7 @@ export function App() {
           )}
         </div>
         {response && cryoOn && cryo.spectrum && (
-          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={options} apix={apix} onError={onError} />
+          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={shownOptions} apix={apix} onError={onError} />
         )}
       </main>
 
@@ -308,7 +330,7 @@ export function App() {
               averageEnd={tEnd} />
             {cryoOn && (
               <CryoPanel path={response.path} etag={etag} info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix}
-                problem={filterProblem(cryo, apix)} options={options} onOptions={setOptions} />
+                problem={filterProblem(cryo, apix)} options={shownOptions} onOptions={setOptions} />
             )}
             <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
           </>

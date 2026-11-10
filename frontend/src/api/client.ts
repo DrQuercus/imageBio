@@ -53,8 +53,11 @@ async function request(url: string, signal?: AbortSignal): Promise<Response> {
     const body = (await response.json()) as { error?: { code?: string; message?: string } };
     code = body.error?.code ?? code;
     message = body.error?.message ?? message;
-  } catch {
-    // not JSON: keep the generic message
+  } catch (e) {
+    // A request cancelled while its error body was being read is a cancellation, not a
+    // failure of the server: it must not surface as "HTTP 400". Anything else: not JSON,
+    // keep the generic message.
+    if (signal?.aborted || isAbort(e)) throw new DOMException("The request was cancelled", "AbortError");
   }
   throw new ApiError(response.status, code, message);
 }
