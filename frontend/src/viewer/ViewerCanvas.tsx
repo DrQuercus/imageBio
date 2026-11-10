@@ -89,8 +89,37 @@ export function ViewerCanvas(props: Props) {
   const planeKey = planeKeyOf(etag, options, index, channels, proc);
 
   // ── drawing ────────────────────────────────────────────────────────────────
-  const state = useRef({ view, viewport, display, ruler, apix, planeKey, rgb: info.rgb });
-  state.current = { view, viewport, display, ruler, apix, planeKey, rgb: info.rgb };
+  const state = useRef({ view, viewport, display, ruler, apix, planeKey, rgb: info.rgb, image });
+  state.current = { view, viewport, display, ruler, apix, planeKey, rgb: info.rgb, image };
+
+  // ── value under the cursor ─────────────────────────────────────────────────
+  // The last pointer position is kept: when another plane arrives under a cursor that does
+  // not move (player, filter, frame average), the readout must follow, not show the old value.
+  const pointer = useRef<[number, number] | null>(null);
+  const hover = useCallback((sx: number, sy: number) => {
+    const s = state.current;
+    if (!s.view || !s.viewport) return;
+    const [ix, iy] = screenToImage(s.view, s.viewport, sx, sy);
+    const x = Math.floor(ix);
+    const y = Math.floor(iy);
+    if (x < 0 || y < 0 || x >= s.image.width || y >= s.image.height) {
+      callbacks.current.onHover(null);
+      return;
+    }
+    const detail = detailRef.current?.set.planeKey === s.planeKey ? detailRef.current.set : null;
+    const base = baseRef.current?.set.planeKey === s.planeKey ? baseRef.current.set : null;
+    for (const set of [detail, base]) {
+      const values = set ? valuesAt(set, x, y) : null;
+      if (set && values) {
+        callbacks.current.onHover({ x, y, values, bin: set.bin });
+        return;
+      }
+    }
+    callbacks.current.onHover({ x, y, values: [], bin: 1 });
+  }, []);
+  const refreshHover = useCallback(() => {
+    if (pointer.current) hover(...pointer.current);
+  }, [hover]);
 
   const draw = useCallback(() => {
     cancelAnimationFrame(frameRef.current);
@@ -188,6 +217,7 @@ export function ViewerCanvas(props: Props) {
         }
         setBaseVersion((v) => v + 1);
         draw();
+        refreshHover();
         callbacks.current.onShown(index);
       })
       .catch((e) => {
@@ -227,6 +257,7 @@ export function ViewerCanvas(props: Props) {
           renderer.deleteLayer(detailRef.current?.layer);
           detailRef.current = { set, layer };
           draw();
+          refreshHover();
         })
         .catch((e) => {
           if (!isAbort(e)) callbacks.current.onError(e instanceof Error ? e.message : String(e));
@@ -261,27 +292,6 @@ export function ViewerCanvas(props: Props) {
     return () => wrap.removeEventListener("wheel", onWheel);
   }, []);
 
-  const hover = (sx: number, sy: number) => {
-    if (!view || !viewport) return;
-    const [ix, iy] = screenToImage(view, viewport, sx, sy);
-    const x = Math.floor(ix);
-    const y = Math.floor(iy);
-    if (x < 0 || y < 0 || x >= image.width || y >= image.height) {
-      props.onHover(null);
-      return;
-    }
-    const detail = detailRef.current?.set.planeKey === planeKey ? detailRef.current.set : null;
-    const base = baseRef.current?.set.planeKey === planeKey ? baseRef.current.set : null;
-    for (const set of [detail, base]) {
-      const values = set ? valuesAt(set, x, y) : null;
-      if (set && values) {
-        props.onHover({ x, y, values, bin: set.bin });
-        return;
-      }
-    }
-    props.onHover({ x, y, values: [], bin: 1 });
-  };
-
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 || !view || !viewport) return;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -305,6 +315,7 @@ export function ViewerCanvas(props: Props) {
         props.onRulerChange({ ...ruler, x1: x, y1: y });
       }
     }
+    pointer.current = [sx, sy];
     hover(sx, sy);
   };
 
@@ -321,7 +332,10 @@ export function ViewerCanvas(props: Props) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerLeave={() => props.onHover(null)}
+      onPointerLeave={() => {
+        pointer.current = null;
+        props.onHover(null);
+      }}
       onDoubleClick={() => viewport && props.onViewChange(fitView(image, viewport))}
     >
       <canvas ref={glRef} className="viewer-gl" data-testid="viewer-canvas" />

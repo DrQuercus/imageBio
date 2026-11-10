@@ -38,10 +38,16 @@ test("a low-pass in Å removes what is finer than the cut-off", async ({ page })
   // lattice of period 10 Å (amplitude 1) in noise of standard deviation 0.3, around 100
   await openFile(page, "demo/lattice.mrc");
   await expect.poll(() => shownStd(page)).toBeCloseTo(Math.sqrt(0.5 + 0.09), 2);
+  const shownValue = async () => Number((await page.getByTestId("hover-value").innerText()).split(" ")[0]);
+  await hoverPixel(page, 512, 300); // a crest of the lattice: cos(2 pi 512 / 8) = 1
+  expect(await shownValue()).toBeGreaterThan(100.4);
 
   const filtered = planeWith(page, "lp=20");
-  await page.getByTestId("lp-20").click();
+  await page.getByTestId("lp-20").focus();
+  await page.keyboard.press("Enter"); // the mouse stays on the image
   const url = await filtered;
+  // the value under the still cursor is that of the filtered image, not the one read before
+  await expect.poll(shownValue).toBeLessThan(100.3);
   expect(url).not.toContain("apix="); // the file knows its pixel size: the server uses it
   // A Gaussian with gain 1/2 at 20 Å has gain 1/16 at 10 Å: the lattice falls to 0.044 and the
   // noise to 0.028 (the filter keeps 0.9 % of the power of white noise at 16 px per cut-off).
