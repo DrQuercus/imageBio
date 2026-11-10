@@ -986,14 +986,19 @@ def test_a_read_holds_a_few_frames_not_the_movie(tmp_path: Path):
 
 
 @pytest.mark.perf
+@pytest.mark.timeout(300)
 def test_perf_4k_group(tmp_path: Path):
-    """Budget for a 40-fraction group of a 4096 x 4096 movie at 0.015 e/px (run with -m perf)."""
-    f = write_eer(tmp_path / "4k.eer", n_fractions=40, shape=(4096, 4096), events=250_000)
-    with open_eer(f.path, group=40) as ds:
+    """Budget for a group of 4096 x 4096 fractions at 0.015 e/px (run with -m perf).
+
+    Eight fractions only: the pure-Python fixture encoder needs about 3 s per 4K fraction.
+    """
+    n = 8
+    f = write_eer(tmp_path / "4k.eer", n_fractions=n, shape=(4096, 4096), events=250_000)
+    with open_eer(f.path, group=n) as ds:
         ds.read_plane(0)
         started = time.perf_counter()
         plane = ds.read_plane(0)
         elapsed = time.perf_counter() - started
     assert plane.sum() == f.n_events()
-    print(f"\n4096 x 4096, 40 fractions: {elapsed * 1000:.0f} ms ({elapsed * 25:.2f} ms per fraction)")
-    assert elapsed < 1.0
+    print(f"\n4096 x 4096, {n} fractions: {elapsed * 1000:.0f} ms ({elapsed * 1000 / n:.1f} ms per fraction)")
+    assert elapsed < 0.025 * n  # 25 ms per fraction: several times the measured cost
