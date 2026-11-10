@@ -268,6 +268,34 @@ Reste à faire (reporté) :
 - Un chemin hors racine renvoie 403.
 - 10 clients simultanés sans dégradation.
 
+**Avancement de M1 (10 novembre 2026) : fait.** Le code est dans `backend/` ([README](../backend/README.md)) ; les décisions sont dans [`adr/`](adr/).
+
+Fait (753 tests, `ruff` et `mypy --strict` propres) :
+- **Socle** : `Dataset` paresseux à 5 axes lu plan par plan, calibration avec provenance, erreurs publiques sans chemin serveur, configuration TOML, registre de lecteurs (extension + contenu, points d'entrée pour des lecteurs tiers).
+- **Lecteurs du palier 1** : MRC (modes 0, 1, 2, 6, 12, 16, 101 ; extension FEI1/FEI2 ; fichiers tronqués ou en cours d'écriture), EER réel (groupes de fractions, super-résolution, flux tronqués détectés), TIFF (hyperstacks ImageJ, OME, films compressés, RGB, palettes), PNG/JPEG/BMP/GIF/WebP. Chaque lecteur est comparé bit à bit à `mrcfile`, `tifffile` ou Pillow, et soumis à des fichiers abîmés.
+- **Traitements** : binning par moyenne de blocs, statistiques robustes insensibles aux NaN.
+- **Caches** : plans bornés en octets avec chargement unique par clé ; pool de fichiers ouverts indexé sur l'identité du contenu.
+- **Racines** : chemins logiques, confinement par `realpath`, droits par groupe, liens sortants refusés et masqués.
+- **API FastAPI** et ligne de commande (`imagebio serve`, `imagebio info`).
+
+Critères d'acceptation :
+
+| Critère | Résultat |
+|---|---|
+| Lecteurs identiques bit à bit à `mrcfile` et `tifffile` | Oui (tests de référence par mode, boutisme et variante) |
+| Somme EER identique à la vérité synthétique | Oui, y compris par groupes et en super-résolution |
+| Mémoire sous le plafond du cache en parcourant une pile | Oui : pile de 240 Mio, cache de 32 Mio, +12 Mio de mémoire résidente. Le test à 2 Go n'a pas été fait, le mécanisme est le même |
+| Plan 4K avec binning 4 en moins de 150 ms à chaud | Oui : 5 ms à chaud, 85 ms à froid |
+| Un chemin hors racine renvoie 403 | Oui, sans révéler si le fichier existe |
+| 10 clients simultanés | Oui : données exactes et cache borné sous 10 threads |
+
+Écarts par rapport au plan :
+- **Pas de relecture indépendante.** Le workflow multi-agents prévu a été coupé par la limite d'utilisation ; le lecteur MRC et une bonne partie des lecteurs TIFF et EER viennent de ce workflow, le reste a été écrit directement. Aucun module n'a eu de relecture adversariale par un agent neuf. C'est la première chose à faire quand le budget le permet, en priorité sur `fs/roots.py`, `api/` et les lecteurs.
+- **L'API est sans état** : les fichiers sont désignés par leur chemin logique à chaque requête (`/api/datasets/plane?path=…`), et non par un identifiant de session comme écrit plus haut. Voir l'ADR 003.
+- **Pas de comptes ni de LDAP dans le backend** : l'identité vient du reverse proxy (ADR 005). Le mode autonome `--local` existe déjà.
+- **EER** : le gain, les pixels défectueux et le pool de processus sont reportés à M4. Le décodage utilise un petit pool de threads.
+- **Non vérifié sur de vrais fichiers** : le mode MRC 101 et l'ancien format 4 bits de SerialEM ne sont testés que sur des fichiers construits d'après la spécification. Des fichiers réels d'EPU, de SerialEM et un EER de Falcon seraient précieux.
+
 ### M2 : visionneuse web, qui remplace CryoViewer (3-4 sessions)
 
 **Livrables :**
@@ -477,7 +505,8 @@ imageBio/
 - **Opus 5.5** est un très bon second choix, deux fois moins cher. Il suffit largement pour M0 (correctifs bien cadrés) et pour les tâches répétitives.
 - **Sonnet 5.5** convient pour les retouches d'UI et la documentation.
 
-**Ultracode : oui, mais par jalon, pas en permanence.**
+**Ultracode : oui, mais par jalon, pas en permanence, et à une taille qui tient dans votre forfait.**
+- **Retour d'expérience de M1 :** un workflow de 16 agents a épuisé la fenêtre d'utilisation de 5 heures après un seul module terminé (environ 1,2 million de tokens), et les 8 agents en cours ont été perdus. Écrire directement les modules restants a coûté beaucoup moins. Pour ce projet, préférez un travail direct, avec **un ou deux agents ciblés** pour la relecture adversariale d'un module à risque.
 - **Utile pour :**
   - la conception d'un jalon (plusieurs propositions concurrentes, puis un juge) ;
   - les implémentations qui se parallélisent (lecteurs de formats, opérations, suites de tests) ;
@@ -491,9 +520,9 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Premier message suggéré pour la prochaine session (M1) :**
+**Premier message suggéré pour la prochaine session (M2) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4/M1, ainsi que l'avancement de M0) et `docs/audit/AUDIT.md`. Réalise le jalon M1 : crée le paquet `backend/` (`imagebio`), le générateur de fichiers de test, les lecteurs du palier 1 (MRC, TIFF, EER réel) comparés bit à bit à `mrcfile`/`tifffile`, le cache borné en octets, le confinement des racines et l'API des plans binaires. Tous les critères d'acceptation de M1 doivent passer. Commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4/M2, avec l'avancement de M1), `backend/README.md` et les ADR. Réalise le jalon M2 : le frontend React + TypeScript dans `frontend/`, avec le canevas WebGL2 branché sur l'API des plans (`/api/datasets/plane`), le navigateur de fichiers, le contraste et les palettes sur le GPU, la vraie valeur du pixel sous le curseur, la règle et les liens profonds. Tous les critères d'acceptation de M2 doivent passer (Playwright). Commits atomiques, puis pousse la branche.
 
 ---
 

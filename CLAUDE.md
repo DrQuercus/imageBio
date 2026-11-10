@@ -17,6 +17,17 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Per-user/per-session state, never a global singleton. Escape all UI output (no `innerHTML` with file names).
 - Every fixed bug gets a regression test.
 
+## Backend (`backend/`, package `imagebio`)
+
+- Read `backend/README.md` and `docs/adr/`. Contract: `core/model.py` (Dataset, calibration provenance), `core/errors.py`, `io/registry.py` (Reader).
+- Checks before every commit, from `backend/`: `python -m pytest`, `ruff check src tests`, `ruff format --check src tests`, `python -m mypy` (strict). Performance budgets: `python -m pytest -m perf`.
+- Public error messages never contain a server path. Clients only use logical paths (`<root>/<relative>`); authorisation happens on every request, before any cache lookup.
+- Tests compare against a reference (mrcfile, tifffile, Pillow, a naive loop), never against imagebio itself.
+
+## Working within the usage limit
+
+- A 16-agent workflow exhausted the user's 5-hour usage window during M1 and lost its in-flight agents. Write code directly; keep sub-agents to one or two focused reviews of high-risk modules, and commit after each module so nothing is lost.
+
 ## Conventions
 
 - Code, identifiers and code comments in English; `docs/PLAN.md` and user docs in French.
