@@ -207,6 +207,22 @@ test("EER fractions are grouped from the panel, and filters wait for a pixel siz
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
 
+test("EER fractions are grouped by dose once the pixel size is known", async ({ page }) => {
+  // 4000 electrons per fraction on 128 x 128 pixels: 0.244 e per pixel and fraction
+  await openFile(page, "demo/falcon/pattern.eer");
+  await expect(page.getByTestId("eer-dose")).toBeDisabled(); // no pixel size in an EER file
+  await page.getByTestId("user-apix").fill("1");
+  await expect(page.getByTestId("eer-dose")).toBeEnabled();
+  await page.getByTestId("eer-dose").click(); // 0.244 e/Å² per fraction: 4 fractions for about 1 e/Å²
+  await expect(page.getByTestId("eer-group")).toHaveValue("4");
+  await expect(page.getByTestId("t-label")).toHaveText("Frame 1 / 6");
+  await page.getByTestId("user-apix").fill("0.5"); // 0.977 e/Å² per fraction: one is enough
+  await page.getByTestId("eer-dose").click();
+  await expect(page.getByTestId("eer-group")).toHaveValue("1");
+  await expect(page.getByTestId("t-label")).toHaveText("Frame 1 / 24");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+
 test("colour pictures have no Cryo tools", async ({ page }) => {
   await openFile(page, "demo/colours.png", "&lp=20&ps=1");
   await expect(page.getByTestId("info")).toBeVisible();

@@ -7,6 +7,7 @@ import {
   formatResolution,
   gainCandidates,
   gainOf,
+  groupForDose,
   ICE_RING,
   keepsGain,
   NO_CRYO,
@@ -28,6 +29,27 @@ describe("frame average", () => {
     expect(averageEnd(39, 5, 40)).toBeNull(); // the last frame alone
     expect(averageEnd(3, 1, 40)).toBeNull();
     expect(averageEnd(0, 5, 1)).toBeNull(); // a single image
+  });
+});
+
+describe("EER fractions per frame from the dose", () => {
+  it("aims at one electron per square ångström in each frame", () => {
+    // 0.05 e per detector pixel and fraction at 0.75 Å per pixel: 0.0889 e/Å², so 11 fractions
+    expect(groupForDose(0.05, 0.75, 1, 1000)).toBe(11);
+    expect(groupForDose(0.05, 0.75, 1, 1000, 3)).toBe(34); // 33.75
+    // rendered at twice the sampling, the image pixel is half as wide: same detector, same answer
+    expect(groupForDose(0.05, 0.375, 2, 1000)).toBe(11);
+  });
+
+  it("stays between one fraction and the whole movie", () => {
+    expect(groupForDose(5, 1, 1, 100)).toBe(1); // more than 1 e/Å² in a single fraction
+    expect(groupForDose(0.001, 1, 1, 100)).toBe(100);
+  });
+
+  it("gives up without a usable dose", () => {
+    for (const dose of [0, -1, NaN, Infinity]) expect(groupForDose(dose, 1, 1, 100)).toBeNull();
+    expect(groupForDose(0.05, 0, 1, 100)).toBeNull();
+    expect(groupForDose(0.05, 1, 1, 0)).toBeNull();
   });
 });
 
@@ -128,6 +150,9 @@ describe("gain reference", () => {
       "K3_gain.tiff",
       "CountRef-gain-ref.MRC",
     ]);
+    // the one the movie names comes first
+    expect(gainCandidates(entries, undefined, "K3_gain.tiff")[0]!.name).toBe("K3_gain.tiff");
+    expect(gainCandidates(entries, undefined, "absent.gain")).toHaveLength(4);
   });
 });
 

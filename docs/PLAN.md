@@ -390,13 +390,14 @@ Critères d'acceptation :
 
 **Avancement de M4 (10 novembre 2026) : première tranche faite.** Les quatre critères d'acceptation passent ; les pointés et les galeries restent à faire. La décision de conception est dans l'[ADR 006](adr/006-traitements-cote-serveur.md).
 
-Fait (852 tests côté backend, 45 tests unitaires et 17 tests de bout en bout côté interface) :
+Fait (852 tests côté backend, 48 tests unitaires et 18 tests de bout en bout côté interface) :
 - **Filtres en Å** (`proc/fourier.py`) : passe-bas, passe-haut et passe-bande gaussiens, gain ½ à la coupure. L'image est prolongée en miroir avant la transformée, ce qui corrige le mélange des bords de l'ancien CryoViewer (CV-18). Le passe-haut conserve la moyenne ; les pixels non carrés sont pris en compte ; les NaN et Inf sont remis en place après le filtre.
 - **Moyenne de frames** sur une plage, accumulée en `float64`.
 - **Spectre de puissance** : périodogramme moyenné sur des tuiles de 512 pixels, moyenne radiale. Dans l'interface : anneaux de résolution en Å, anneau de la glace à 3,7 Å, résolution sous le curseur, agrandissement du centre.
 - **Gain** (`cryo/gain.py`) : référence multiplicative ou image de coups à inverser, pixels défectueux comblés par la médiane de leurs voisins valides, référence plus fine ou plus grossière que l'image d'un facteur entier, **vérification des huit orientations** sur le film.
 - **Chaîne de traitement côté serveur**, dans un ordre fixe : moyenne, gain, filtres, puis découpe et binning. Le résultat en pleine résolution est mis en cache ; la clé contient tous les paramètres et l'identité du fichier de gain.
-- **Panneau Cryo** : préréglages de passe-bas, passe-haut, moyenne de frames, fractions EER par frame, choix du gain parmi les fichiers voisins avec correction de l'orientation en un clic. Tous les réglages sont dans le lien.
+- **Panneau Cryo** : préréglages de passe-bas, passe-haut, moyenne de frames, fractions EER par frame (à la main, ou calculées pour environ 1 e/Å² par frame à partir de la dose du film et de la taille de pixel), choix du gain parmi les fichiers voisins avec correction de l'orientation en un clic. Tous les réglages sont dans le lien.
+- **Valeur sous le curseur** : elle suit maintenant le plan affiché même quand la souris ne bouge pas (filtre, moyenne, lecteur). Elle restait auparavant celle du plan précédent.
 
 Critères d'acceptation :
 
@@ -411,14 +412,14 @@ Temps mesurés sur une image 4096 × 4096 (un cœur) : passe-bas 0,7 s, spectre 
 
 Reste à faire dans M4 :
 - Superposition des pointés (STAR, `.cs`, `.box`, `.cbox`) ; galeries de particules et de classes 2D.
-- Regroupement EER automatique par dose (environ 1 e/Å² par frame) : le réglage manuel existe, pas le calcul à partir de la dose.
 - Somme pondérée par la dose (elle demande des frames alignées) ; binning dans Fourier (le binning reste une moyenne de blocs).
 - La liste de défauts du tag 65100 des fichiers `.gain` n'est pas lue : seuls les pixels de gain nul sont traités comme défauts.
 
 Écarts et limites :
 - **La moyenne de frames est une fenêtre glissante** (N frames à partir de la frame courante) plutôt qu'une plage fixe. Elle couvre le cas « frames 3 à 7 » et permet de lire un film en moyenne glissante.
 - **L'orientation du gain n'est jamais corrigée d'office** : le serveur mesure, l'interface montre, l'utilisateur corrige. Si la marge entre les deux meilleures orientations est inférieure à 2 % (trop peu de dose, gain sans motif), la vérification est déclarée non concluante.
-- **Recherche du gain** : fichiers dont le nom contient « gain », dans le dossier du film et le dossier parent, parmi les 1 000 premières entrées. Le nom donné par le XML d'EPU (`EerGainReference`) sera exploité avec le parseur EPU de M3. En attendant, un gain rangé ailleurs se désigne par le lien (`gain=<chemin logique>`).
+- **Recherche du gain** : fichiers dont le nom contient « gain », dans le dossier du film et le dossier parent, parmi les 1 000 premières entrées. Quand le film EER nomme sa référence dans ses métadonnées (`eerGainReference`), ce fichier est proposé en premier. Un gain rangé ailleurs se désigne par le lien (`gain=<chemin logique>`) ; la recherche à partir du XML d'EPU viendra avec le parseur de M3.
+- **Regroupement par dose** : il demande la dose par fraction (métadonnées du film) et la taille de pixel, que l'EER ne contient pas et qu'il faut donc saisir.
 - **Un gain n'est conservé d'un fichier au suivant** que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
 - **Aucun essai sur de vraies données.** Les conventions (gain `.gain` multiplicatif, sans retournement) viennent de l'étude et de RELION ; elles sont à confirmer sur un film et un gain du Falcon du labo. C'est le premier essai à faire.
 - **L'ancien CryoViewer peut être éteint** : les deux fonctions qui le retenaient (passe-bas en Å, moyenne de frames) sont dans imageBio. À faire après un essai sur vos fichiers.

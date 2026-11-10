@@ -8,6 +8,7 @@ import {
   formatResolution,
   gainCandidates,
   gainOf,
+  groupForDose,
   LOWPASS_PRESETS,
   ORIENTATION_LABELS,
 } from "../viewer/cryo";
@@ -55,11 +56,13 @@ interface GainProps {
   options: ReaderOptions;
   cryo: CryoSettings;
   onChange: (patch: Partial<CryoSettings>) => void;
+  /** Name of the gain file given by the movie itself (EER acquisition metadata), if any. */
+  named: string | null;
 }
 
 /** Choice of a gain reference among the files next to the movie, and the check of its
  *  orientation: nothing in the files says how a reference is turned relative to the frames. */
-function GainSection({ path, etag, options, cryo, onChange }: GainProps) {
+function GainSection({ path, etag, options, cryo, onChange, named }: GainProps) {
   const [candidates, setCandidates] = useState<DirEntry[]>([]);
   const [check, setCheck] = useState<GainCheck | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -71,9 +74,9 @@ function GainSection({ path, etag, options, cryo, onChange }: GainProps) {
     const controller = new AbortController();
     const dirs = dirname(dir) ? [dir, dirname(dir)] : [dir];
     Promise.all(dirs.map((d) => api.list(d, 0, 1000, controller.signal).then((l) => l.entries, () => [])))
-      .then((lists) => !controller.signal.aborted && setCandidates(gainCandidates(lists.flat(), path)));
+      .then((lists) => !controller.signal.aborted && setCandidates(gainCandidates(lists.flat(), path, named ?? undefined)));
     return () => controller.abort();
-  }, [dir, path]);
+  }, [dir, path, named]);
 
   useEffect(() => {
     setCheck(null);
@@ -129,7 +132,10 @@ function GainSection({ path, etag, options, cryo, onChange }: GainProps) {
         onChange={(e) => onChange({ gain: e.target.value || null, gainOrient: 0, gainInvert: false })}>
         <option value="">Aucune</option>
         {candidates.map((c) => (
-          <option key={c.path} value={c.path}>{dirname(c.path) === dir ? c.name : `../${c.name}`}</option>
+          <option key={c.path} value={c.path}>
+            {dirname(c.path) === dir ? c.name : `../${c.name}`}
+            {c.name === named ? " (nommé par le film)" : ""}
+          </option>
         ))}
         {cryo.gain && !known && <option value={cryo.gain}>{cryo.gain.slice(cryo.gain.lastIndexOf("/") + 1)}</option>}
       </select>
@@ -177,6 +183,19 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
   const fractions = typeof info.metadata.n_fractions === "number" ? info.metadata.n_fractions : null;
   const group = typeof info.metadata.group === "number" ? info.metadata.group : null;
   const custom = cryo.lowpass !== null && !LOWPASS_PRESETS.includes(cryo.lowpass);
+  const setGroup = (v: number | null) => {
+    const { group: _dropped, ...rest } = options;
+    onOptions(v === null ? rest : { ...rest, group: v });
+  };
+  // dose of one fraction, in electrons per detector pixel, when the movie gives it
+  const dose = info.metadata.dose_per_fraction as { value?: unknown; unit?: unknown } | null | undefined;
+  const sampling = typeof info.metadata.sampling === "number" ? info.metadata.sampling : 1;
+  const doseGroup =
+    dose && typeof dose.value === "number" && dose.unit === "e/pixel" && apix && fractions !== null
+      ? groupForDose(dose.value, apix, sampling, fractions)
+      : null;
+  const acquisition = info.metadata.acquisition as Record<string, unknown> | null | undefined;
+  const namedGain = typeof acquisition?.eerGainReference === "string" ? acquisition.eerGainReference : null;
 
   return (
     <section className="panel" data-testid="cryo">
@@ -234,17 +253,20 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
           <div className="buttons tight">
             <label className="unit">
               <NumberField value={group} label="Fractions sommées par frame" testid="eer-group" integer min={1} max={fractions}
-                onCommit={(v) => {
-                  const { group: _dropped, ...rest } = options;
-                  onOptions(v === null ? rest : { ...rest, group: v });
-                }} />
+                onCommit={setGroup} />
               / {fractions}
             </label>
+            <button data-testid="eer-dose" disabled={doseGroup === null} onClick={() => setGroup(doseGroup)}
+              title={doseGroup === null
+                ? "Demande la dose par fraction (métadonnées du film) et la taille de pixel"
+                : `Environ 1 électron par Å² dans chaque frame : ${doseGroup} fraction${doseGroup > 1 ? "s" : ""}`}>
+              ≈ 1 e⁻/Å²
+            </button>
           </div>
         </>
       )}
 
-      <GainSection path={path} etag={etag} options={options} cryo={cryo} onChange={onChange} />
+      <GainSection path={path} etag={etag} options={options} cryo={cryo} onChange={onChange} named={namedGain} />
 
       <div className="buttons">
         <button className={cryo.spectrum ? "on" : ""} data-testid="spectrum-toggle" title="Spectre de puissance (P)"

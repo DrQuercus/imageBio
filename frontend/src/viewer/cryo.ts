@@ -56,6 +56,23 @@ export function averageEnd(t: number, average: number, sizeT: number): number | 
   return end > t ? end : null;
 }
 
+/** Number of EER fractions to sum per frame for about `target` e/Å² in each frame.
+ *
+ *  `dosePerFraction` is in electrons per detector pixel, `apix` the size in Å of a pixel of the
+ *  image as it is rendered and `sampling` the rendering factor (2 or 4 in super-resolution: a
+ *  detector pixel is then `sampling` image pixels wide). Null when the dose cannot be used. */
+export function groupForDose(
+  dosePerFraction: number,
+  apix: number,
+  sampling: number,
+  fractions: number,
+  target = 1,
+): number | null {
+  const perSquareAngstrom = dosePerFraction / (apix * sampling) ** 2;
+  if (!(perSquareAngstrom > 0) || !Number.isFinite(perSquareAngstrom) || !(fractions >= 1)) return null;
+  return Math.min(fractions, Math.max(1, Math.round(target / perSquareAngstrom)));
+}
+
 /** Why the filters asked for cannot be applied, as a message for the user, or null. */
 export function filterProblem(cryo: CryoSettings, apix: number | null): string | null {
   if (cryo.lowpass === null && cryo.highpass === null) return null;
@@ -121,8 +138,10 @@ export function keepsGain(previous: string | null, next: string): boolean {
 
 /** The files of a listing that look like gain references: "gain" in the name (.gain,
  *  *_gain.tiff, *-gain-ref.MRC) and a format that can be read. */
-export function gainCandidates(entries: DirEntry[], except?: string): DirEntry[] {
-  return entries.filter((e) => e.kind === "file" && e.supported && e.path !== except && /gain/i.test(e.name));
+export function gainCandidates(entries: DirEntry[], except?: string, named?: string): DirEntry[] {
+  const found = entries.filter((e) => e.kind === "file" && e.supported && e.path !== except && /gain/i.test(e.name));
+  // the reference the movie itself names (EER acquisition metadata) comes first
+  return named ? [...found.filter((e) => e.name === named), ...found.filter((e) => e.name !== named)] : found;
 }
 
 // ── power spectrum ───────────────────────────────────────────────────────────
