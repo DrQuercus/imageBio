@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cryoviewer:
+    name: CryoViewer (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
+    defaults:
+      run:
+        working-directory: legacy/cryoviewer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -r requirements.txt pytest mrcfile
+      - run: pytest -q
+
+  cryoviewer-live:
+    name: CryoViewer Live
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: legacy/cryoviewer-live
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: legacy/cryoviewer-live/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

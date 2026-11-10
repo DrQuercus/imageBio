@@ -54,6 +54,8 @@ Audit complet : [`audit/AUDIT.md`](audit/AUDIT.md). Il y a 43 constats. Chaque c
 **Lecture de fichiers arbitraires** (`server.js:528`) : `/api/image-data?path=…` et `/api/thumbnail?path=…` servent n'importe quel fichier lisible. Le vérificateur l'a reproduit.
 
 > **À faire tout de suite, avant même M0 :** couper le service, ou le restreindre par pare-feu à `127.0.0.1` et y accéder par tunnel SSH. Ensuite, appliquer le correctif minimal : supprimer le repli `exec(df …)` et ne garder que `fs.statfs`, ou `execFile('df', ['-B1', '--', p])` sans shell.
+>
+> **Mise à jour (10 novembre 2026) :** corrigé dans `legacy/cryoviewer-live/` (voir l'avancement de M0, §4). Il reste à **déployer** la nouvelle version sur le serveur du labo.
 
 ### 2.2 CryoViewer : principaux problèmes confirmés
 
@@ -212,6 +214,35 @@ Chaque jalon dure de 1 à 7 sessions. Chaque session se termine avec la CI au ve
 - Deux onglets fonctionnent en même temps sur CryoViewer.
 - Un fichier nommé `<img src=x onerror=alert(1)>.mrc` s'affiche comme du texte.
 - Le fichier EER synthétique s'affiche avec la vraie somme des événements.
+
+**Avancement de M0 (10 novembre 2026) : fait, sauf les points listés plus bas.**
+
+Fait :
+- Sources décompressées dans `legacy/` (archives retirées, historique git conservé), `.gitignore`, CI GitHub Actions (`.github/workflows/ci.yml` : pytest sur Python 3.11 et 3.13, `npm ci` + tests + build pour Live).
+- **Live** (`security.js`, `server.js`, 17 tests `npm test`) :
+  - plus aucun appel au shell ; l'injection a été rejouée contre l'ancien serveur (commande exécutée) et contre le nouveau (refusée) ;
+  - racines de données `CVL_ROOTS` ; motifs confinés ; fichiers servis seulement s'ils appartiennent à la surveillance en cours et restent dans une racine (liens symboliques compris) ;
+  - écoute sur `127.0.0.1` par défaut ; refus de démarrer sur le réseau sans authentification (Basic auth intégrée en option) ;
+  - contrôle du `Host` (DNS rebinding) et de l'`Origin` du WebSocket, compatible avec un reverse proxy (`CVL_ALLOWED_HOSTS`) ;
+  - MRC invalide, tronqué ou non pris en charge → HTTP 422 ; cache de vignettes indexé sur taille et mtime, et borné en octets ; nouvelle surveillance limitée à une toutes les 2 s ;
+  - une revue de sécurité indépendante a été faite ; ses points ont été corrigés ou documentés comme limites connues dans le README de Live.
+- **CryoViewer** (`server.py`, 35 tests `pytest`, vérification dans Chromium avec Playwright) :
+  - serveur multi-thread avec délai d'expiration et verrou par fichier ;
+  - options `--bind`, `--root`, `--auth-file`, `--allowed-host` ; refus d'écouter sur le réseau sans racines ni authentification ; contrôle du `Host` ; plus de traceback renvoyé au client ;
+  - **vrai décodage EER** (somme des fractions par groupes, 50 frames au plus), comparé à la vérité terrain d'un EER synthétique ;
+  - liens symboliques (fichiers RELION) affichables ; un lien cassé ne casse plus la liste ; les liens qui sortent des racines sont masqués et refusés ;
+  - plage de moyenne réellement utilisée (1-based, inclusive) ; les deux boutons Avg sont synchronisés ;
+  - images avec NaN/Inf affichables ; histogramme et curseurs sur une plage robuste (0,1-99,9 %) ;
+  - « la dernière requête gagne » et le lecteur attend chaque frame (au plus une requête en vol, mesuré) ; une erreur de chargement n'est plus masquée par « Loaded » ;
+  - plus d'`innerHTML` avec des noms de fichiers (XSS) ; la liste « Opened » n'est plus effacée ; raccourcis clavier actifs après usage d'un curseur ;
+  - upload en flux vers un dossier temporaire, plafonné, nettoyé, avec contrôle d'origine ; cache de frames borné en octets, 8 fichiers ouverts au plus ;
+  - taille de pixel inconnue signalée (« unknown ») ; polices système (plus d'appel à Google Fonts) ; le chemin passé en ligne de commande est bien ouvert.
+
+Reste à faire (reporté) :
+- Live : la taille d'un fichier listé alors qu'il était encore en cours d'écriture n'est pas mise à jour (pas de gestionnaire `change`), et il compte dans le taux dès sa première apparition. La vignette et l'aperçu, eux, se régénèrent (422 tant que le fichier est incomplet). Corrigé par conception en M3.
+- Live : faire tourner le service sous un compte dédié, et choisir l'option de déploiement (proxy ou Basic auth). C'est à faire sur le serveur, voir le README de Live.
+- CryoViewer : défauts de lecture laissés pour M1 (taille de pixel TIFF et extensions FEI, modes 101/16, drapeau IMOD, TIFF palette, LA et hyperstacks) et transport PNG/base64 laissé pour M2 (la valeur sous le curseur reste l'octet affiché).
+- `deploy/Caddyfile` : remplacé pour l'instant par les exemples Caddy et nginx du README de Live.
 
 ### M1 : cœur du backend `imagebio` (3-4 sessions)
 
@@ -460,9 +491,9 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Premier message suggéré pour la session M0 :**
+**Premier message suggéré pour la prochaine session (M1) :**
 
-> Lis `docs/PLAN.md` (sections 2, 3.3 et 4/M0) et `docs/audit/AUDIT.md`. Réalise le jalon M0 : décompresse les deux archives dans `legacy/` (sans `node_modules`/`dist`), mets en place la CI, puis applique les correctifs de sécurité et d'exactitude listés pour CryoViewer Live et CryoViewer, avec un test de non-régression par correctif. Les critères d'acceptation de M0 doivent tous passer. Commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4/M1, ainsi que l'avancement de M0) et `docs/audit/AUDIT.md`. Réalise le jalon M1 : crée le paquet `backend/` (`imagebio`), le générateur de fichiers de test, les lecteurs du palier 1 (MRC, TIFF, EER réel) comparés bit à bit à `mrcfile`/`tifffile`, le cache borné en octets, le confinement des racines et l'API des plans binaires. Tous les critères d'acceptation de M1 doivent passer. Commits atomiques, puis pousse la branche.
 
 ---
 
