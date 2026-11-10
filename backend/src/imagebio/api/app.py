@@ -46,7 +46,8 @@ from imagebio.core.errors import ImageBioError, InvalidRequestError
 from imagebio.core.model import FileId
 from imagebio.fs.roots import MAX_PATH_LENGTH, ResolvedPath, RootSet, User
 from imagebio.io.registry import Registry, default_registry
-from imagebio.service.planes import MAX_BIN, PlaneService
+from imagebio.proc.fourier import radial_profile
+from imagebio.service.planes import MAX_BIN, PlaneService, Processing
 
 __all__ = ["create_app"]
 
@@ -59,6 +60,10 @@ _INT: Final = re.compile(r"-?\d{1,18}")
 _FLOAT: Final = re.compile(r"-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
 _COMPRESS_PROBE: Final = 256 * 1024
 _CACHE_CONTROL: Final = "private, no-cache"
+_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix"})
+_STATS_PARAMS: Final = frozenset({"path", "t", "c", "z"}) | _PROCESSING_PARAMS
+_PLANE_PARAMS: Final = _STATS_PARAMS | {"bin", "x", "y", "w", "h"}
+_SPECTRUM_PARAMS: Final = frozenset({"path", "t", "c", "z", "t_end", "tile"})
 #: Where "npm run build" (frontend/) puts the web application.
 STATIC_DIR: Final = Path(__file__).resolve().parent.parent / "static"
 #: The page only loads its own scripts and styles and only talks to this server.
@@ -263,6 +268,22 @@ def create_app(
         }
         return Response(json.dumps(body, allow_nan=False), media_type="application/json", headers=headers)
 
+    def array_response(request: Request, array: Any, headers: dict[str, str]) -> Response:
+        """A 2-D array as raw little-endian bytes, compressed when it pays off."""
+        if sys.byteorder == "big":
+            array = array.astype(array.dtype.newbyteorder("<"))
+        body, encoding = _encode(
+            np.ascontiguousarray(array).data.cast("B"), request.headers.get("accept-encoding", "")
+        )
+        headers = {**headers, "X-Dtype": array.dtype.name, "X-Shape": f"{array.shape[0]},{array.shape[1]}"}
+        if encoding:
+            headers["Content-Encoding"] = encoding
+        return Response(
+            bytes(body) if isinstance(body, memoryview) else body,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
     @app.get("/api/datasets/plane")
     def dataset_plane(
         request: Request,
@@ -275,40 +296,32 @@ def create_app(
         y: int | None = Query(None, ge=0),
         w: int | None = Query(None, ge=1),
         h: int | None = Query(None, ge=1),
+        t_end: int | None = Query(None, ge=0),
+        lp: float | None = Query(None, gt=0),
+        hp: float | None = Query(None, gt=0),
+        apix: float | None = Query(None, gt=0),
     ) -> Response:
-        options = _check_query(request, frozenset({"path", "t", "c", "z", "bin", "x", "y", "w", "h"}))
+        options = _check_query(request, _PLANE_PARAMS)
         resolved = file_of(request, path)
         given = [v is not None for v in (x, y, w, h)]
         if any(given) and not all(given):
             raise InvalidRequestError("a region needs x, y, w and h together")
         region = (x, y, w, h) if all(given) else None
-        etag = _etag(FileId.of(resolved.real), "plane", options_key(options), t, c, z, bin, region)
+        proc = Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix)
+        tag = ("plane", options_key(options), t, c, z, bin, region, proc.key())
+        etag = _etag(FileId.of(resolved.real), *tag)
         base_headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL, "Vary": "Accept-Encoding"}
         if _not_modified(request, etag):
             return Response(status_code=304, headers=base_headers)
-        result = service.plane(resolved.real, t, c, z, bin=bin, region=region, options=options)  # type: ignore[arg-type]
-        array = result.array
-        if sys.byteorder == "big":  # little-endian on the wire, whatever the server
-            array = array.astype(array.dtype.newbyteorder("<"))
-        body, encoding = _encode(
-            np.ascontiguousarray(array).data.cast("B"), request.headers.get("accept-encoding", "")
-        )
+        result = service.plane(resolved.real, t, c, z, bin=bin, region=region, options=options, proc=proc)  # type: ignore[arg-type]
         headers = {
             **base_headers,
-            "ETag": _etag(result.file_id, "plane", options_key(options), t, c, z, bin, region),
-            "X-Dtype": array.dtype.name,
-            "X-Shape": f"{array.shape[0]},{array.shape[1]}",
+            "ETag": _etag(result.file_id, *tag),
             "X-Bin": str(result.bin),
             "X-Region": ",".join(map(str, result.region)),
             "X-Pixel-Size": json.dumps(result.calibration.x.to_json(), ensure_ascii=True),
         }
-        if encoding:
-            headers["Content-Encoding"] = encoding
-        return Response(
-            bytes(body) if isinstance(body, memoryview) else body,
-            media_type="application/octet-stream",
-            headers=headers,
-        )
+        return array_response(request, result.array, headers)
 
     @app.get("/api/datasets/stats")
     def dataset_stats(
@@ -317,17 +330,67 @@ def create_app(
         t: int = Query(0, ge=0),
         c: int = Query(0, ge=0),
         z: int = Query(0, ge=0),
+        t_end: int | None = Query(None, ge=0),
+        lp: float | None = Query(None, gt=0),
+        hp: float | None = Query(None, gt=0),
+        apix: float | None = Query(None, gt=0),
     ) -> Response:
-        options = _check_query(request, frozenset({"path", "t", "c", "z"}))
+        options = _check_query(request, _STATS_PARAMS)
         resolved = file_of(request, path)
-        stats, file_id = service.stats(resolved.real, t, c, z, options)
-        etag = _etag(file_id, "stats", options_key(options), t, c, z)
+        proc = Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix)
+        stats, file_id = service.stats(resolved.real, t, c, z, options, proc)
+        etag = _etag(file_id, "stats", options_key(options), t, c, z, proc.key())
         headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
         if _not_modified(request, etag):
             return Response(status_code=304, headers=headers)
         return Response(
             json.dumps(stats.to_json(), allow_nan=False), media_type="application/json", headers=headers
         )
+
+    def spectrum_of(
+        request: Request, path: str, t: int, c: int, z: int, t_end: int | None, tile: int
+    ) -> tuple[Any, str]:
+        options = _check_query(request, _SPECTRUM_PARAMS)
+        resolved = file_of(request, path)
+        power, file_id = service.spectrum(resolved.real, t, c, z, t_end=t_end, tile=tile, options=options)
+        return power, _etag(file_id, "spectrum", options_key(options), t, c, z, t_end, tile)
+
+    @app.get("/api/datasets/spectrum")
+    def dataset_spectrum(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        t: int = Query(0, ge=0),
+        c: int = Query(0, ge=0),
+        z: int = Query(0, ge=0),
+        t_end: int | None = Query(None, ge=0),
+        tile: int = Query(512, ge=16, le=2048),
+    ) -> Response:
+        """Power spectrum of a plane: a square float32 image, zero frequency at the centre.
+        A period of d Å lies at (side x Å-per-pixel / d) pixels from the centre."""
+        power, etag = spectrum_of(request, path, t, c, z, t_end, tile)
+        headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL, "Vary": "Accept-Encoding"}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        return array_response(request, power, headers)
+
+    @app.get("/api/datasets/spectrum/profile")
+    def dataset_spectrum_profile(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        t: int = Query(0, ge=0),
+        c: int = Query(0, ge=0),
+        z: int = Query(0, ge=0),
+        t_end: int | None = Query(None, ge=0),
+        tile: int = Query(512, ge=16, le=2048),
+    ) -> Response:
+        """Rotational average of the power spectrum: frequency (cycles per pixel) and power."""
+        power, etag = spectrum_of(request, path, t, c, z, t_end, tile)
+        headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        frequency, profile = radial_profile(power)
+        body = {"side": int(power.shape[0]), "frequency": frequency.tolist(), "power": profile.tolist()}
+        return Response(json.dumps(body, allow_nan=False), media_type="application/json", headers=headers)
 
     # ── web interface ────────────────────────────────────────────────────────
     index = static_dir / "index.html" if static_dir else None
