@@ -61,7 +61,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S", "B011"]
+"tests/**" = ["S", "B011", "E501"]  # tables of test cases read better on one line
 
 [tool.mypy]
 python_version = "3.11"

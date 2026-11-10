@@ -235,8 +235,12 @@ class DatasetPool:
                 ds.close()
 
     @contextlib.contextmanager
-    def lease(self, path: str | Path, options: Mapping[str, Any] | None = None) -> Iterator[Dataset]:
-        file_id = FileId.of(path)
+    def lease(
+        self, path: str | Path, options: Mapping[str, Any] | None = None, *, file_id: FileId | None = None
+    ) -> Iterator[Dataset]:
+        """Lease the dataset of ``path``. ``file_id`` lets a caller that already took the identity
+        of the file (for its own cache keys) lease exactly that version."""
+        file_id = file_id or FileId.of(path)
         key = (file_id, options_key(options))
         closing: list[Dataset] = []
         with self._lock:
