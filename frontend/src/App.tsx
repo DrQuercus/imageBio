@@ -23,7 +23,7 @@ interface Loaded {
   response: DatasetInfoResponse;
 }
 
-export function App() {
+export function App({ onLive }: { onLive: () => void }) {
   const initial = useMemo<LinkState>(() => parseLink(window.location.hash), []);
   const [me, setMe] = useState<Me | null>(null);
   const [path, setPath] = useState<string | null>(initial.path ?? null);
@@ -262,6 +262,10 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <span className="logo">imageBio</span>
+        <div className="group">
+          <button className="on" data-testid="mode-viewer">Visionneuse</button>
+          <button onClick={onLive} title="Suivre une session d'acquisition" data-testid="mode-live">Live</button>
+        </div>
         <div className="group">
           <button className={tool === "pan" ? "on" : ""} onClick={() => setTool("pan")} title="Déplacer (Échap)" data-testid="tool-pan">Déplacer</button>
           <button className={tool === "ruler" ? "on" : ""} onClick={() => setTool("ruler")} title="Règle (R)" data-testid="tool-ruler">Règle</button>

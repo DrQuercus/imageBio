@@ -21,6 +21,7 @@ Settings come from a TOML file (``imagebio serve --config imagebio.toml``)::
     [live]
     state_dir = "/var/lib/imagebio" # index of the watched sessions and thumbnails (SQLite)
     interval = 5                    # seconds between two scans of a watched directory
+    min_stable = 10                 # a file must keep its size this long to be complete
     # scan = false                  # serve the index without scanning (a read-only instance)
 
     [[roots]]
@@ -109,6 +110,8 @@ class Settings:
     #: Directory of the live index; None: the per-user state directory (see ``live_state_dir``).
     state_dir: Path | None = None
     live_interval_s: float = 5.0
+    #: A file must keep its size and date for this long, over two scans, to be complete.
+    live_min_stable_s: float = 10.0
     #: False: watched directories are not scanned by this process.
     live_scan: bool = True
     thumb_cache_bytes: int = 2 * 2**30
@@ -130,6 +133,8 @@ class Settings:
             raise ConfigError("cache sizes must be positive")
         if not 0.5 <= self.live_interval_s <= 3600 or self.thumb_cache_bytes < 0:
             raise ConfigError("live.interval must be between 0.5 and 3600 seconds")
+        if not 1 <= self.live_min_stable_s <= 3600:
+            raise ConfigError("live.min_stable must be between 1 and 3600 seconds")
         # Without authentication, only loopback is acceptable. In "proxy" mode the identity
         # headers are trusted, so the reverse proxy must be the only possible client: loopback,
         # or a network private to the proxy that the operator explicitly vouches for.
@@ -185,7 +190,7 @@ class Settings:
         server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
-        live = section("live", {"state_dir", "interval", "scan"})
+        live = section("live", {"state_dir", "interval", "min_stable", "scan"})
         raw_roots = data.get("roots", [])
         if not isinstance(raw_roots, list):
             raise ConfigError("[[roots]] must be an array of tables")
@@ -215,6 +220,7 @@ class Settings:
             max_response_pixels=int(cache.get("max_response_pixels", defaults.max_response_pixels)),
             state_dir=Path(str(live["state_dir"])) if "state_dir" in live else None,
             live_interval_s=float(live.get("interval", defaults.live_interval_s)),
+            live_min_stable_s=float(live.get("min_stable", defaults.live_min_stable_s)),
             live_scan=bool(live.get("scan", True)),
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
         )

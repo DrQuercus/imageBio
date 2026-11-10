@@ -153,3 +153,84 @@ export interface SpectrumProfile {
   /** null where the power overflowed. */
   power: (number | null)[];
 }
+
+// ── Live mode (backend/src/imagebio/live/service.py) ─────────────────────────
+
+/** "User follows directory": kept by the server across restarts. */
+export interface LiveWatch {
+  id: number;
+  /** Logical path of the watched directory. */
+  path: string;
+  active: boolean;
+  created_at: number;
+  stopped_at: number | null;
+}
+
+export type MemberState = "pending" | "complete" | "deleted";
+
+/** One exposure of a session: the image, its movie, preview and metadata together. */
+export interface LiveItem {
+  id: number;
+  /** Number of the last change to this exposure: clients ask for what changed since a number. */
+  seq: number;
+  name: string;
+  dir: string;
+  /** Logical path of the file a tile is drawn from; opens in the viewer. */
+  path: string;
+  category: "data" | "image" | "gridsquare" | "foilhole" | "atlas";
+  state: "incoming" | "complete" | "deleted";
+  role: "image" | "movie" | "preview";
+  size: number | null;
+  /** Acquisition time, seconds since the epoch, and where it comes from. */
+  time: number | null;
+  time_source: "xml" | "mdoc" | "name" | "mtime" | null;
+  first_seen: number;
+  completed_at: number | null;
+  /** False: indexed from a directory at rest, without the completeness test. */
+  verified: boolean;
+  note: string | null;
+  members: Partial<Record<"image" | "movie" | "preview" | "xml" | "mdoc", MemberState>>;
+  meta: {
+    epu?: { pixel_size?: number; dose?: number; applied_defocus?: number; [key: string]: unknown };
+    mdoc?: { tilt_angle?: number; dose?: number; defocus?: number; [key: string]: unknown };
+    image?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
+    movie?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
+  };
+}
+
+export interface LivePage {
+  items: LiveItem[];
+  /** Ask for the next changes with since = seq. */
+  seq: number;
+  more: boolean;
+  head: number;
+}
+
+export interface LiveSummary {
+  watch: LiveWatch;
+  /** Server time, seconds since the epoch: "how long ago" is computed against it. */
+  now: number;
+  seq: number;
+  scanner: {
+    running: boolean;
+    cycle_at: number | null;
+    full_at: number | null;
+    cycle_ms: number | null;
+    error: string | null;
+    /** Files being followed until they are complete. */
+    pending: number;
+  };
+  counts: Record<string, Partial<Record<"incoming" | "complete", number>>>;
+  acquired: number;
+  incoming: number;
+  /** Arrivals while watching, per hour. */
+  rate: { last_5_min: number; last_hour: number };
+  last: { name: string; time: number; completed_at: number | null } | null;
+  disk: { total: number; free: number; percent: number | null } | null;
+}
+
+export interface LiveHistory {
+  bucket: number;
+  /** [start of the bucket (s), acquisitions]. Empty buckets are left out. */
+  counts: [number, number][];
+}

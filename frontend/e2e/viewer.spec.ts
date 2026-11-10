@@ -188,7 +188,7 @@ test("colour images and hyperstacks", async ({ page }) => {
 
 test("browsing directories and keyboard shortcuts", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("browser").getByRole("button", { name: "session" }).click();
+  await page.getByTestId("browser").getByText("session", { exact: true }).click(); // not "epu_session"
   await page.getByTestId("browser").getByRole("button", { name: "inside.mrc" }).click();
   await ready(page, "demo/session/inside.mrc");
   await expect(page.getByTestId("zoom")).toHaveText("6400 %"); // an 8 x 8 image: the maximum zoom

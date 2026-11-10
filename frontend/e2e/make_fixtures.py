@@ -1,11 +1,15 @@
 """Generate the data served to the end-to-end tests: python make_fixtures.py OUTPUT_DIR.
 
-Every file has values that a test can predict from the pixel position.
+Every file has values that a test can predict from the pixel position. The directory also gets
+the configuration of the test server (``imagebio.toml``): the same data root as the standalone
+mode would give, and a live monitor that scans every second so that tests need not wait.
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
+import time
 from pathlib import Path
 
 import mrcfile
@@ -17,6 +21,11 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend" / "tests"))
 from fixtures.eer import write_eer  # noqa: E402
 
+from imagebio.live.simulator import MicroscopeSim, SimSettings  # noqa: E402
+
+#: Exposures of the finished session the Live tests open.
+LIVE_EXPOSURES = 120
+
 
 def write_mrc(path: Path, data: np.ndarray, apix: float | None, stack: bool = False) -> None:
     with mrcfile.new(path, overwrite=True) as m:
@@ -27,9 +36,31 @@ def write_mrc(path: Path, data: np.ndarray, apix: float | None, stack: bool = Fa
             m.voxel_size = apix
 
 
+def write_session(directory: Path) -> None:
+    """An EPU-like session that ended two days ago: one exposure every six seconds."""
+    shutil.rmtree(directory, ignore_errors=True)
+    start = time.time() - 2 * 86400
+    sim = MicroscopeSim(directory, SimSettings(rate_per_hour=600, pause_probability=0.0, seed=11))
+    second = 0
+    while len(sim.exposures) < LIVE_EXPOSURES:
+        sim.step(start + second)
+        second += 1
+    sim.stop()
+    while sim.busy:
+        sim.step(start + second)
+        second += 1
+
+
 def main(out: Path) -> None:
+    out = out.resolve()
     demo = out / "demo"
     (demo / "session").mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(out / "state", ignore_errors=True)  # no watch left over from a previous run
+    (out / "imagebio.toml").write_text(
+        f'[live]\nstate_dir = "{out / "state"}"\ninterval = 1\nmin_stable = 2\n\n'
+        f'[[roots]]\nname = "demo"\npath = "{demo}"\n'
+    )
+    write_session(demo / "epu_session")
     rng = np.random.default_rng(42)
     y, x = np.mgrid[0:48, 0:64]
 

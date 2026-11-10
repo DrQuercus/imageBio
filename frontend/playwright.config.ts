@@ -16,7 +16,7 @@ export default defineConfig({
     trace: "off",
   },
   webServer: {
-    command: `python3 e2e/make_fixtures.py .e2e-data && python3 -m imagebio.api.cli serve --local .e2e-data/demo --port ${PORT}`,
+    command: `python3 e2e/make_fixtures.py .e2e-data && python3 -m imagebio.api.cli serve --config .e2e-data/imagebio.toml --port ${PORT}`,
     url: `http://127.0.0.1:${PORT}/healthz`,
     reuseExistingServer: false,
     timeout: 60_000,

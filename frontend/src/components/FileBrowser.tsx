@@ -6,6 +6,8 @@ interface Props {
   current: string | null;
   onOpen: (path: string) => void;
   onError: (message: string) => void;
+  /** Told which directory is listed (null: the list of roots). */
+  onDirectory?: (path: string | null) => void;
 }
 
 const PAGE = 500;
@@ -22,7 +24,7 @@ function formatSize(bytes: number): string {
 }
 
 /** Server-side file browser: roots, then directories. File names are rendered as text. */
-export function FileBrowser({ current, onOpen, onError }: Props) {
+export function FileBrowser({ current, onOpen, onError, onDirectory }: Props) {
   const [roots, setRoots] = useState<{ name: string; available: boolean }[] | null>(null);
   const [dir, setDir] = useState<string | null>(() => (current?.includes("/") ? current.replace(/\/[^/]*$/, "") : null));
   const [listing, setListing] = useState<DirListing | null>(null);
@@ -63,6 +65,9 @@ export function FileBrowser({ current, onOpen, onError }: Props) {
       .finally(() => setLoading(false));
     return () => controller.abort();
   }, [dir, onError]);
+
+  const listed = listing?.path ?? null;
+  useEffect(() => onDirectory?.(dir === null ? null : listed), [onDirectory, dir, listed]);
 
   const more = () => {
     if (!listing || dir === null) return;

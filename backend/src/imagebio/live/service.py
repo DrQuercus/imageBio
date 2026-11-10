@@ -99,7 +99,7 @@ class LiveService:
         self._settings = settings
         self._registry = registry
         self._planes = planes
-        self._scan_settings = scan_settings or ScanSettings()
+        self._scan_settings = scan_settings or ScanSettings(min_stable_s=settings.live_min_stable_s)
         #: Source of "now" for watches, rates and background scans; tests replace it.
         self.clock = clock
         self._lock = threading.RLock()

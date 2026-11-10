@@ -6,6 +6,10 @@ import type {
   DirListing,
   Dtype,
   GainCheck,
+  LiveHistory,
+  LivePage,
+  LiveSummary,
+  LiveWatch,
   Me,
   Plane,
   PlaneArray,
@@ -44,8 +48,8 @@ export function buildQuery(params: Params, options?: ReaderOptions): string {
   return q.toString();
 }
 
-async function request(url: string, signal?: AbortSignal): Promise<Response> {
-  const response = await fetch(url, { signal, headers: { Accept: "application/json, application/octet-stream" } });
+async function request(url: string, signal?: AbortSignal, method: "GET" | "POST" | "DELETE" = "GET"): Promise<Response> {
+  const response = await fetch(url, { method, signal, headers: { Accept: "application/json, application/octet-stream" } });
   if (response.ok) return response;
   let code = "http_error";
   let message = `HTTP ${response.status}`;
@@ -62,8 +66,8 @@ async function request(url: string, signal?: AbortSignal): Promise<Response> {
   throw new ApiError(response.status, code, message);
 }
 
-async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
-  return (await (await request(url, signal)).json()) as T;
+async function getJson<T>(url: string, signal?: AbortSignal, method: "GET" | "POST" | "DELETE" = "GET"): Promise<T> {
+  return (await (await request(url, signal, method)).json()) as T;
 }
 
 const ARRAYS: Record<Dtype, { new (buffer: ArrayBuffer): PlaneArray; BYTES_PER_ELEMENT: number }> = {
@@ -158,4 +162,27 @@ export const api = {
     options?: ReaderOptions,
     signal?: AbortSignal,
   ) => getJson<GainCheck>(`/api/cryo/gain/check?${buildQuery({ path, ...gain }, options)}`, signal),
+
+  live: {
+    watches: (signal?: AbortSignal) =>
+      getJson<{ watches: LiveWatch[] }>("/api/live/watches", signal).then((r) => r.watches),
+
+    /** Watch a directory; watching it again returns the same watch. */
+    start: (path: string, signal?: AbortSignal) =>
+      getJson<LiveWatch>(`/api/live/watches?${buildQuery({ path })}`, signal, "POST"),
+
+    stop: (id: number, signal?: AbortSignal) => getJson<LiveWatch>(`/api/live/watches/${id}`, signal, "DELETE"),
+
+    summary: (id: number, signal?: AbortSignal) => getJson<LiveSummary>(`/api/live/watches/${id}`, signal),
+
+    /** Exposures that changed since sequence number `since`. */
+    items: (id: number, since: number, limit: number, signal?: AbortSignal) =>
+      getJson<LivePage>(`/api/live/watches/${id}/items?${buildQuery({ since, limit })}`, signal),
+
+    history: (id: number, bucket: number, signal?: AbortSignal) =>
+      getJson<LiveHistory>(`/api/live/watches/${id}/history?${buildQuery({ bucket })}`, signal),
+
+    /** Address of the thumbnail of a file, for an <img>. */
+    thumbUrl: (path: string, size = 256) => `/api/live/thumb?${buildQuery({ path, size })}`,
+  },
 };

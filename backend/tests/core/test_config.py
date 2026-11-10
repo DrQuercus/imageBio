@@ -68,6 +68,31 @@ path = "{tmp_path}"
     assert s.port == 9001 and s.auth_mode == "proxy" and s.plane_cache_bytes == 256 * 2**20
     assert s.allowed_hosts == {"imagebio.lab.example"}
     assert [(r.name, sorted(r.groups)) for r in s.roots] == [("glacios", ["cryoem"]), ("shared", [])]
+    # the live monitor has sensible defaults and a per-user place for its index
+    assert (s.live_interval_s, s.live_min_stable_s, s.live_scan, s.state_dir) == (5.0, 10.0, True, None)
+    assert s.live_state_dir.name == "imagebio" and s.live_state_dir.is_absolute()
+
+
+def test_live_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg = tmp_path / "imagebio.toml"
+    cfg.write_text(f"""
+[cache]
+thumb_bytes = "64MiB"
+[live]
+state_dir = "{tmp_path / "state"}"
+interval = 2
+min_stable = 6
+scan = false
+""")
+    s = Settings.load(cfg)
+    assert (s.live_interval_s, s.live_min_stable_s, s.live_scan) == (2.0, 6.0, False)
+    assert s.live_state_dir == tmp_path / "state" and s.thumb_cache_bytes == 64 * 2**20
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    assert Settings().live_state_dir == tmp_path / "xdg" / "imagebio"
+    for bad in ("[live]\ninterval = 0.1", "[live]\nmin_stable = 0", "[live]\npoll = 3"):
+        cfg.write_text(bad)
+        with pytest.raises(ConfigError):
+            Settings.load(cfg)
 
 
 @pytest.mark.parametrize(
