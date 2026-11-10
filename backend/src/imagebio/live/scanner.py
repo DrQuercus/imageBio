@@ -21,6 +21,7 @@ scanner reloads its memory from it; a restarted server does the same. Time is an
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -318,7 +319,7 @@ class Scanner:
     def _scan(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
         if report.full:
             listing = self._walk()
-            self._server_ns = max([self._server_ns, *(mtime for _, mtime, _ in listing)])
+            self._note_dates((mtime for _, mtime, _ in listing), now)
             seen: set[str] = set()
             for rel, mtime_ns, entries in listing:
                 seen.add(rel)
@@ -344,7 +345,7 @@ class Scanner:
                 if known is not None:
                     self._drop_dir(db, rel, report)
                 continue
-            self._server_ns = max(self._server_ns, st.st_mtime_ns)
+            self._note_dates((st.st_mtime_ns,), now)
             if known is not None and st.st_mtime_ns == known.mtime_ns:
                 continue
             try:
@@ -360,6 +361,13 @@ class Scanner:
                     and len(self._dirs) + len(queue) < self.settings.max_dirs
                 ):
                     queue.append(child)
+
+    def _note_dates(self, dates: Iterable[int], now: float) -> None:
+        """Advance what is known of the file server's clock: the most recent date seen in the
+        tree. A date far in this server's future is a mistake of whoever wrote it, not the
+        time: it must not make everything else look old."""
+        limit = int(now * _NS) + _DAY_NS
+        self._server_ns = max([self._server_ns, *(m for m in dates if m <= limit)])
 
     def _at_rest(self, mtime_ns: int, now: float) -> bool:
         """Whether something last modified at ``mtime_ns`` has been quiet for ``settle_s``.
@@ -496,27 +504,42 @@ class Scanner:
             for name in missing:
                 when = name_time(name)
                 rows.append(
-                    (self._root_id, d.id, name, category_of(d.rel, name), now, when, "name" if when else None)
+                    (
+                        self._root_id,
+                        d.id,
+                        name,
+                        category_of(d.rel, name),
+                        now,
+                        when,
+                        "name" if when else None,
+                        0 if self._cold else 1,
+                    )
                 )
             db.executemany(
                 "INSERT INTO exposures "
-                "(root_id, dir_id, name, category, state, first_seen, time, time_source, seq) "
-                "VALUES (?, ?, ?, ?, 'incoming', ?, ?, ?, 0)",
+                "(root_id, dir_id, name, category, state, first_seen, time, time_source, arrived, seq) "
+                "VALUES (?, ?, ?, ?, 'incoming', ?, ?, ?, ?, 0)",
                 rows,
             )
             exposures.update(self._exposure_ids(db, d.id, missing))
 
         file_rows: list[tuple[Any, ...]] = []
         pending: list[tuple[str, Member, int | None, int | None]] = []
+        looked: dict[str, os.stat_result] = {}
+        if not settled:
+            for name in new:
+                with contextlib.suppress(OSError):  # gone already: the next listing will tell
+                    looked[name] = self._fs.stat(self._path(d.rel, name))
+            if self._cold:  # the files tell the time of their server better than their directory
+                self._note_dates((st.st_mtime_ns for st in looked.values()), now)
         for name, member in new.items():
             exposure_id = exposures[member.exposure][0]
             if settled:
                 file_rows.append((d.id, exposure_id, name, member.role, "complete", None, None, None, now))
                 continue
-            try:
-                st = self._fs.stat(self._path(d.rel, name))
-            except OSError:
-                continue  # gone already: the next listing will tell
+            st = looked.get(name)
+            if st is None:
+                continue
             if self._cold and self._at_rest(st.st_mtime_ns, now):
                 file_rows.append(
                     (d.id, exposure_id, name, member.role, "complete", st.st_size, st.st_mtime_ns, None, now)

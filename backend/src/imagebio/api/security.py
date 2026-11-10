@@ -31,6 +31,7 @@ _SECURITY_HEADERS: Final = (
     (b"cross-origin-resource-policy", b"same-origin"),
 )
 _OPEN_PATHS: Final = frozenset({"/healthz"})
+_SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -74,10 +75,16 @@ def host_name(header: str) -> str:
 
 
 class SecurityMiddleware:
-    """Refuses foreign ``Host`` headers (DNS rebinding) and adds the security headers.
+    """Refuses foreign ``Host`` headers (DNS rebinding), refuses requests that change something
+    when another site sent them, and adds the security headers.
 
     The Host check is enforced when the server is bound to loopback (the allowed names are then
     the loopback names plus ``settings.allowed_hosts``) or when ``allowed_hosts`` is configured.
+
+    Requests other than GET and HEAD carry no secret of their own (the identity comes from the
+    reverse proxy, or there is none in standalone mode), so a page of another site could send
+    them on behalf of a user. A browser says where such a request comes from (``Origin``,
+    ``Sec-Fetch-Site``): it is refused unless it comes from this application.
     """
 
     def __init__(self, app: Callable[[Scope, Receive, Send], Awaitable[None]], settings: Settings) -> None:
@@ -99,21 +106,42 @@ class SecurityMiddleware:
                 message["headers"] = headers
             await send(message)
 
-        if self.enforce and scope["path"] not in _OPEN_PATHS:
-            hosts = [value for name, value in scope["headers"] if name == b"host"]
-            ok = len(hosts) == 1 and host_name(hosts[0].decode("latin-1")) in self.allowed
-            if not ok:
-                body = json.dumps({"error": {"code": "forbidden_host", "message": "forbidden host"}}).encode()
-                await send_with_headers(
-                    {
-                        "type": "http.response.start",
-                        "status": 403,
-                        "headers": [
-                            (b"content-type", b"application/json"),
-                            (b"content-length", str(len(body)).encode()),
-                        ],
-                    }
-                )
-                await send({"type": "http.response.body", "body": body})
-                return
+        async def refuse(code: str, message: str) -> None:
+            body = json.dumps({"error": {"code": code, "message": message}}).encode()
+            await send_with_headers(
+                {
+                    "type": "http.response.start",
+                    "status": 403,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+
+        hosts = [value.decode("latin-1") for name, value in scope["headers"] if name == b"host"]
+        known_host = len(hosts) == 1 and host_name(hosts[0]) in self.allowed
+        if self.enforce and scope["path"] not in _OPEN_PATHS and not known_host:
+            await refuse("forbidden_host", "forbidden host")
+            return
+        if scope["method"] not in _SAFE_METHODS and not self._same_site(scope, hosts):
+            await refuse("cross_site_request", "cross-site request refused")
+            return
         await self.app(scope, receive, send_with_headers)
+
+    def _same_site(self, scope: Scope, hosts: list[str]) -> bool:
+        """Whether a request that changes something comes from this application. A client that
+        is not a browser sends neither header and is let through: it has no user to betray."""
+        headers = {name: value.decode("latin-1") for name, value in scope["headers"]}
+        site = headers.get(b"sec-fetch-site")
+        if site is not None and site.strip().lower() not in ("same-origin", "none"):
+            return False
+        origin = headers.get(b"origin")
+        if origin is None:
+            return True
+        scheme, separator, authority = origin.strip().partition("://")
+        if not separator or scheme.lower() not in ("http", "https") or "/" in authority:
+            return False  # "null", or not an origin at all
+        name = host_name(authority)
+        return name in self.allowed or any(name == host_name(h) for h in hosts)

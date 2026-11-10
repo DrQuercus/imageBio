@@ -20,13 +20,14 @@ Errors are JSON, ``{"error": {"code": ..., "message": ...}}``, and never contain
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import re
 import sys
 import zlib
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -39,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imagebio import __version__
+from imagebio.api.live import register_live_routes
 from imagebio.api.security import SecurityMiddleware, current_user
 from imagebio.core.cache import options_key
 from imagebio.core.config import Settings
@@ -47,6 +49,7 @@ from imagebio.core.model import FileId, json_safe
 from imagebio.cryo.gain import N_ORIENTATIONS
 from imagebio.fs.roots import MAX_PATH_LENGTH, ResolvedPath, RootSet, User
 from imagebio.io.registry import Registry, default_registry
+from imagebio.live.service import LiveService
 from imagebio.proc.fourier import radial_profile
 from imagebio.service.planes import MAX_BIN, GainSpec, PlaneService, Processing
 
@@ -170,9 +173,27 @@ def create_app(
     reg = registry or default_registry()
     roots = RootSet(settings.roots)
     service = PlaneService(settings, reg)
-    app = FastAPI(title="imageBio", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
+    live = LiveService(settings, reg, service)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        live.start()  # resumes the watches that were active when the server stopped
+        try:
+            yield
+        finally:
+            live.close()
+
+    app = FastAPI(
+        title="imageBio",
+        version=__version__,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     app.state.settings = settings
     app.state.service = service
+    app.state.live = live
     app.state.roots = roots
     app.add_middleware(SecurityMiddleware, settings=settings)
 
@@ -438,6 +459,8 @@ def create_app(
         return Response(
             json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
         )
+
+    register_live_routes(app, settings, roots, live)
 
     # ── web interface ────────────────────────────────────────────────────────
     index = static_dir / "index.html" if static_dir else None

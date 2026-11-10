@@ -55,3 +55,24 @@ def test_serve_configuration_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "refusing to listen on 0.0.0.0" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         cli.main(["serve"])  # neither --config nor --local
+
+
+def test_simulate_writes_a_session_a_scanner_understands(tmp_path, capsys):
+    """`imagebio simulate` against the real clock: a short run, then the files are checked."""
+    from imagebio.live.layout import category_of, classify
+
+    session = tmp_path / "session"
+    assert cli.main(["simulate", str(session), "--rate", "36000", "--count", "3", "--size", "32"]) == 0
+    out = capsys.readouterr().out
+    assert "3 exposures started, 0 file(s) left unfinished" in out
+    data = session / "Images-Disc1/GridSquare_1000000/Data"
+    names = sorted(p.name for p in data.iterdir())
+    assert len(names) == 12  # image, movie, preview and metadata for each exposure
+    exposures = {classify(n).exposure for n in names}  # type: ignore[union-attr]
+    assert len(exposures) == 3 and all(
+        category_of("Images-Disc1/GridSquare_1000000/Data", e) == "data" for e in exposures
+    )
+    with mrcfile.open(data / next(n for n in names if n.endswith("_Fractions.mrc"))) as m:
+        assert m.data.shape == (6, 32, 32)
+    for bad in (["--rate", "0"], ["--size", "8"], ["--count", "-1"]):
+        assert cli.main(["simulate", str(tmp_path / "x"), *bad]) == 2

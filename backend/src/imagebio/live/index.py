@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS exposures (
     time         REAL,                   -- acquisition time, see time_source
     time_source  TEXT,                   -- xml | mdoc | name | mtime
     first_seen   REAL NOT NULL,
+    arrived      INTEGER NOT NULL DEFAULT 0,  -- 1: appeared while a scanner was watching
     completed_at REAL,
     verified     INTEGER NOT NULL DEFAULT 0,  -- 1: passed the completeness test
     note         TEXT,                   -- why it is not complete yet, or a warning
@@ -100,6 +101,17 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS files_exposure ON files (exposure_id);
 CREATE INDEX IF NOT EXISTS files_pending ON files (state) WHERE state = 'pending';
+
+CREATE TABLE IF NOT EXISTS thumbs (
+    path     TEXT NOT NULL,              -- real path of the file
+    px       INTEGER NOT NULL,           -- requested size
+    size     INTEGER NOT NULL,           -- identity of the content the thumbnail was made from
+    mtime_ns INTEGER NOT NULL,
+    data     BLOB NOT NULL,              -- JPEG
+    used_at  REAL NOT NULL,
+    PRIMARY KEY (path, px)
+);
+CREATE INDEX IF NOT EXISTS thumbs_used ON thumbs (used_at);
 """
 
 

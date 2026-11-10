@@ -18,6 +18,11 @@ Settings come from a TOML file (``imagebio serve --config imagebio.toml``)::
     plane_bytes = "2GiB"
     max_open_datasets = 32
 
+    [live]
+    state_dir = "/var/lib/imagebio" # index of the watched sessions and thumbnails (SQLite)
+    interval = 5                    # seconds between two scans of a watched directory
+    # scan = false                  # serve the index without scanning (a read-only instance)
+
     [[roots]]
     name = "glacios"                # first component of every client-visible path
     path = "/srv/glacios"
@@ -29,6 +34,7 @@ Clients never see or send server paths: they use *logical* paths, ``<root name>/
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from collections.abc import Iterable, Mapping
@@ -100,6 +106,12 @@ class Settings:
     max_open_datasets: int = 32
     #: Largest plane (in pixels, after binning/cropping) served by one request.
     max_response_pixels: int = 8192 * 8192
+    #: Directory of the live index; None: the per-user state directory (see ``live_state_dir``).
+    state_dir: Path | None = None
+    live_interval_s: float = 5.0
+    #: False: watched directories are not scanned by this process.
+    live_scan: bool = True
+    thumb_cache_bytes: int = 2 * 2**30
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -116,6 +128,8 @@ class Settings:
             raise ConfigError(f"invalid port {self.port!r}")
         if self.plane_cache_bytes < 0 or self.max_open_datasets < 1 or self.max_response_pixels < 1:
             raise ConfigError("cache sizes must be positive")
+        if not 0.5 <= self.live_interval_s <= 3600 or self.thumb_cache_bytes < 0:
+            raise ConfigError("live.interval must be between 0.5 and 3600 seconds")
         # Without authentication, only loopback is acceptable. In "proxy" mode the identity
         # headers are trusted, so the reverse proxy must be the only possible client: loopback,
         # or a network private to the proxy that the operator explicitly vouches for.
@@ -127,6 +141,15 @@ class Settings:
             )
         if self.trust_network and self.auth_mode != "proxy":
             raise ConfigError("server.trust_network requires auth.mode = 'proxy'")
+
+    @property
+    def live_state_dir(self) -> Path:
+        """Where the live index is kept: ``state_dir``, else ``$XDG_STATE_HOME/imagebio``
+        (``~/.local/state/imagebio``)."""
+        if self.state_dir is not None:
+            return self.state_dir
+        base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        return Path(base) / "imagebio"
 
     @classmethod
     def local(cls, directories: Iterable[str | Path], **overrides: Any) -> Settings:
@@ -156,12 +179,13 @@ class Settings:
                 raise ConfigError(f"[{name}]: unknown key(s) {sorted(unknown)}")
             return sec
 
-        unknown_top = set(data) - {"server", "auth", "cache", "roots"}
+        unknown_top = set(data) - {"server", "auth", "cache", "live", "roots"}
         if unknown_top:
             raise ConfigError(f"unknown section(s) {sorted(unknown_top)}")
         server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
-        cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels"})
+        cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
+        live = section("live", {"state_dir", "interval", "scan"})
         raw_roots = data.get("roots", [])
         if not isinstance(raw_roots, list):
             raise ConfigError("[[roots]] must be an array of tables")
@@ -189,6 +213,10 @@ class Settings:
             plane_cache_bytes=parse_size(cache.get("plane_bytes", defaults.plane_cache_bytes)),
             max_open_datasets=int(cache.get("max_open_datasets", defaults.max_open_datasets)),
             max_response_pixels=int(cache.get("max_response_pixels", defaults.max_response_pixels)),
+            state_dir=Path(str(live["state_dir"])) if "state_dir" in live else None,
+            live_interval_s=float(live.get("interval", defaults.live_interval_s)),
+            live_scan=bool(live.get("scan", True)),
+            thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
         )
 
     @classmethod

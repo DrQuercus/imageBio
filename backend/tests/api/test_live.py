@@ -1,0 +1,553 @@
+"""The Live mode through the API, against a simulated microscope and a simulated clock."""
+
+from __future__ import annotations
+
+import io
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+import tifffile
+from PIL import Image
+
+from fixtures.api import ALICE, BOB, Tree, build_tree, make_client
+from fixtures.live import BASE
+from imagebio.live.simulator import MicroscopeSim, SimSettings, mrc_bytes
+
+WATCHES = "/api/live/watches"
+THUMB = "/api/live/thumb"
+CAROL = {"X-Forwarded-User": "carol", "X-Forwarded-Groups": "cryoem"}
+
+
+class World:
+    """A server that scans only when told to, a clock that moves only when told to."""
+
+    def __init__(self, tree: Tree, state: Path) -> None:
+        self.tree = tree
+        self.state = state
+        self.now = BASE
+        self.client = self._client()
+
+    def _client(self):
+        client = make_client(
+            self.tree, auth_mode="proxy", trust_network=True, state_dir=self.state, live_scan=False
+        )
+        client.__enter__()
+        client.app.state.live.clock = lambda: self.now
+        return client
+
+    @property
+    def live(self):
+        return self.client.app.state.live
+
+    def restart(self) -> None:
+        """Stop the server and start another on the same state directory."""
+        self.client.__exit__(None, None, None)
+        self.client = self._client()
+
+    def run(self, sims: list[MicroscopeSim], seconds: int) -> None:
+        start = int(self.now - BASE)
+        for second in range(start, start + seconds):
+            self.now = BASE + second
+            for sim in sims:
+                sim.step(self.now)
+            if second % 5 == 0:
+                for report in self.live.scan_once(self.now).values():
+                    assert report.error is None, report.error
+        self.now = BASE + start + seconds
+
+    def watch(self, path: str, who: dict[str, str]) -> int:
+        r = self.client.post(WATCHES, params={"path": path}, headers=who)
+        assert r.status_code == 200, r.text
+        return int(r.json()["id"])
+
+    def items(self, watch_id: int, who: dict[str, str], **params: object) -> dict:
+        r = self.client.get(f"{WATCHES}/{watch_id}/items", params=params, headers=who)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def summary(self, watch_id: int, who: dict[str, str]) -> dict:
+        r = self.client.get(f"{WATCHES}/{watch_id}", headers=who)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+
+@pytest.fixture
+def world(tmp_path: Path):
+    tree = build_tree(tmp_path / "data")
+    for directory in ("cryo/alice_session", "public/bob_session", "public/shared"):
+        (tree.base / directory).mkdir()
+        os.utime(tree.base / directory, (BASE, BASE))
+    w = World(tree, tmp_path / "state")
+    yield w
+    w.client.__exit__(None, None, None)
+
+
+def sim_in(world: World, directory: str, seed: int, **settings: object) -> MicroscopeSim:
+    defaults = {"rate_per_hour": 600, "pause_probability": 0.2, "seed": seed}
+    return MicroscopeSim(world.tree.base / directory, SimSettings(**{**defaults, **settings}))  # type: ignore[arg-type]
+
+
+# ── acceptance: two users, two sessions ───────────────────────────────────────
+
+
+def test_two_users_on_two_sessions_do_not_interfere(world: World) -> None:
+    """Acceptance (M3). The legacy monitor had one watch for everybody: starting or stopping
+    it changed what every user saw."""
+    a = sim_in(world, "cryo/alice_session", 1)
+    b = sim_in(world, "public/bob_session", 2, rate_per_hour=300)
+    alice = world.watch("cryo/alice_session", ALICE)
+    bob = world.watch("public/bob_session", BOB)
+    assert alice != bob
+    world.run([a, b], 120)
+
+    # each sees their own watch and their own session, and nothing of the other's
+    for who, own, other, sim in ((ALICE, alice, bob, a), (BOB, bob, alice, b)):
+        listed = world.client.get(WATCHES, headers=who).json()["watches"]
+        assert [w["id"] for w in listed] == [own] and listed[0]["active"] is True
+        names = {i["name"] for i in world.items(own, who)["items"]}
+        assert names == set(sim.exposures)
+        for url in (f"{WATCHES}/{other}", f"{WATCHES}/{other}/items", f"{WATCHES}/{other}/history"):
+            r = world.client.get(url, headers=who)
+            assert r.status_code == 404 and r.json()["error"]["message"] == "no such watch"
+        assert world.client.delete(f"{WATCHES}/{other}", headers=who).status_code == 404
+    assert world.summary(alice, ALICE)["acquired"] > world.summary(bob, BOB)["acquired"] > 0
+
+    # Alice stops: Bob's session goes on, hers is no longer scanned but stays readable
+    stopped = world.client.delete(f"{WATCHES}/{alice}", headers=ALICE).json()
+    assert stopped["active"] is False and stopped["stopped_at"] == world.now
+    alice_before = world.summary(alice, ALICE)
+    assert alice_before["scanner"]["running"] is False
+    bob_before = world.summary(bob, BOB)["acquired"]
+    world.run([a, b], 120)
+    assert world.summary(bob, BOB)["acquired"] > bob_before
+    assert world.summary(bob, BOB)["scanner"]["running"] is True
+    assert world.summary(alice, ALICE)["acquired"] == alice_before["acquired"]
+    assert len(a.exposures) > alice_before["acquired"] + 10  # her microscope did go on
+
+    # she watches again: the same watch, and what happened meanwhile is found
+    assert world.watch("cryo/alice_session", ALICE) == alice
+    a.stop()
+    b.stop()
+    world.run([a, b], 60)
+    assert world.summary(alice, ALICE)["acquired"] == len(a.exposures)
+    assert world.summary(bob, BOB)["acquired"] == len(b.exposures)
+
+
+def test_two_users_can_watch_the_same_directory(world: World) -> None:
+    shared = sim_in(world, "public/shared", 3)
+    alice = world.watch("public/shared", ALICE)
+    bob = world.watch("public/shared", BOB)
+    assert alice != bob
+    world.run([shared], 60)
+    assert world.items(alice, ALICE)["items"] == world.items(bob, BOB)["items"]
+    assert len(world.live.index.connection().execute("SELECT id FROM roots").fetchall()) == 1  # scanned once
+    world.client.delete(f"{WATCHES}/{alice}", headers=ALICE)
+    before = world.summary(bob, BOB)["acquired"]
+    world.run([shared], 60)
+    assert world.summary(bob, BOB)["acquired"] > before  # still scanned for Bob
+    assert world.summary(bob, BOB)["scanner"]["running"] is True
+
+
+# ── what a watch shows ────────────────────────────────────────────────────────
+
+
+def test_a_client_follows_a_session_by_asking_for_what_changed(world: World) -> None:
+    sim = sim_in(world, "cryo/alice_session", 4, pause_probability=0.3)
+    watch = world.watch("cryo/alice_session", ALICE)
+    known: dict[int, dict] = {}
+    since = 0
+    requests = sizes = 0
+    for _ in range(40):
+        world.run([sim], 5)
+        if world.now - BASE == 150:
+            sim.stop()
+        while True:
+            page = world.items(watch, ALICE, since=since, limit=7)
+            requests += 1
+            sizes += len(page["items"])
+            for item in page["items"]:
+                known[item["id"]] = item
+            assert page["seq"] >= since
+            since = page["seq"]
+            if not page["more"]:
+                assert since == page["head"] or not page["items"]
+                break
+    everything = {i["id"]: i for i in world.items(watch, ALICE, since=0, limit=5000)["items"]}
+    assert known == everything and len(known) == len(sim.exposures) == 25  # one every 6 s for 150 s
+    assert all(i["state"] == "complete" for i in known.values())
+    assert sizes < 6 * len(known)  # deltas: each exposure travels a few times, not at every poll
+    assert world.items(watch, ALICE, since=since)["items"] == []  # nothing new: nothing sent
+
+    item = known[min(known)]
+    assert item["path"] == f"cryo/alice_session/{item['dir']}/{item['name']}.mrc"
+    assert item["category"] == "data" and item["role"] == "image" and item["verified"] is True
+    assert item["members"] == {
+        "image": "complete",
+        "movie": "complete",
+        "preview": "complete",
+        "xml": "complete",
+    }
+    assert item["meta"]["epu"]["pixel_size"] == pytest.approx(0.83) and item["time_source"] == "xml"
+    assert str(world.tree.base) not in str(everything)  # logical paths only
+
+    # the file a tile points at opens in the viewer
+    info = world.client.get("/api/datasets/info", params={"path": item["path"]}, headers=ALICE)
+    assert info.status_code == 200 and info.json()["info"]["shape"]["x"] == 64
+
+    squares = world.items(watch, ALICE, category="gridsquare")["items"]
+    assert len(squares) == 1 and squares[0]["category"] == "gridsquare" and squares[0]["role"] == "preview"
+    both = world.items(watch, ALICE, category="data,gridsquare", limit=5000)["items"]
+    assert len(both) == len(known) + 1
+
+
+def test_removed_exposures_are_announced(world: World) -> None:
+    session = world.tree.base / "cryo/alice_session"
+    for name in ("a.mrc", "b.mrc"):
+        (session / name).write_bytes(mrc_bytes(np.zeros((8, 8), np.float32), 1.0))
+        os.utime(session / name, (BASE, BASE))
+    os.utime(session, (BASE, BASE))
+    watch = world.watch("cryo/alice_session", ALICE)
+    world.run([], 20)
+    page = world.items(watch, ALICE)
+    assert {i["name"]: i["state"] for i in page["items"]} == {"a": "complete", "b": "complete"}
+    os.remove(session / "a.mrc")
+    os.utime(session, (world.now, world.now))
+    world.run([], 10)
+    changed = world.items(watch, ALICE, since=page["seq"])["items"]
+    assert [(i["name"], i["state"]) for i in changed] == [("a", "deleted")]
+    assert world.summary(watch, ALICE)["acquired"] == 1
+
+
+def test_summary_and_history(world: World) -> None:
+    sim = sim_in(world, "cryo/alice_session", 5, pause_probability=0.0)
+    watch = world.watch("cryo/alice_session", ALICE)
+    world.run([sim], 96)  # exposures start at 0, 6, … 90 s; the last scan is at 95 s
+    s = world.summary(watch, ALICE)
+    assert s["watch"] == {
+        "id": watch,
+        "path": "cryo/alice_session",
+        "active": True,
+        "created_at": BASE,
+        "stopped_at": None,
+    }
+    assert s["now"] == world.now and s["seq"] > 0
+    assert (
+        s["scanner"]["running"] is True
+        and s["scanner"]["error"] is None
+        and s["scanner"]["cycle_at"] == BASE + 95
+    )
+    assert s["acquired"] + s["incoming"] == len(sim.exposures) == 16
+    assert s["incoming"] >= 1 and s["scanner"]["pending"] >= 1  # the last ones are still being written
+    assert s["counts"]["data"]["complete"] == s["acquired"] and s["counts"]["gridsquare"] == {"complete": 1}
+    # all arrived in the last five minutes, but the one that was already there at the first scan
+    assert s["rate"]["last_5_min"] == (s["acquired"] - 1) * 12
+    assert s["rate"]["last_hour"] == s["acquired"] - 1
+    assert s["last"]["name"] in sim.exposures and s["last"]["time"] <= world.now
+    assert s["disk"]["total"] > s["disk"]["free"] > 0 and 0 <= s["disk"]["percent"] <= 100
+    assert str(world.tree.base) not in str(s)
+
+    sim.stop()
+    world.run([sim], 600)  # ten minutes later, nothing new
+    quiet = world.summary(watch, ALICE)
+    assert quiet["acquired"] == 16 and quiet["incoming"] == 0
+    assert quiet["rate"] == {"last_5_min": 0, "last_hour": 15}
+
+    history = world.client.get(f"{WATCHES}/{watch}/history", params={"bucket": 30}, headers=ALICE).json()
+    assert history["bucket"] == 30
+    assert sum(n for _, n in history["counts"]) == 16
+    assert [start for start, _ in history["counts"]] == [BASE + 30 * k for k in range(4)]
+    assert [n for _, n in history["counts"]] == [5, 5, 5, 1]  # one every 6 s, the last at 90 s
+
+
+def test_an_old_session_is_listed_at_once_and_does_not_count_as_arriving(world: World) -> None:
+    """A session that ended two hours ago, one exposure per minute for forty minutes."""
+    session = world.tree.base / "cryo/alice_session/Images-Disc1/GridSquare_1/Data"
+    session.mkdir(parents=True)
+    end = BASE - 7200
+    for n in range(40):
+        when = end - 60 * (39 - n)
+        base = session / f"FoilHole_1_Data_2_{n}_20270115_05{n:02d}00"
+        for suffix in (".mrc", ".xml"):
+            path = Path(f"{base}{suffix}")
+            path.write_bytes(mrc_bytes(np.full((8, 8), n, np.float32), 1.0) if suffix == ".mrc" else b"<x/>")
+            os.utime(path, (when, when))
+    for directory in (session, session.parent, session.parent.parent, session.parent.parent.parent):
+        os.utime(directory, (end, end))
+    watch = world.watch("cryo/alice_session", ALICE)
+    world.run([], 5)  # one scan
+    s = world.summary(watch, ALICE)
+    # What had been at rest for a quarter of an hour when the session stopped is listed at
+    # once. The last fifteen minutes could, for all the scanner knows, still be being written
+    # (its clock and the file server's need not agree): they go through the completeness test.
+    assert s["acquired"] == 24 and s["incoming"] == 16
+    world.run([], 15)
+    s = world.summary(watch, ALICE)
+    assert s["acquired"] == 40 and s["incoming"] == 0
+    assert s["rate"] == {"last_5_min": 0, "last_hour": 0}  # found, not arrived: acquired two hours ago
+    items = world.items(watch, ALICE)["items"]
+    assert [i["verified"] for i in sorted(items, key=lambda i: i["time"])] == [False] * 24 + [True] * 16
+    assert all(i["size"] is not None for i in items)
+
+    # what arrives from now on does count
+    new = session / "FoilHole_1_Data_2_99_20270115_080100.mrc"
+    new.write_bytes(mrc_bytes(np.zeros((8, 8), np.float32), 1.0))
+    Path(str(new).replace(".mrc", ".xml")).write_bytes(b"<x/>")
+    for path in (new, Path(str(new).replace(".mrc", ".xml")), session):
+        os.utime(path, (world.now, world.now))
+    world.run([], 20)
+    assert world.summary(watch, ALICE)["rate"] == {"last_5_min": 12, "last_hour": 1}
+
+
+# ── thumbnails ────────────────────────────────────────────────────────────────
+
+
+def test_a_thumbnail_is_an_average_not_one_pixel_out_of_n(world: World) -> None:
+    """A weak, smooth signal under strong noise, like a micrograph: block means bring it out,
+    taking one pixel out of sixteen (what the legacy monitor did) keeps only the noise."""
+    rng = np.random.default_rng(7)
+    y, x = np.mgrid[0:1024, 0:1024]
+    signal = 10.0 * np.sin(2 * np.pi * x / 512) * np.cos(2 * np.pi * y / 512)
+    noisy = (1000 + signal + rng.normal(0, 30, (1024, 1024))).astype(np.float32)
+    path = world.tree.base / "cryo/micrograph.mrc"
+    path.write_bytes(mrc_bytes(noisy, 1.0))
+
+    r = world.client.get(THUMB, params={"path": "cryo/micrograph.mrc", "size": 64}, headers=ALICE)
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    thumb = np.asarray(Image.open(io.BytesIO(r.content)), dtype=np.float64)
+    assert thumb.shape == (64, 64)
+    truth = signal.reshape(64, 16, 64, 16).mean(axis=(1, 3))
+    assert np.corrcoef(thumb.ravel(), truth.ravel())[0, 1] > 0.9  # noise divided by 16, signal kept
+    decimated = noisy[::16, ::16]
+    assert abs(np.corrcoef(decimated.ravel(), truth.ravel())[0, 1]) < 0.3  # what skipping pixels would show
+
+    # the reference: block means, stretched between the 0.5th and 99.5th percentiles
+    means = noisy.astype(np.float64).reshape(64, 16, 64, 16).mean(axis=(1, 3))
+    lo, hi = np.percentile(means, (0.5, 99.5))
+    expected = np.clip((means - lo) / (hi - lo) * 255, 0, 255)
+    assert np.abs(thumb - expected).mean() < 6  # grey levels out of 255: what JPEG costs on a noisy image
+
+
+def test_thumbnail_sizes_kinds_and_cache(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = world.tree.base
+    rng = np.random.default_rng(8)
+    wide = rng.normal(100, 10, (300, 1000)).astype(np.float32)
+    (base / "cryo/wide.mrc").write_bytes(mrc_bytes(wide, 1.0))
+    r = world.client.get(THUMB, params={"path": "cryo/wide.mrc", "size": 128}, headers=ALICE)
+    assert Image.open(io.BytesIO(r.content)).size == (125, 38)  # binned 8 times, sides rounded up
+    small = world.client.get(THUMB, params={"path": "cryo/movie.mrc"}, headers=ALICE)  # 5 frames of 48 x 64
+    picture = Image.open(io.BytesIO(small.content))
+    assert picture.size == (64, 48) and picture.mode == "L"
+    eer = world.client.get(THUMB, params={"path": "cryo/movie.eer"}, headers=ALICE)
+    assert eer.status_code == 200 and Image.open(io.BytesIO(eer.content)).size == (48, 32)
+    colour = world.client.get(THUMB, params={"path": "light/rgb.png"}, headers=BOB)
+    assert Image.open(io.BytesIO(colour.content)).mode == "RGB"
+    odd = np.full((16, 16), np.nan, np.float32)
+    odd[4:8, 4:8] = 5.0
+    tifffile.imwrite(base / "public/nan.tif", odd)
+    assert world.client.get(THUMB, params={"path": "public/nan.tif"}, headers=ALICE).status_code == 200
+
+    # the ETag follows the content of the file; a cached thumbnail is not computed again
+    assert (
+        world.client.get(
+            THUMB,
+            params={"path": "cryo/wide.mrc", "size": 128},
+            headers={**ALICE, "If-None-Match": r.headers["etag"]},
+        ).status_code
+        == 304
+    )
+    import imagebio.live.service as service
+
+    def never(*args: object, **kwargs: object) -> bytes:
+        raise AssertionError("the thumbnail was computed again")
+
+    monkeypatch.setattr(service, "render_thumbnail", never)
+    again = world.client.get(THUMB, params={"path": "cryo/wide.mrc", "size": 128}, headers=ALICE)
+    assert again.content == r.content and again.headers["etag"] == r.headers["etag"]
+    world.restart()  # kept in the index: a restart does not lose it
+    after = world.client.get(THUMB, params={"path": "cryo/wide.mrc", "size": 128}, headers=ALICE)
+    assert after.status_code == 200 and after.content == r.content
+    monkeypatch.undo()
+    (base / "cryo/wide.mrc").write_bytes(mrc_bytes(wide[:, ::-1], 1.0))  # the file changes: a new thumbnail
+    os.utime(base / "cryo/wide.mrc", (BASE + 99, BASE + 99))
+    changed = world.client.get(THUMB, params={"path": "cryo/wide.mrc", "size": 128}, headers=ALICE)
+    assert changed.headers["etag"] != r.headers["etag"] and changed.content != r.content
+
+
+@pytest.mark.parametrize(
+    ("params", "who", "status", "code"),
+    [
+        ({"path": "cryo/movie.mrc"}, BOB, 403, "access_denied"),
+        ({"path": "../outside/secret.mrc"}, ALICE, 403, "access_denied"),
+        ({"path": "cryo/missing.mrc"}, ALICE, 404, "not_found"),
+        ({"path": "cryo/session"}, ALICE, 400, "invalid_request"),
+        ({"path": "cryo/corrupt.mrc"}, ALICE, 422, "corrupt_file"),
+        ({"path": "cryo/session/notes.txt"}, ALICE, 415, "unsupported_format"),
+        ({"path": "cryo/movie.mrc", "size": 16}, ALICE, 400, "invalid_request"),
+        ({"path": "cryo/movie.mrc", "size": 4096}, ALICE, 400, "invalid_request"),
+        ({"path": "cryo/movie.mrc", "bin": 4}, ALICE, 400, "invalid_request"),
+        ({}, ALICE, 400, "invalid_request"),
+    ],
+)
+def test_bad_thumbnail_requests(world: World, params, who, status, code) -> None:
+    r = world.client.get(THUMB, params=params, headers=who)
+    assert r.status_code == status, r.text
+    assert r.json()["error"]["code"] == code and str(world.tree.base) not in r.text
+
+
+# ── who may watch what ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("path", "who", "status", "code"),
+    [
+        ("cryo/alice_session", BOB, 403, "access_denied"),  # a root of another group
+        ("../outside", ALICE, 403, "access_denied"),
+        ("/etc", ALICE, 403, "access_denied"),
+        ("cryo/nowhere", ALICE, 404, "not_found"),
+        ("cryo/movie.mrc", ALICE, 400, "invalid_request"),  # a file is not a session
+        ("", ALICE, 400, "invalid_request"),
+    ],
+)
+def test_bad_watch_requests(world: World, path, who, status, code) -> None:
+    r = world.client.post(WATCHES, params={"path": path}, headers=who)
+    assert r.status_code == status, r.text
+    assert r.json()["error"]["code"] == code and str(world.tree.base) not in r.text
+    assert world.client.get(WATCHES, headers=who).json()["watches"] == []
+
+
+def test_requests_need_an_identity_and_known_parameters(world: World) -> None:
+    assert world.client.get(WATCHES).status_code == 401
+    assert world.client.post(WATCHES, params={"path": "public"}).status_code == 401
+    watch = world.watch("public", ALICE)
+    for url, params in (
+        (WATCHES, {"all": 1}),
+        (f"{WATCHES}/{watch}", {"verbose": 1}),
+        (f"{WATCHES}/{watch}/items", {"since": -1}),
+        (f"{WATCHES}/{watch}/items", {"limit": 0}),
+        (f"{WATCHES}/{watch}/items", {"limit": 100000}),
+        (f"{WATCHES}/{watch}/items", {"category": "everything"}),
+        (f"{WATCHES}/{watch}/items", {"category": ""}),
+        (f"{WATCHES}/{watch}/history", {"bucket": 0}),
+        (f"{WATCHES}/not-a-number", {}),
+    ):
+        r = world.client.get(url, params=params, headers=ALICE)
+        assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request", (url, params, r.text)
+    assert world.client.get(f"{WATCHES}/999999", headers=ALICE).status_code == 404
+
+
+def test_losing_access_to_a_root_ends_access_to_its_index(world: World) -> None:
+    sim = sim_in(world, "cryo/alice_session", 9)
+    watch = world.watch("cryo/alice_session", CAROL)
+    world.run([sim], 30)
+    assert world.items(watch, CAROL)["items"]
+    moved = {"X-Forwarded-User": "carol", "X-Forwarded-Groups": "lm"}  # carol left the cryo-EM group
+    for url in (f"{WATCHES}/{watch}", f"{WATCHES}/{watch}/items", f"{WATCHES}/{watch}/history"):
+        r = world.client.get(url, headers=moved)
+        assert r.status_code == 403 and r.json()["error"]["code"] == "access_denied"
+    assert (
+        world.client.delete(f"{WATCHES}/{watch}", headers=moved).status_code == 200
+    )  # she may still stop it
+
+
+def test_a_user_cannot_watch_without_limit(world: World) -> None:
+    for n in range(8):
+        (world.tree.base / f"public/s{n}").mkdir()
+        world.watch(f"public/s{n}", ALICE)
+    (world.tree.base / "public/s8").mkdir()
+    r = world.client.post(WATCHES, params={"path": "public/s8"}, headers=ALICE)
+    assert r.status_code == 400 and "stop one first" in r.json()["error"]["message"]
+    assert (
+        world.client.post(WATCHES, params={"path": "public/s3"}, headers=ALICE).status_code == 200
+    )  # already hers
+    assert (
+        world.client.post(WATCHES, params={"path": "public/s8"}, headers=BOB).status_code == 200
+    )  # Bob has his own count
+    first = world.client.get(WATCHES, headers=ALICE).json()["watches"][-1]["id"]
+    world.client.delete(f"{WATCHES}/{first}", headers=ALICE)
+    assert world.client.post(WATCHES, params={"path": "public/s8"}, headers=ALICE).status_code == 200
+
+
+def test_another_site_cannot_start_or_stop_a_watch(world: World) -> None:
+    """The identity comes from the proxy, not from a secret of the page: a request that changes
+    something must come from the application itself."""
+    watch = world.watch("public", ALICE)
+    for headers in (
+        {"Origin": "https://evil.example"},
+        {"Origin": "null"},
+        {"Origin": "http://localhost.evil.example"},
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "same-site", "Origin": "http://localhost"},
+    ):
+        for request in (
+            lambda h: world.client.post(WATCHES, params={"path": "public/shared"}, headers={**ALICE, **h}),
+            lambda h: world.client.delete(f"{WATCHES}/{watch}", headers={**ALICE, **h}),
+        ):
+            r = request(headers)
+            assert r.status_code == 403 and r.json()["error"]["code"] == "cross_site_request", headers
+    assert [w["active"] for w in world.client.get(WATCHES, headers=ALICE).json()["watches"]] == [True]
+    # the application itself, and a script that is not a browser
+    same = {"Origin": "http://localhost", "Sec-Fetch-Site": "same-origin"}
+    assert (
+        world.client.post(WATCHES, params={"path": "public/shared"}, headers={**ALICE, **same}).status_code
+        == 200
+    )
+    assert world.client.delete(f"{WATCHES}/{watch}", headers=ALICE).status_code == 200
+    # reading is not concerned
+    assert world.client.get(WATCHES, headers={**ALICE, "Origin": "https://evil.example"}).status_code == 200
+
+
+# ── acceptance: a restart loses nothing ───────────────────────────────────────
+
+
+def test_watches_and_their_index_survive_a_restart(world: World) -> None:
+    sim = sim_in(world, "cryo/alice_session", 10)
+    watch = world.watch("cryo/alice_session", ALICE)
+    stopped = world.watch("public/shared", ALICE)
+    world.client.delete(f"{WATCHES}/{stopped}", headers=ALICE)
+    world.run([sim], 90)
+    before = world.items(watch, ALICE, limit=5000)
+    assert before["items"]
+
+    world.restart()
+    listed = {w["id"]: w["active"] for w in world.client.get(WATCHES, headers=ALICE).json()["watches"]}
+    assert listed == {watch: True, stopped: False}
+    assert world.items(watch, ALICE, limit=5000) == before  # as it was
+    for _ in range(60):  # the microscope went on while the server was down
+        world.now += 1
+        sim.step(world.now)
+    sim.stop()
+    world.run([sim], 60)
+    after = world.items(watch, ALICE, limit=5000)["items"]
+    assert {i["name"] for i in after} == set(sim.exposures)
+    assert all(i["state"] == "complete" for i in after)
+    assert world.items(watch, ALICE, since=before["seq"])["items"]  # and a client catches up from its number
+
+
+def test_background_scanning_starts_and_stops_with_the_watches(tmp_path: Path) -> None:
+    tree = build_tree(tmp_path / "data")
+    session = tree.base / "public/session"
+    session.mkdir()
+    (session / "a.mrc").write_bytes(mrc_bytes(np.zeros((8, 8), np.float32), 1.0))
+    with make_client(tree, state_dir=tmp_path / "state", live_interval_s=0.5) as client:
+        watch = client.post(WATCHES, params={"path": "public/session"}).json()["id"]
+        deadline = time.monotonic() + 10
+        items: list[dict] = []
+        while not items and time.monotonic() < deadline:
+            time.sleep(0.1)
+            items = client.get(f"{WATCHES}/{watch}/items").json()["items"]
+        assert [i["name"] for i in items] == ["a"]  # found without anybody asking for a scan
+        live = client.app.state.live
+        assert client.get(f"{WATCHES}/{watch}").json()["scanner"]["running"] is True
+        thread = next(iter(live._threads.values()))[0]
+        client.delete(f"{WATCHES}/{watch}")
+        thread.join(timeout=10)
+        assert not thread.is_alive() and not live._threads
+        assert client.get(f"{WATCHES}/{watch}").json()["scanner"]["running"] is False
+        client.post(WATCHES, params={"path": "public/session"})
+        threads = [t for t, _ in live._threads.values()]
+    for t in threads:  # leaving the server stops the scanners
+        t.join(timeout=10)
+        assert not t.is_alive()
