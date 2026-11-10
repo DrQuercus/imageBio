@@ -584,7 +584,7 @@ class MrcDataset(Dataset):
         name = self._path.name
         try:
             with self._fd.borrow() as fd:
-                got = _read_into(fd, memoryview(raw), offset)
+                got = _read_into(fd, raw.data, offset)
         except OSError as e:
             raise _io_error(name, e) from None
         if got != raw.size:

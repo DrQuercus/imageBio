@@ -279,7 +279,7 @@ def create_app(settings: Settings, registry: Registry | None = None) -> FastAPI:
         if sys.byteorder == "big":  # little-endian on the wire, whatever the server
             array = array.astype(array.dtype.newbyteorder("<"))
         body, encoding = _encode(
-            memoryview(np.ascontiguousarray(array)).cast("B"), request.headers.get("accept-encoding", "")
+            np.ascontiguousarray(array).data.cast("B"), request.headers.get("accept-encoding", "")
         )
         headers = {
             **base_headers,

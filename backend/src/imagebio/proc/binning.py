@@ -39,7 +39,7 @@ def _block_sums(a: Plane, factor: int, acc: type[np.generic]) -> npt.NDArray[Any
             for j in range(factor):
                 out += a[i::factor, j::factor]
         return out
-    return a.reshape(h, factor, w, factor).sum(axis=(1, 3), dtype=acc)
+    return np.asarray(a.reshape(h, factor, w, factor).sum(axis=(1, 3), dtype=acc))
 
 
 def bin_mean(a: Plane, factor: int) -> Plane:

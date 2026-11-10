@@ -9,6 +9,7 @@ jobs:
     name: Backend (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ['3.11', '3.13']
     defaults:
