@@ -57,6 +57,7 @@ ORIENTATION_NAMES: Final = (
 )
 
 _TILE: Final = 64
+_MAX_DEFECT_FRACTION: Final = 0.10  # a detector has far fewer; more is another kind of image
 _CONFIDENT_RATIO: Final = 1.02  # the runner-up must be at least 2 % less flat
 
 
@@ -81,13 +82,18 @@ def prepare_gain(raw: npt.NDArray[Any], *, invert: bool = False) -> Gain:
     ``invert=False``: the reference is the gain itself; values that are not finite or not
     positive are defects. ``invert=True``: the reference is a flat-field counts image and the
     gain is ``mean / counts``, the mean being taken over the valid (finite, positive) pixels.
+    A file where more than a tenth of the pixels are unusable is refused.
     """
     if raw.ndim != 2:
         raise InvalidRequestError("a gain reference must be a single 2-D image")
     data = np.asarray(raw, dtype=np.float32)
     valid = np.isfinite(data) & (data > 0)
-    if not valid.any():
-        raise InvalidRequestError("the gain reference has no usable pixel")
+    unusable = 1.0 - float(valid.mean())
+    if unusable > _MAX_DEFECT_FRACTION:
+        raise InvalidRequestError(
+            f"{unusable:.0%} of the pixels of this file are zero, negative or not finite: "
+            "it does not look like a gain reference"
+        )
     gain = np.zeros(data.shape, np.float32)
     if invert:
         mean = float(data[valid].mean(dtype=np.float64))
@@ -120,38 +126,38 @@ def fit_gain(gain: Gain, shape: tuple[int, int]) -> Gain:
     )
 
 
-_NEIGHBOURS: Final = tuple((dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0))
+_FILL_REACHES: Final = (1, 2, 3, 4)  # half-sizes of the windows tried around a defect
+_FILL_CHUNK: Final = 65536  # defects handled at once: bounds the memory of the widest window
 
 
 def _fill_defects(corrected: npt.NDArray[np.float32], defect: npt.NDArray[np.bool_]) -> None:
     """Replace, in place, each defective pixel by the median of the valid pixels around it:
-    the 8 neighbours, or a wider window (up to 9 x 9) inside a dead row, column or cluster."""
+    the 3 x 3 window, then wider ones (up to 9 x 9) inside a dead row, column or cluster.
+    A defect with no valid pixel within reach becomes 0."""
     h, w = corrected.shape
     ys, xs = np.nonzero(defect)
-    around = np.full((len(ys), len(_NEIGHBOURS)), np.nan, np.float32)
-    for j, (dy, dx) in enumerate(_NEIGHBOURS):
-        ny, nx = ys + dy, xs + dx
-        ok = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
-        ok[ok] = ~defect[ny[ok], nx[ok]]
-        around[ok, j] = corrected[ny[ok], nx[ok]]
-    around[~np.isfinite(around)] = np.nan
-    alone = np.isnan(around).all(axis=1)
     fill = np.zeros(len(ys), np.float32)
-    fill[~alone] = np.nanmedian(around[~alone], axis=1)
-    for i in np.nonzero(alone)[0].tolist():  # no valid neighbour: look further
-        y, x = int(ys[i]), int(xs[i])
-        for reach in (2, 3, 4):
-            y0, y1, x0, x1 = (
-                max(0, y - reach),
-                min(h, y + reach + 1),
-                max(0, x - reach),
-                min(w, x + reach + 1),
-            )
-            window = corrected[y0:y1, x0:x1][~defect[y0:y1, x0:x1]]
-            window = window[np.isfinite(window)]
-            if window.size:
-                fill[i] = np.median(window)
-                break
+    remaining = np.arange(len(ys))
+    for reach in _FILL_REACHES:
+        span = range(-reach, reach + 1)
+        offsets = [(dy, dx) for dy in span for dx in span if (dy, dx) != (0, 0)]
+        still: list[npt.NDArray[np.intp]] = []
+        for start in range(0, len(remaining), _FILL_CHUNK):
+            chunk = remaining[start : start + _FILL_CHUNK]
+            y, x = ys[chunk], xs[chunk]
+            around = np.full((len(chunk), len(offsets)), np.nan, np.float32)
+            for j, (dy, dx) in enumerate(offsets):
+                ny, nx = y + dy, x + dx
+                ok = (ny >= 0) & (ny < h) & (nx >= 0) & (nx < w)
+                ok[ok] = ~defect[ny[ok], nx[ok]]
+                around[ok, j] = corrected[ny[ok], nx[ok]]
+            around[~np.isfinite(around)] = np.nan
+            found = ~np.isnan(around).all(axis=1)
+            fill[chunk[found]] = np.nanmedian(around[found], axis=1)
+            still.append(chunk[~found])
+        remaining = np.concatenate(still) if still else remaining[:0]
+        if not remaining.size:
+            break
     corrected[ys, xs] = fill
 
 

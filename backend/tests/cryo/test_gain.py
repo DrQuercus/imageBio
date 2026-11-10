@@ -60,16 +60,25 @@ def test_an_invalid_orientation_is_refused(k: object) -> None:
 
 
 def test_a_multiplicative_reference_is_kept_and_its_bad_values_become_defects() -> None:
-    raw = np.array([[1.0, 0.9, 0.0], [np.nan, -2.0, np.inf], [1.1, 1.0, 1.2]], np.float64)
+    rng = np.random.default_rng(0)
+    raw = rng.uniform(0.8, 1.2, (8, 8))
+    bad = [(0, 2), (1, 0), (1, 1), (1, 2)]
+    for position, value in zip(bad, (0.0, np.nan, -2.0, np.inf), strict=True):
+        raw[position] = value
     gain = prepare_gain(raw)
     assert gain.dtype == np.float32
-    np.testing.assert_array_equal(gain, np.array([[1.0, 0.9, 0], [0, 0, 0], [1.1, 1.0, 1.2]], np.float32))
+    expected = raw.astype(np.float32)
+    for position in bad:
+        expected[position] = 0
+    np.testing.assert_array_equal(gain, expected)
 
 
 def test_a_counts_reference_is_inverted_around_its_mean() -> None:
-    counts = np.array([[100.0, 200.0], [0.0, 300.0]])
+    counts = np.full((4, 4), 200.0)
+    counts[0, 0], counts[0, 1], counts[1, 0] = 100.0, 300.0, 0.0  # the mean of the valid stays 200
     gain = prepare_gain(counts, invert=True)
-    np.testing.assert_allclose(gain, [[2.0, 1.0], [0.0, 200.0 / 300.0]], rtol=1e-6)  # mean of the valid: 200
+    assert gain[0, 0] == pytest.approx(2.0) and gain[0, 1] == pytest.approx(200.0 / 300.0)
+    assert gain[1, 0] == 0 and gain[2, 2] == pytest.approx(1.0)
     # a flat exposure seen through that detector comes out flat
     np.testing.assert_allclose((counts * gain)[counts > 0], 200.0, rtol=1e-6)
 
@@ -78,6 +87,17 @@ def test_a_reference_without_a_usable_pixel_is_refused() -> None:
     for bad in (np.zeros((4, 4)), np.full((4, 4), np.nan), np.zeros((2, 3, 4)), np.zeros(5)):
         with pytest.raises(InvalidRequestError):
             prepare_gain(bad)
+
+
+def test_an_image_that_is_mostly_defects_is_not_a_gain_reference() -> None:
+    raw = np.ones((100, 100), np.float32)
+    raw[:10, :] = 0  # exactly a tenth: still accepted
+    assert (prepare_gain(raw) == 0).sum() == 1000
+    raw[10, 0] = 0
+    with pytest.raises(InvalidRequestError, match="does not look like a gain reference"):
+        prepare_gain(raw)
+    with pytest.raises(InvalidRequestError, match="does not look like a gain reference"):
+        prepare_gain(np.where(np.arange(10000).reshape(100, 100) % 3 == 0, 1.0, np.nan), invert=True)
 
 
 def test_fit_gain_averages_a_finer_reference_and_repeats_a_coarser_one() -> None:
@@ -142,6 +162,39 @@ def test_dead_columns_and_clusters_are_filled_from_further_away() -> None:
     assert out[gain == 0].max() < 130  # every defect got a plausible value
     assert out[gain == 0].min() > 70
     assert out[5, 11] == np.median(plane[3:8, 9:14][gain[3:8, 9:14] > 0])  # 5 x 5 around it
+
+
+def test_defects_are_filled_like_a_naive_loop_does() -> None:
+    """Reference: for each defect, the median of the valid pixels of the smallest window, from
+    3 x 3 to 9 x 9, that holds one; 0 when none does."""
+    rng = np.random.default_rng(6)
+    plane = rng.normal(100, 20, (60, 70)).astype(np.float32)
+    gain = rng.uniform(0.8, 1.2, (60, 70)).astype(np.float32)
+    gain[rng.random((60, 70)) < 0.08] = 0  # scattered, some of them touching
+    gain[:, 33:36] = 0
+    gain[10:21, 40:51] = 0  # 11 x 11: its centre is out of reach
+    gain[0, 0] = gain[59, 69] = gain[0, 69] = 0
+    plane[5, 5] = np.nan  # a valid pixel that is not finite is not a neighbour to trust
+    gain[5, 6] = 0
+    product = (plane * gain).astype(np.float32)
+    expected = product.copy()
+    for y, x in zip(*np.nonzero(gain == 0), strict=True):
+        expected[y, x] = 0
+        for reach in (1, 2, 3, 4):
+            y0, y1, x0, x1 = (
+                max(0, y - reach),
+                min(60, y + reach + 1),
+                max(0, x - reach),
+                min(70, x + reach + 1),
+            )
+            window = product[y0:y1, x0:x1][gain[y0:y1, x0:x1] > 0]
+            window = window[np.isfinite(window)]
+            if window.size:
+                expected[y, x] = np.median(window)
+                break
+    out = apply_gain(plane, gain)
+    np.testing.assert_array_equal(out, expected)
+    assert out[15, 45] == 0  # the centre of the large cluster
 
 
 def test_a_cluster_too_large_to_fill_is_zero_not_garbage() -> None:
