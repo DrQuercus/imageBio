@@ -60,6 +60,10 @@ body {
 }
 .path-input:focus { border-color: var(--accent-blue); }
 .path-input::placeholder { color: var(--text-dim); }
+.path-error {
+  padding: 6px 20px; background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+  color: var(--accent-red); font-family: var(--font-mono); font-size: 12px; flex-shrink: 0;
+}
 
 .btn {
   padding: 7px 16px; border: none; border-radius: 6px; font-family: var(--font-mono);

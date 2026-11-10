@@ -5,15 +5,38 @@ const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
 const chokidar = require('chokidar');
-const cors = require('cors');
 const crypto = require('crypto');
+const security = require('./security');
+
+// ─── Security configuration (see README "Security") ─────────────────────────
+// HOST                 bind address (default 127.0.0.1; put a reverse proxy in front)
+// CVL_ROOTS            allowed data roots, separated by ':' (watching is disabled without it)
+// CVL_AUTH             "user:password" for HTTP Basic auth (or CVL_AUTH_FILE: file with that content)
+// CVL_ALLOWED_HOSTS    optional comma-separated Host header allow-list
+// CVL_INSECURE_NO_AUTH=1  allow a non-loopback bind without auth (not recommended)
+const HOST = process.env.HOST || '127.0.0.1';
+const ROOTS = security.parseRoots(process.env.CVL_ROOTS);
+const AUTH = security.loadAuth(process.env);
+const ALLOWED_HOSTS = security.parseAllowedHosts(process.env, HOST);
+
+if (!security.isLoopbackHost(HOST) && !AUTH && process.env.CVL_INSECURE_NO_AUTH !== '1') {
+  console.error(`[Security] Refusing to listen on ${HOST} without authentication.`);
+  console.error('[Security] Set CVL_AUTH="user:password" (or CVL_AUTH_FILE), or bind to 127.0.0.1 behind a reverse proxy.');
+  process.exit(1);
+}
+if (!ROOTS.length) console.warn('[Security] CVL_ROOTS is empty: watching is disabled until data roots are configured.');
+else console.log(`[Security] Data roots: ${ROOTS.map(r => r.real).join(', ')}`);
 
 const app = express();
+app.disable('x-powered-by');
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({
+  server,
+  maxPayload: 64 * 1024,
+  verifyClient: security.wsVerifier({ auth: AUTH, allowedHosts: ALLOWED_HOSTS }),
+});
 
-app.use(cors());
-app.use(express.json());
+app.use(security.httpGuard({ auth: AUTH, allowedHosts: ALLOWED_HOSTS }));
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -60,12 +83,12 @@ let lastRateHistoryMinute = -1;
 
 // Disk space (cached, refreshed every 10s)
 let diskInfo = null;           // { total, used, free, percent }
-let watchVolumePath = null;    // resolved dir from watch pattern
+let watchVolumePath = null;    // real, existing directory inside a data root (set by startWatching)
 
+// Disk usage via statfs only. Never shell out: the path comes from a client-supplied pattern.
 async function updateDiskInfo() {
   if (!watchVolumePath) return;
   try {
-    // Use statfs (Node 18.15+)
     const stats = await fsp.statfs(watchVolumePath);
     const total = stats.blocks * stats.bsize;
     const free = stats.bfree * stats.bsize;
@@ -77,24 +100,48 @@ async function updateDiskInfo() {
       percent: total > 0 ? Math.round((used / total) * 1000) / 10 : 0,
     };
   } catch (e) {
-    // Fallback: try df command
-    try {
-      const { exec } = require('child_process');
-      const result = await new Promise((resolve, reject) => {
-        exec(`df -B1 "${watchVolumePath}"`, (err, stdout) => {
-          if (err) return reject(err);
-          resolve(stdout);
-        });
-      });
-      const lines = result.trim().split('\n');
-      if (lines.length >= 2) {
-        const parts = lines[1].split(/\s+/);
-        const total = parseInt(parts[1]) || 0;
-        const used = parseInt(parts[2]) || 0;
-        const free = parseInt(parts[3]) || 0;
-        diskInfo = { total, used, free, percent: total > 0 ? Math.round((used / total) * 1000) / 10 : 0 };
-      }
-    } catch (e2) { /* disk info unavailable */ }
+    diskInfo = null; // disk info unavailable
+  }
+}
+
+// ─── MRC header validation ──────────────────────────────────────────────────
+// Only little-endian modes 0/1/2/6 are decoded by this viewer. Anything else (big-endian,
+// float16, complex, truncated or non-MRC files) is rejected instead of rendered as garbage,
+// and absurd dimensions can no longer trigger huge allocations.
+const MRC_BPP = { 0: 1, 1: 2, 2: 4, 6: 2 };
+const MAX_MRC_DIM = 65536;
+
+function parseMrcHeader(buf, bytesRead, fileSize) {
+  if (bytesRead < 1024) return { error: 'not an MRC file (header shorter than 1024 bytes)' };
+  if (buf[212] === 0x11) return { error: 'big-endian MRC files are not supported by this viewer' };
+  const nx = buf.readInt32LE(0);
+  const ny = buf.readInt32LE(4);
+  const nz = buf.readInt32LE(8);
+  const mode = buf.readInt32LE(12);
+  const mx = buf.readInt32LE(28);
+  const cellA = buf.readFloatLE(40);
+  const nsymbt = buf.readInt32LE(92);
+  const bpp = MRC_BPP[mode];
+  if (!bpp) return { error: `MRC mode ${mode} is not supported by this viewer` };
+  if (!(nx >= 1 && ny >= 1 && nz >= 1 && nx <= MAX_MRC_DIM && ny <= MAX_MRC_DIM)) {
+    return { error: 'invalid MRC dimensions' };
+  }
+  if (!(nsymbt >= 0)) return { error: 'invalid MRC extended header size' };
+  const dataOffset = 1024 + nsymbt;
+  if (fileSize < dataOffset + nx * ny * bpp) return { error: 'incomplete MRC file (still being written?)' };
+  return { nx, ny, nz, mode, bpp, nsymbt, dataOffset, pixelSize: mx > 0 ? cellA / mx : 0 };
+}
+
+async function openMrc(filePath) {
+  const fh = await fsp.open(filePath, 'r');
+  try {
+    const st = await fh.stat();
+    const hdr = Buffer.alloc(1024);
+    const { bytesRead } = await fh.read(hdr, 0, 1024, 0);
+    return { fh, header: parseMrcHeader(hdr, bytesRead, st.size) };
+  } catch (e) {
+    await fh.close().catch(() => {});
+    throw e;
   }
 }
 
@@ -105,32 +152,22 @@ async function readMrcHeaderAsync(filePath) {
     fh = await fsp.open(filePath, 'r');
     const buf = Buffer.alloc(1024);
     const { bytesRead } = await fh.read(buf, 0, 1024, 0);
-    if (bytesRead < 1024) return null;
-    const nx = buf.readInt32LE(0);
-    const ny = buf.readInt32LE(4);
-    const mode = buf.readInt32LE(12);
-    const mx = buf.readInt32LE(28);
-    const cellA = buf.readFloatLE(40);
-    const nsymbt = buf.readInt32LE(92);
-    return { nx, ny, nz: buf.readInt32LE(8), mode, pixelSize: mx > 0 ? cellA / mx : 0, nsymbt };
+    // Listing only needs the header: do not require the data to be complete yet.
+    const h = parseMrcHeader(buf, bytesRead, Infinity);
+    return h.error ? null : h;
   } catch (e) { return null; }
   finally { if (fh) await fh.close().catch(() => {}); }
 }
 
 // ─── Async thumbnail generation (strided reads, semaphore-limited) ──────────
+// Returns { width, height, data }, { error } for an invalid/unsupported file, or null on I/O error.
 async function generateThumbnailAsync(filePath, size) {
   let fh;
   try {
-    fh = await fsp.open(filePath, 'r');
-    const hdr = Buffer.alloc(1024);
-    await fh.read(hdr, 0, 1024, 0);
-
-    const nx = hdr.readInt32LE(0);
-    const ny = hdr.readInt32LE(4);
-    const mode = hdr.readInt32LE(12);
-    const nsymbt = hdr.readInt32LE(92);
-    const bpp = { 0: 1, 1: 2, 2: 4, 6: 2 }[mode] || 4;
-    const dataOffset = 1024 + nsymbt;
+    const opened = await openMrc(filePath);
+    fh = opened.fh;
+    if (opened.header.error) return { error: opened.header.error };
+    const { nx, ny, mode, bpp, dataOffset } = opened.header;
 
     const maxDim = Math.max(nx, ny);
     const scale = Math.min(1, size / maxDim);
@@ -183,8 +220,11 @@ async function generateThumbnailAsync(filePath, size) {
 // only one generation runs and all await the same promise.
 const thumbInFlight = new Map();
 
-async function getCachedThumbnailAsync(filePath, size) {
-  const hash = crypto.createHash('md5').update(filePath + ':' + size).digest('hex');
+// The cache key includes the file size and mtime, so a thumbnail made from a partially
+// written file is regenerated once the file changes.
+async function getCachedThumbnailAsync(filePath, size, st) {
+  const hash = crypto.createHash('md5')
+    .update(`${filePath}:${size}:${st.size}:${st.mtimeMs}`).digest('hex');
   const cachePath = path.join(THUMB_CACHE_DIR, hash + '.raw');
   const metaPath = path.join(THUMB_CACHE_DIR, hash + '.json');
 
@@ -203,7 +243,7 @@ async function getCachedThumbnailAsync(filePath, size) {
     await readSemaphore.acquire();
     try {
       const thumb = await generateThumbnailAsync(filePath, size);
-      if (!thumb) return null;
+      if (!thumb || thumb.error) return thumb;
       // Write cache (fire-and-forget, don't block response)
       fsp.writeFile(cachePath, thumb.data).catch(() => {});
       fsp.writeFile(metaPath, JSON.stringify({ w: thumb.width, h: thumb.height })).catch(() => {});
@@ -219,22 +259,14 @@ async function getCachedThumbnailAsync(filePath, size) {
 }
 
 // ─── Async MRC data for preview ─────────────────────────────────────────────
+// Returns the preview data, { error } for an invalid/unsupported file, or null on I/O error.
 async function readMrcDataAsync(filePath) {
   let fh;
   try {
-    fh = await fsp.open(filePath, 'r');
-    const hdr = Buffer.alloc(1024);
-    await fh.read(hdr, 0, 1024, 0);
-
-    const nx = hdr.readInt32LE(0);
-    const ny = hdr.readInt32LE(4);
-    const mode = hdr.readInt32LE(12);
-    const nsymbt = hdr.readInt32LE(92);
-    const mx = hdr.readInt32LE(28);
-    const cellA = hdr.readFloatLE(40);
-    const pixelSize = mx > 0 ? cellA / mx : 0;
-    const bpp = { 0: 1, 1: 2, 2: 4, 6: 2 }[mode] || 4;
-    const dataOffset = 1024 + nsymbt;
+    const opened = await openMrc(filePath);
+    fh = opened.fh;
+    if (opened.header.error) return { error: opened.header.error };
+    const { nx, ny, mode, bpp, dataOffset, pixelSize } = opened.header;
 
     const downscale = Math.max(1, Math.ceil(Math.max(nx, ny) / 2048));
     const onx = Math.ceil(nx / downscale);
@@ -331,7 +363,9 @@ function updateRateHistory() {
 }
 
 // ─── File Watcher ───────────────────────────────────────────────────────────
-function startWatching(pattern) {
+// `watch` is the result of security.validateWatchPattern() (never a raw client string).
+function startWatching(watch) {
+  const pattern = watch.pattern;
   if (currentWatcher) { currentWatcher.close(); currentWatcher = null; }
 
   imageFiles = [];
@@ -346,10 +380,8 @@ function startWatching(pattern) {
   watchPattern = pattern;
   watchActive = true;
 
-  // Resolve volume path from glob pattern — take the part before any glob chars
-  const globIdx = pattern.search(/[\*\?\[\{]/);
-  const basePath = globIdx > 0 ? pattern.substring(0, globIdx) : pattern;
-  watchVolumePath = path.dirname(basePath) || '/';
+  // Existing directory of the pattern, already resolved and confined to a data root
+  watchVolumePath = watch.volumeDir;
   diskInfo = null;
   updateDiskInfo(); // initial check
 
@@ -391,6 +423,8 @@ function startWatching(pattern) {
 
     (async () => {
       try {
+        // Symlinks are followed, but only files that resolve inside a data root are listed.
+        if (!(await security.realpathInsideRoots(filePath, ROOTS))) return;
         const stat = await fsp.stat(filePath);
         const now = Date.now();
         const entry = {
@@ -487,36 +521,58 @@ setInterval(() => {
 
 // ─── REST API ───────────────────────────────────────────────────────────────
 
-// Async file existence check
-async function fileExists(p) {
-  try { await fsp.access(p, fs.constants.R_OK); return true; }
-  catch { return false; }
+// Resolve the `path` query parameter of a file request. The file must belong to the
+// current watch and resolve (realpath) inside a data root. Returns { filePath, real, st },
+// or sends an error response and returns null.
+async function resolveServedFile(req, res) {
+  const filePath = req.query.path;
+  if (typeof filePath !== 'string' || !filePath) { res.status(400).end(); return null; }
+  const real = await security.realpathInsideRoots(filePath, ROOTS);
+  if (!real) { res.status(403).end(); return null; }
+  if (!imageFileIndex.has(filePath)) { res.status(404).end(); return null; }
+  let st;
+  try { st = await fsp.stat(real); } catch { res.status(404).end(); return null; }
+  if (!st.isFile()) { res.status(404).end(); return null; }
+  return { filePath, real, st };
+}
+
+// Private caching with revalidation: the ETag changes with size/mtime, so a file that was
+// still being written is not served stale from the browser cache. Returns true for a 304.
+function notModified(req, res, st, variant = '') {
+  res.set({
+    'Cache-Control': 'private, no-cache',
+    'ETag': `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}${variant}"`,
+    'Last-Modified': st.mtime.toUTCString(),
+  });
+  if (req.fresh) { res.status(304).end(); return true; }
+  return false;
+}
+
+function sendJpeg(res, real, extraHeaders = {}) {
+  res.set({ 'Content-Type': 'image/jpeg', ...extraHeaders });
+  const stream = fs.createReadStream(real);
+  stream.on('error', () => { if (!res.headersSent) res.status(500); res.end(); });
+  stream.pipe(res);
 }
 
 // Thumbnail (async, semaphore-limited, deduped)
 app.get('/api/thumbnail', async (req, res) => {
   try {
-    const filePath = req.query.path;
-    const size = Math.min(256, parseInt(req.query.size) || THUMB_SIZE);
-    if (!filePath) return res.status(400).end();
-    if (!(await fileExists(filePath))) return res.status(404).end();
+    const f = await resolveServedFile(req, res);
+    if (!f) return;
+    const size = Math.max(16, Math.min(256, parseInt(req.query.size, 10) || THUMB_SIZE));
+    if (notModified(req, res, f.st, `-${size}`)) return;
 
-    const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.jpg' || ext === '.jpeg') {
-      res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'public, max-age=86400' });
-      const stream = fs.createReadStream(filePath);
-      stream.on('error', () => { if (!res.headersSent) res.status(500); res.end(); });
-      stream.pipe(res);
-      return;
-    }
+    const ext = path.extname(f.filePath).toLowerCase();
+    if (ext === '.jpg' || ext === '.jpeg') return sendJpeg(res, f.real);
 
     // MRC thumbnail (async + semaphore)
-    const thumb = await getCachedThumbnailAsync(filePath, size);
+    const thumb = await getCachedThumbnailAsync(f.real, size, f.st);
     if (!thumb) return res.status(500).end();
+    if (thumb.error) return res.status(422).type('text').send(thumb.error);
     res.set({
       'Content-Type': 'application/octet-stream',
       'X-Width': thumb.width, 'X-Height': thumb.height, 'X-File-Type': 'mrc',
-      'Cache-Control': 'public, max-age=86400',
     });
     res.send(thumb.data);
   } catch (e) {
@@ -527,31 +583,25 @@ app.get('/api/thumbnail', async (req, res) => {
 // Full image data (async)
 app.get('/api/image-data', async (req, res) => {
   try {
-    const filePath = req.query.path;
-    if (!filePath) return res.status(400).end();
-    if (!(await fileExists(filePath))) return res.status(404).end();
+    const f = await resolveServedFile(req, res);
+    if (!f) return;
+    if (notModified(req, res, f.st)) return;
 
-    const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.jpg' || ext === '.jpeg') {
-      res.set({ 'Content-Type': 'image/jpeg', 'X-File-Type': 'jpeg', 'Cache-Control': 'public, max-age=3600' });
-      const stream = fs.createReadStream(filePath);
-      stream.on('error', () => { if (!res.headersSent) res.status(500); res.end(); });
-      stream.pipe(res);
-      return;
-    }
+    const ext = path.extname(f.filePath).toLowerCase();
+    if (ext === '.jpg' || ext === '.jpeg') return sendJpeg(res, f.real, { 'X-File-Type': 'jpeg' });
 
     // MRC (async + semaphore)
     await readSemaphore.acquire();
     let data;
-    try { data = await readMrcDataAsync(filePath); }
+    try { data = await readMrcDataAsync(f.real); }
     finally { readSemaphore.release(); }
     if (!data) return res.status(500).end();
+    if (data.error) return res.status(422).type('text').send(data.error);
 
     res.set({
       'Content-Type': 'application/octet-stream',
       'X-NX': data.nx, 'X-NY': data.ny, 'X-Orig-NX': data.origNx, 'X-Orig-NY': data.origNy,
       'X-Pixel-Size': data.pixelSize, 'X-Mode': data.mode, 'X-File-Type': 'mrc',
-      'Cache-Control': 'public, max-age=3600',
     });
     res.send(Buffer.from(data.pixels.buffer));
   } catch (e) {
@@ -601,12 +651,24 @@ wss.on('connection', (ws) => {
   }
   sendNextChunk();
 
-  ws.on('message', (msg) => {
+  ws.on('message', async (msg) => {
+    let data;
+    try { data = JSON.parse(msg); } catch (e) { return; }
     try {
-      const data = JSON.parse(msg);
-      if (data.type === 'start_watch') startWatching(data.pattern);
-      else if (data.type === 'stop_watch') stopWatching();
-    } catch (e) {}
+      if (data && data.type === 'start_watch') {
+        const watch = await security.validateWatchPattern(data.pattern, ROOTS);
+        if (!watch.ok) {
+          console.warn(`[Watch] Refused pattern: ${watch.error}`);
+          safeSend(ws, { type: 'watch_error', message: watch.error });
+          return;
+        }
+        startWatching(watch);
+      } else if (data && data.type === 'stop_watch') {
+        stopWatching();
+      }
+    } catch (e) {
+      console.error('[WS] Error handling message:', e.message);
+    }
   });
 
   ws.on('close', () => console.log(`[WS] Client disconnected (total: ${wss.clients.size})`));
@@ -627,9 +689,9 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-const PORT = process.env.PORT || 4200;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n  ╔════════════════════════════════════════╗`);
-  console.log(`  ║  CryoViewer Live — running on :${PORT}    ║`);
-  console.log(`  ╚════════════════════════════════════════╝\n`);
+const PORT = process.env.PORT === undefined ? 4200 : Number(process.env.PORT);
+server.listen(PORT, HOST, () => {
+  const { port } = server.address();
+  console.log(`[Server] CryoViewer Live listening on http://${HOST.includes(':') ? `[${HOST}]` : HOST}:${port}` +
+    (AUTH ? ' (Basic auth enabled)' : ' (no auth)'));
 });

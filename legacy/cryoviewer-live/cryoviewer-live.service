@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+# Prefer a dedicated, unprivileged account that can only read the data roots.
 User=louis
 WorkingDirectory=/srv/CryoViewerLive/cryoviewer-live
 ExecStart=/usr/bin/node server.js
@@ -11,6 +12,19 @@ Restart=on-failure
 RestartSec=5
 Environment=PORT=4200
 Environment=NODE_ENV=production
+
+# ── Security (see README, section "Security") ──
+# Allowed data roots, separated by ':'. Watching is disabled without it. ADAPT to your storage.
+Environment=CVL_ROOTS=/srv/glacios
+# Option A (recommended): loopback only, behind a reverse proxy (TLS + auth) or an SSH tunnel.
+Environment=HOST=127.0.0.1
+# Option B: listen on the network with the built-in Basic auth. The file contains
+# "user:password" and must be readable by the service user only (chmod 600).
+#Environment=HOST=0.0.0.0
+#Environment=CVL_AUTH_FILE=/etc/cryoviewer-live/auth
+
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

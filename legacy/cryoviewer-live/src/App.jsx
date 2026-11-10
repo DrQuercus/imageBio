@@ -24,6 +24,7 @@ export default function App() {
   const [previewIndex, setPreviewIndex] = useState(-1);
   const [autoScroll, setAutoScroll] = useState(true);
   const [showGraph, setShowGraph] = useState(true);
+  const [watchError, setWatchError] = useState('');
 
   const wsRef = useRef(null);
   const reconnectRef = useRef(null);
@@ -106,7 +107,12 @@ export default function App() {
               });
               break;
 
+            case 'watch_error':
+              setWatchError(data.message || 'Watch refused by the server.');
+              break;
+
             case 'watch_started':
+              setWatchError('');
               setPathInput(data.pattern);
               setStats(prev => ({ ...prev, watchActive: true, watchPattern: data.pattern }));
               break;
@@ -151,6 +157,7 @@ export default function App() {
 
   const startWatch = () => {
     if (!pathInput.trim()) return;
+    setWatchError('');
     // Clear local state for fresh watch
     setImages([]);
     pathSetRef.current.clear();
@@ -225,6 +232,7 @@ export default function App() {
           ? <button className="btn btn-danger" onClick={stopWatch}>■ Stop</button>
           : <button className="btn btn-primary" onClick={startWatch}>▶ Watch</button>}
       </div>
+      {watchError && <div className="path-error" role="alert">{watchError}</div>}
 
       <StatsBar stats={stats}/>
 

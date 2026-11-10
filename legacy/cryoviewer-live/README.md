@@ -14,12 +14,15 @@ Real-time cryo-EM data collection monitor. Watch your micrographs appear live du
 
 ```bash
 # Install & build
-npm install
+npm ci
 npm run build
 
-# Run
-node server.js
-# → http://localhost:4200
+# Run (data roots are mandatory: only patterns inside them can be watched)
+CVL_ROOTS=/srv/glacios node server.js
+# → http://localhost:4200  (listens on 127.0.0.1 by default)
+
+# Tests
+npm test
 ```
 
 ## Deploy with systemd
@@ -62,8 +65,46 @@ sudo systemctl enable --now cryoviewer-live
 
 ## Configuration
 
-- **Port**: Set `PORT` env variable (default: 4200)
-- **Polling interval**: File watcher polls every 2s (configurable in `server.js`)
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `4200` | HTTP port |
+| `HOST` | `127.0.0.1` | Bind address. Listening on anything other than loopback requires auth (below). |
+| `CVL_ROOTS` | *(empty)* | Allowed data roots, separated by `:`. Watch patterns and served files must resolve (realpath, symlinks included) inside one of them. Empty means watching is disabled. |
+| `CVL_AUTH` / `CVL_AUTH_FILE` | *(none)* | `user:password` for HTTP Basic auth, given directly or in a file (preferred, `chmod 600`). |
+| `CVL_ALLOWED_HOSTS` | loopback names when `HOST` is loopback | Optional comma-separated allow-list of `Host` headers. |
+| `CVL_INSECURE_NO_AUTH` | — | `1` allows a network bind without auth. Not recommended. |
+
+The file watcher polls every 3 s (`server.js`).
+
+## Security
+
+Since the M0 hotfix (see `docs/audit/AUDIT.md` at the repository root):
+
+- No shell command is ever run. The old `df` fallback allowed remote command execution.
+- Watch patterns must be absolute, contain no `..` and stay inside `CVL_ROOTS`.
+- `/api/thumbnail` and `/api/image-data` only serve files that belong to the current watch and resolve inside `CVL_ROOTS`. A symlink pointing outside the roots is neither listed nor served.
+- The server listens on `127.0.0.1` by default, and refuses to start on a network address without authentication.
+- WebSocket handshakes are checked for authentication, same-origin and (on loopback) the `Host` header.
+- Invalid, unsupported (big-endian, float16) or incomplete MRC files return HTTP 422 instead of garbage.
+- The thumbnail cache is keyed on file size and mtime.
+
+There are two ways to expose the service to the lab network:
+
+1. **Recommended: reverse proxy with TLS.** Keep `HOST=127.0.0.1` and put a proxy in front, for example Caddy (`caddy hash-password` produces the hash):
+
+   ```
+   cryoviewer.lab.example {
+       tls internal
+       basic_auth {
+           alice <bcrypt-hash>
+       }
+       reverse_proxy 127.0.0.1:4200
+   }
+   ```
+
+2. **Quick: built-in Basic auth.** Set `HOST=0.0.0.0` and `CVL_AUTH_FILE=/etc/cryoviewer-live/auth`. Without TLS, the password travels in clear text on the network.
+
+Known limitation: the watch is still global to the server. Any authenticated user can replace or stop it. This is fixed by design in the new backend (milestone M3).
 
 ## Development
 
@@ -78,6 +119,8 @@ npm run dev
 ```
 cryoviewer-live/
 ├── server.js          # Express + WebSocket + chokidar file watcher
+├── security.js        # data roots, auth, Host/Origin checks
+├── test/              # npm test (node:test)
 ├── src/
 │   ├── App.jsx        # Main app with WS connection management
 │   ├── components/
