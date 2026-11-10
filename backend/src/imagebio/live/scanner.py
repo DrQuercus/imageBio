@@ -50,6 +50,7 @@ _WAITING_FOR_XML: Final = "waiting for the EPU metadata file (.xml)"
 _NO_XML: Final = "completed without its EPU metadata file (.xml)"
 _ROLE_ORDER: Final = {"xml": 0, "mdoc": 0, "preview": 1}  # metadata first: images wait for it
 _RECHECK_S: Final = 60.0  # a file that failed its check and did not change is checked again after this
+_STUCK_S: Final = 300.0  # unchanged and failing for this long: looked at every _RECHECK_S only
 _DAY_NS: Final = 86_400 * 1_000_000_000
 
 
@@ -116,6 +117,7 @@ class _Pending:
     polls: int = 0
     integrity: Integrity | None = None  # of the file as it is now; None: not checked yet
     checked_at: float = 0.0
+    polled_at: float = 0.0
     ready_since: float | None = None
 
 
@@ -602,6 +604,17 @@ class Scanner:
     def _poll(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
         order = sorted(self._pending.values(), key=lambda p: (_ROLE_ORDER.get(p.role, 2), p.id))
         for p in order:
+            # A file that has failed its check without changing for minutes (a transfer that
+            # died) is not worth a round trip to the storage at every cycle.
+            stuck = (
+                p.integrity is not None
+                and not p.integrity.ok
+                and p.stable_since is not None
+                and now - p.stable_since > _STUCK_S
+            )
+            if stuck and now - p.polled_at < _RECHECK_S:
+                continue
+            p.polled_at = now
             try:
                 st = self._fs.stat(self._path(p.dir_rel, p.name))
             except (FileNotFoundError, NotADirectoryError):

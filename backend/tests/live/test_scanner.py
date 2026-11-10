@@ -285,6 +285,25 @@ def test_a_truncated_file_says_why_and_completes_when_the_rest_arrives(watch: Wa
     assert watch.exposures()["a"]["state"] == "complete" and watch.exposures()["a"]["note"] is None
 
 
+def test_files_that_stay_broken_are_looked_at_less_often(watch: Watch) -> None:
+    """A transfer that died leaves partial files for ever: they must not cost a round trip to
+    the storage at every cycle, yet still complete if the rest arrives one day."""
+    for n in range(50):
+        put(watch.root, f"dead_{n}.mrc", IMAGE[:1100], BASE)
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 290)
+    watch.fs.reset()
+    cycles(scanner, BASE + 295, BASE + 300)
+    assert watch.fs.stats == 2 * (1 + 50)  # five minutes: still followed at every cycle
+    watch.fs.reset()
+    cycles(scanner, BASE + 305, BASE + 900)  # 120 cycles in ten minutes
+    assert 120 + 50 * 9 <= watch.fs.stats <= 120 + 50 * 11  # the directory each time, each file once a minute
+    assert len(watch.files("pending")) == 50
+    put(watch.root, "dead_7.mrc", IMAGE, BASE + 905)
+    cycles(scanner, BASE + 905, BASE + 990)
+    assert watch.files("complete").keys() == {"dead_7.mrc"}
+
+
 def test_serialem_images_take_their_metadata_from_the_mdoc(watch: Watch) -> None:
     put(watch.root, "tilt_001.mrc", IMAGE, BASE)
     mdoc = b"PixelSpacing = 2.14\n[ZValue = 0]\nTiltAngle = -3.0\nExposureDose = 3.05\nDefocus = -3.9\nDateTime = 10-Nov-26  10:15:07\n"
