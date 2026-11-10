@@ -12,4 +12,4 @@ Le projet est en phase de cadrage. Documents à lire :
 - [`docs/audit/AUDIT.md`](docs/audit/AUDIT.md) : audit vérifié de CryoViewer et de CryoViewer Live.
 - [`docs/research/`](docs/research/) : études sur les fondations (ImageJ/Fiji, Bio-Formats, formats) et sur la cryo-EM (EER, EPU, SerialEM, outils de suivi en direct).
 
-Le code existant est encore fourni sous forme d'archives : `CryoViewer.zip` et `cryoviewer-live.tar.gz`. Il sera décompressé dans `legacy/` au jalon M0.
+Le code existant se trouve dans `legacy/cryoviewer/` (CryoViewer, Python) et `legacy/cryoviewer-live/` (CryoViewer Live, Node/React). Il ne reçoit plus que les correctifs du jalon M0. Les archives d'origine restent disponibles dans l'historique git.

@@ -1,0 +1,16 @@
+[Unit]
+Description=CryoViewer Live - Real-time cryo-EM monitor
+After=network.target
+
+[Service]
+Type=simple
+User=louis
+WorkingDirectory=/srv/CryoViewerLive/cryoviewer-live
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+Environment=PORT=4200
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

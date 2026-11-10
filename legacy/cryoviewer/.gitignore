@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Cryo-EM data — never commit raw data
+*.mrc
+*.mrcs
+*.eer
+*.st
+*.rec
+*.ali
+*.map
+*.tif
+*.tiff
