@@ -16,7 +16,7 @@ fi
 echo "Python : $PYTHON ($($PYTHON --version 2>&1))"
 
 # Installe les dépendances manquantes (module:paquet)
-for spec in numpy:numpy PIL:pillow tifffile:tifffile; do
+for spec in numpy:numpy PIL:pillow tifffile:tifffile imagecodecs:imagecodecs; do
     mod="${spec%%:*}"; pkg="${spec##*:}"
     $PYTHON -c "import $mod" 2>/dev/null || \
       $PYTHON -m pip install "$pkg" -q --break-system-packages 2>/dev/null || \

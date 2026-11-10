@@ -5,10 +5,11 @@ Formats : .mrc .mrcs .st .rec .map .eer .tif .tiff .jpg .jpeg .png
 Usage   : python3 server.py [file_or_dir] [--port 7473]
 """
 
-import struct, json, base64, io, threading, webbrowser, argparse, traceback
+import struct, json, base64, io, os, sys, math, threading, webbrowser, argparse, traceback
+import tempfile, shutil, atexit, hashlib, hmac, socket
 import numpy as np
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
 CRYO_EXTS  = {'.mrc', '.mrcs', '.st', '.rec', '.ali', '.map', '.eer'}
@@ -51,12 +52,13 @@ def parse_mrc(f):
     rms          = struct.unpack_from(e + 'f',  raw, 216)[0]
     if nx <= 0 or ny <= 0:
         raise ValueError(f"Bad MRC dims {nx}x{ny}")
-    apix   = (xlen / mx) if mx > 0 and xlen > 0 else 1.0
+    apix_known = mx > 0 and xlen > 0
+    apix   = (xlen / mx) if apix_known else 1.0
     endian = 'big' if big else 'little'
     offset = 1024 + max(0, nsymbt)
     dtype  = MRC_MODES.get(mode, np.float32)
     return dict(nx=nx, ny=ny, nz=nz, nframes=max(1, nz), mode=mode,
-                apix=apix, endian=endian, offset=offset, dtype=dtype,
+                apix=apix, apix_known=apix_known, endian=endian, offset=offset, dtype=dtype,
                 dmin=float(dmin), dmax=float(dmax), dmean=float(dm), rms=float(rms))
 
 def read_mrc_frame(f, h, idx):
@@ -84,39 +86,50 @@ def read_mrc_frame(f, h, idx):
     return arr.reshape(ny, nx).astype(np.float32)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EER PARSER  (preview only — real decode needs RELION/MotionCor)
+# EER  (Falcon 4/4i electron events, decoded with tifffile + imagecodecs)
 # ──────────────────────────────────────────────────────────────────────────────
+# A single EER fraction holds ~0.01 electron per pixel, so "frames" shown in the
+# viewer are sums of consecutive fractions (at most EER_MAX_GROUPS groups).
+# The average over all frames is the mean of the group sums.
+# EER files do not carry the specimen pixel size: it stays "unknown" (1.0 Å/px).
 
-def parse_eer(f):
-    f.seek(0)
-    hdr    = f.read(4)
-    endian = '<' if hdr[:2] == b'II' else '>'
-    ver    = struct.unpack_from(endian + 'H', hdr, 2)[0]
-    bigtiff = (ver == 43)
-    f.seek(8 if bigtiff else 4)
-    ifd = struct.unpack(endian + ('Q' if bigtiff else 'I'), f.read(8 if bigtiff else 4))[0]
-    nframes = 0; w = h = 4096
-    while ifd and nframes < 20000:
-        nframes += 1
-        f.seek(ifd)
-        try:
-            n   = struct.unpack(endian + ('Q' if bigtiff else 'H'), f.read(8 if bigtiff else 2))[0]
-            esz = 20 if bigtiff else 12
-            for _ in range(min(n, 64)):
-                e   = f.read(esz)
-                if len(e) < esz: break
-                tag = struct.unpack_from(endian + 'H', e, 0)[0]
-                if tag == 256: w = struct.unpack_from(endian + 'I', e, 8)[0]
-                if tag == 257: h = struct.unpack_from(endian + 'I', e, 8)[0]
-            ifd = struct.unpack(endian + ('Q' if bigtiff else 'I'), f.read(8 if bigtiff else 4))[0]
-        except Exception:
-            break
-    return dict(nx=w, ny=h, nframes=max(1, nframes), apix=0.5,
-                is_eer=True, mode='eer', dmin=0.0, dmax=1.0, dmean=0.0, rms=0.0)
+EER_MAX_GROUPS = 50
 
-def read_eer_frame(h, idx):
-    rng = np.random.default_rng(idx * 7919)
-    return rng.poisson(0.01, (h['ny'], h['nx'])).astype(np.float32)
+def open_eer(path):
+    """Open an EER file. Returns (TiffFile, header dict)."""
+    try:
+        import tifffile
+        import imagecodecs
+    except ImportError:
+        raise ValueError("EER decoding needs the 'tifffile' and 'imagecodecs' packages "
+                         "(pip install -r requirements.txt)")
+    eer = getattr(imagecodecs, 'EER', None)
+    if eer is None or not eer.available:
+        raise ValueError("This imagecodecs build has no EER decoder (pip install -U imagecodecs)")
+    tf = tifffile.TiffFile(str(path), is_eer=True)
+    try:
+        nfrac = len(tf.pages)
+        if nfrac == 0:
+            raise ValueError("EER file has no fractions")
+        ny, nx = tf.pages[0].shape[:2]
+        group = max(1, math.ceil(nfrac / EER_MAX_GROUPS))
+        h = dict(nx=int(nx), ny=int(ny), nframes=math.ceil(nfrac / group), apix=1.0,
+                 apix_known=False, is_eer=True, mode='eer', eer_fractions=nfrac,
+                 eer_group=group, dmin=0.0, dmax=0.0, dmean=0.0, rms=0.0)
+        return tf, h
+    except Exception:
+        tf.close()
+        raise
+
+def read_eer_frame(tf, h, idx):
+    """Sum of the EER fractions of group `idx` (electron counts per pixel)."""
+    g = h['eer_group']
+    start = idx * g
+    stop = min(h['eer_fractions'], start + g)
+    acc = np.zeros((h['ny'], h['nx']), dtype=np.float32)
+    for i in range(start, stop):
+        acc += tf.pages[i].asarray()
+    return acc
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TIFF / IMAGE LOADER  — handles 8/16/32-bit, RGB, multi-page stacks
@@ -124,7 +137,7 @@ def read_eer_frame(h, idx):
 
 def load_image_file(path):
     """
-    Returns (list_of_float32_arrays, apix).
+    Returns (list_of_float32_arrays, apix, apix_known).
     list has one element per page/frame.
     """
     ext = Path(path).suffix.lower()
@@ -136,6 +149,7 @@ def load_image_file(path):
             with tifffile.TiffFile(str(path)) as tf:
                 # pixel size from metadata
                 apix = 1.0
+                apix_known = False
                 try:
                     page = tf.pages[0]
                     xres = page.tags.get('XResolution')
@@ -155,6 +169,7 @@ def load_image_file(path):
                             elif u == 3:
                                 # cm: convert res (pixels/cm) → apix (Å/pixel)
                                 apix = 1e8 / res  # 1 cm = 1e8 Å
+                                apix_known = True
                             else:
                                 # inch by default: pixels/inch → not useful for cryo, keep 1.0
                                 apix = 1.0
@@ -172,7 +187,7 @@ def load_image_file(path):
                     data = data[..., :3].mean(axis=-1)
 
                 frames = [data[i].astype(np.float32) for i in range(data.shape[0])]
-                return frames, apix
+                return frames, apix, apix_known
         except ImportError:
             pass  # fall through to PIL
         except Exception as e:
@@ -182,6 +197,7 @@ def load_image_file(path):
     from PIL import Image
     img = Image.open(str(path))
     apix = 1.0
+    apix_known = False
 
     # Try to extract apix from PIL TIFF tags
     try:
@@ -192,6 +208,7 @@ def load_image_file(path):
             xres = xres[0] / xres[1] if isinstance(xres, (tuple, list)) else float(xres)
             if xres > 0 and unit == 3:
                 apix = 1e8 / xres
+                apix_known = True
     except Exception:
         pass
 
@@ -206,7 +223,7 @@ def load_image_file(path):
 
     if not frames:
         frames = [_pil_to_float32(img)]
-    return frames, apix
+    return frames, apix, apix_known
 
 def _pil_to_float32(img):
     from PIL import Image
@@ -253,11 +270,40 @@ def auto_contrast(img, lo=2.0, hi=98.0):
     flat = img.ravel()
     step = max(1, len(flat) // 200_000)
     s    = flat[::step]
+    s    = s[np.isfinite(s)]
+    if s.size == 0:
+        return 0.0, 1.0
     vmin = float(np.percentile(s, lo))
     vmax = float(np.percentile(s, hi))
     if vmax <= vmin:
         vmax = vmin + 1.0
     return vmin, vmax
+
+
+def sanitize(img):
+    """Replace NaN/Inf pixels by the mean of the finite ones (so FFT/contrast stay finite)."""
+    fin = np.isfinite(img)
+    if fin.all():
+        return img
+    fill = float(img[fin].mean()) if fin.any() else 0.0
+    return np.where(fin, img, np.float32(fill)).astype(np.float32)
+
+
+def image_stats(img, lo=0.1, hi=99.9):
+    """min/max/mean/std of an image (assumed finite) and a robust display range.
+
+    The robust range (percentiles lo..hi) drives the histogram and the contrast
+    sliders, so a few hot or dead pixels no longer squash everything else.
+    """
+    flat = img.ravel()
+    step = max(1, flat.size // 500_000)
+    rlo, rhi = (float(v) for v in np.percentile(flat[::step], [lo, hi]))
+    if rhi <= rlo:
+        rlo, rhi = float(flat.min()), float(flat.max())
+        if rhi <= rlo:
+            rhi = rlo + 1.0
+    return dict(min=float(flat.min()), max=float(flat.max()),
+                mean=float(flat.mean()), std=float(flat.std()), rlo=rlo, rhi=rhi)
 
 
 def apply_contrast(img, vmin, vmax, gamma=1.0, invert=False):
@@ -285,45 +331,70 @@ def to_png_b64(arr_u8, max_dim=None):
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def make_histogram(img, bins=256):
+def make_histogram(img, bins=256, rng=None):
+    """Histogram of a subsample; with rng=(lo, hi), values outside are counted in the end bins."""
     flat = img.ravel()
     step = max(1, len(flat) // 500_000)
-    c, e = np.histogram(flat[::step], bins=bins)
+    sub  = flat[::step]
+    sub  = sub[np.isfinite(sub)]
+    if rng is not None and rng[1] > rng[0]:
+        c, e = np.histogram(np.clip(sub, rng[0], rng[1]), bins=bins, range=rng)
+    else:
+        c, e = np.histogram(sub, bins=bins)
     return c.tolist(), e.tolist()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # FILE CACHE
 # ──────────────────────────────────────────────────────────────────────────────
 
-class CryoFile:
-    MAX_CACHE = 24
+def _num(v, nd=3):
+    """Rounded float for JSON, or None when missing / NaN / Inf (header stats can be NaN)."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(v, nd) if math.isfinite(v) else None
 
-    def __init__(self, path):
+
+class CryoFile:
+    MAX_CACHE = 24                    # frames
+    MAX_CACHE_BYTES = 512 * 1024**2   # and at most this many bytes of cached frames
+
+    def __init__(self, path, display_name=None):
         self.path = Path(path)
+        self.display_name = display_name or self.path.name
         self.ext  = self.path.suffix.lower()
         self._f   = None
+        self._tf  = None      # tifffile handle (EER)
         self.hdr  = None
         self._frames  = []    # list of arrays for image files
         self._cache   = {}    # idx → float32 frame
         self._corder  = []
+        self._cbytes  = 0
+        # One request thread at a time per file: frame reads use seek()+read() on a
+        # shared handle, and the cache is mutated.
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self):
         if self.ext in IMAGE_EXTS:
-            frames, apix = load_image_file(self.path)
+            frames, apix, apix_known = load_image_file(self.path)
             self._frames = frames
             ny, nx = frames[0].shape
-            sample = frames[0]
-            self.hdr = dict(nx=nx, ny=ny, nframes=len(frames), apix=apix,
+            sample = sanitize(frames[0])
+            self.hdr = dict(nx=nx, ny=ny, nframes=len(frames), apix=apix, apix_known=apix_known,
                             mode='img', is_eer=False,
                             dmin=float(sample.min()), dmax=float(sample.max()),
                             dmean=float(sample.mean()), rms=float(sample.std()))
         elif self.ext == '.eer':
-            self._f  = open(self.path, 'rb')
-            self.hdr = parse_eer(self._f)
+            self._tf, self.hdr = open_eer(self.path)
         else:
             self._f  = open(self.path, 'rb')
-            self.hdr = parse_mrc(self._f)
+            try:
+                self.hdr = parse_mrc(self._f)
+            except Exception:
+                self._f.close()
+                raise
 
     @property
     def nframes(self): return max(1, self.hdr['nframes'])
@@ -336,71 +407,171 @@ class CryoFile:
 
     def get_frame(self, idx):
         idx = max(0, min(self.nframes - 1, idx))
-        if idx in self._cache:
-            return self._cache[idx]
-        if self._frames:
-            frame = self._frames[idx]
-        elif self.hdr.get('is_eer'):
-            frame = read_eer_frame(self.hdr, idx)
-        else:
-            frame = read_mrc_frame(self._f, self.hdr, idx)
-        if len(self._cache) >= self.MAX_CACHE:
-            del self._cache[self._corder.pop(0)]
-        self._cache[idx] = frame
-        self._corder.append(idx)
-        return frame
+        with self._lock:
+            if idx in self._cache:
+                return self._cache[idx]
+            if self._frames:
+                return self._frames[idx]          # already in memory, no need to cache
+            if self.hdr.get('is_eer'):
+                frame = read_eer_frame(self._tf, self.hdr, idx)
+            else:
+                frame = read_mrc_frame(self._f, self.hdr, idx)
+            while self._corder and (len(self._cache) >= self.MAX_CACHE or
+                                    self._cbytes + frame.nbytes > self.MAX_CACHE_BYTES):
+                old = self._cache.pop(self._corder.pop(0))
+                self._cbytes -= old.nbytes
+            self._cache[idx] = frame
+            self._corder.append(idx)
+            self._cbytes += frame.nbytes
+            return frame
 
     def get_average(self, start, end):
-        start = max(0, start)
+        """Mean of frames start..end-1 (0-based, end exclusive)."""
+        start = max(0, min(self.nframes - 1, start))
         end   = min(self.nframes, end)
         if start >= end:
             return self.get_frame(start)
-        acc = self.get_frame(start).astype(np.float64)
-        for i in range(start + 1, end):
-            acc += self.get_frame(i)
-        return (acc / (end - start)).astype(np.float32)
+        with self._lock:
+            acc = self.get_frame(start).astype(np.float64)
+            for i in range(start + 1, end):
+                acc += self.get_frame(i)
+            return (acc / (end - start)).astype(np.float32)
 
     def info(self):
         h = self.hdr
-        return dict(filename=self.path.name, path=str(self.path),
-                    nx=h['nx'], ny=h['ny'], nframes=self.nframes,
-                    apix=round(self.apix, 5),
-                    mode=str(h.get('mode', '?')),
-                    dmin=round(float(h.get('dmin', 0)), 3),
-                    dmax=round(float(h.get('dmax', 0)), 3),
-                    dmean=round(float(h.get('dmean', 0)), 3),
-                    is_eer=bool(h.get('is_eer', False)))
+        d = dict(filename=self.display_name, path=str(self.path),
+                 nx=h['nx'], ny=h['ny'], nframes=self.nframes,
+                 apix=round(self.apix, 5), apix_known=bool(h.get('apix_known', False)),
+                 mode=str(h.get('mode', '?')),
+                 dmin=_num(h.get('dmin')), dmax=_num(h.get('dmax')), dmean=_num(h.get('dmean')),
+                 is_eer=bool(h.get('is_eer', False)))
+        if h.get('is_eer'):
+            d.update(eer_fractions=h['eer_fractions'], eer_group=h['eer_group'])
+        return d
 
     def close(self):
-        if self._f:
-            self._f.close()
-            self._f = None
+        with self._lock:
+            if self._f:
+                self._f.close()
+                self._f = None
+            if self._tf:
+                self._tf.close()
+                self._tf = None
+            self._cache.clear(); self._corder.clear(); self._cbytes = 0
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APP STATE
 # ──────────────────────────────────────────────────────────────────────────────
 
+UPLOAD_PREFIX = '__upload__'
+
+def _inside(child, parent):
+    rel = os.path.relpath(child, parent)
+    return rel == '.' or not (rel == '..' or rel.startswith('..' + os.sep) or os.path.isabs(rel))
+
+
 class State:
-    def __init__(self):
-        self.files   = {}
+    MAX_OPEN = 8   # opened files kept in memory (least recently used ones are closed)
+
+    def __init__(self, roots=None):
+        self.files   = {}       # key → CryoFile (key = absolute path, symlinks NOT resolved)
         self.order   = []
         self.current = None
+        self.roots   = []       # real paths; empty = unrestricted (local, loopback-only use)
         self.cwd     = str(Path.home())
+        self.uploads = {}       # upload key → (temp path, original name)
+        self.upload_dir = None
+        self.lock    = threading.RLock()
+        if roots:
+            self.set_roots(roots)
+
+    def set_roots(self, roots):
+        real = []
+        for r in roots:
+            rp = os.path.realpath(os.path.expanduser(r))
+            if not os.path.isdir(rp):
+                raise ValueError(f"Data root is not a directory: {r}")
+            real.append(rp)
+        self.roots = real
+        if real:
+            self.cwd = real[0]
+
+    def check_path(self, path):
+        """Absolute path (symlinks not resolved) if allowed, else PermissionError."""
+        p = os.path.abspath(os.path.expanduser(str(path)))
+        if self.roots:
+            real = os.path.realpath(p)
+            if not any(_inside(real, r) for r in self.roots):
+                raise PermissionError("Path is outside the allowed data roots")
+        return p
+
+    def key_for(self, path):
+        path = str(path)
+        return path if path.startswith(UPLOAD_PREFIX) else self.check_path(path)
+
+    def get(self, path):
+        """CryoFile for a path or upload key, (re)opening it if needed."""
+        key = self.key_for(path)
+        with self.lock:
+            cf = self.files.get(key)
+            if cf is None:
+                if key.startswith(UPLOAD_PREFIX):
+                    if key not in self.uploads:
+                        raise KeyError("File not loaded")
+                    tmp, name = self.uploads[key]
+                    cf = CryoFile(tmp, display_name=name)
+                else:
+                    cf = CryoFile(key)
+                self.files[key] = cf
+                self._evict(keep=key)
+            if key not in self.order:
+                self.order.append(key)
+            # most recently used last
+            self.files[key] = self.files.pop(key)
+            return key, cf
 
     def open(self, path):
-        p = str(Path(path).resolve())
-        if p not in self.files:
-            self.files[p] = CryoFile(p)
-        if p not in self.order:
-            self.order.append(p)
-        self.current = p
-        return self.files[p]
+        key, cf = self.get(path)
+        self.current = key
+        return cf
+
+    def _evict(self, keep):
+        while len(self.files) > self.MAX_OPEN:
+            victim = next((k for k in self.files if k not in (keep, self.current)), None)
+            if victim is None:
+                break
+            self.files.pop(victim).close()
+
+    def add_upload(self, name, tmp_path):
+        key = UPLOAD_PREFIX + name
+        with self.lock:
+            old = self.files.pop(key, None)
+            if old:
+                old.close()
+            if key in self.uploads:
+                try: os.unlink(self.uploads[key][0])
+                except OSError: pass
+            self.uploads[key] = (tmp_path, name)
+        return key
+
+    def new_upload_path(self, suffix):
+        with self.lock:
+            if self.upload_dir is None:
+                self.upload_dir = tempfile.mkdtemp(prefix='cryoviewer-upload-')
+                atexit.register(shutil.rmtree, self.upload_dir, True)
+        fd, path = tempfile.mkstemp(suffix=suffix, dir=self.upload_dir)
+        os.close(fd)
+        return path
 
     def scan(self, dirpath):
-        d = Path(dirpath).expanduser().resolve()
-        found = sorted(
-            [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in ALL_EXTS],
-            key=lambda x: x.name)
+        d = Path(self.check_path(dirpath))
+        found = []
+        for f in sorted(d.iterdir(), key=lambda x: x.name):
+            try:
+                if f.is_file() and f.suffix.lower() in ALL_EXTS:
+                    found.append(f)
+            except OSError:
+                continue
         self.cwd = str(d)
         for f in found:
             p = str(f)
@@ -409,26 +580,44 @@ class State:
         return found
 
     def list(self):
-        return [dict(path=p, name=Path(p).name,
-                     loaded=p in self.files, active=p == self.current)
-                for p in self.order]
+        result = []
+        for p in self.order:
+            name = p[len(UPLOAD_PREFIX):] if p.startswith(UPLOAD_PREFIX) else Path(p).name
+            result.append(dict(path=p, name=name, loaded=p in self.files, active=p == self.current))
+        return result
 
     def browse(self, dirpath):
-        d = Path(dirpath).expanduser().resolve()
+        d = Path(self.check_path(dirpath))
         if not d.is_dir():
             raise ValueError(f"Not a directory: {d}")
+        try:
+            items = list(d.iterdir())
+        except PermissionError:
+            raise ValueError(f"Permission denied: {d}")
         entries = []
-        if d.parent != d:
-            entries.append(dict(name='..', path=str(d.parent), kind='dir'))
-        for item in sorted(d.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+        parent = d.parent
+        if parent != d:
+            try:
+                self.check_path(parent)
+                entries.append(dict(name='..', path=str(parent), kind='dir'))
+            except PermissionError:
+                pass
+        rows = []
+        for item in items:
             if item.name.startswith('.'):
                 continue
-            if item.is_dir():
-                entries.append(dict(name=item.name, path=str(item), kind='dir'))
-            elif item.suffix.lower() in ALL_EXTS:
-                entries.append(dict(name=item.name, path=str(item), kind='file',
-                                    ext=item.suffix.lower()[1:],
-                                    size=_hsize(item.stat().st_size)))
+            try:                      # one broken or unreadable entry must not break the listing
+                if self.roots and not any(_inside(os.path.realpath(item), r) for r in self.roots):
+                    continue          # symlink leading outside the data roots
+                if item.is_dir():
+                    rows.append((0, item.name.lower(), dict(name=item.name, path=str(item), kind='dir')))
+                elif item.suffix.lower() in ALL_EXTS and item.is_file():
+                    rows.append((1, item.name.lower(), dict(
+                        name=item.name, path=str(item), kind='file',
+                        ext=item.suffix.lower()[1:], size=_hsize(item.stat().st_size))))
+            except OSError:
+                continue
+        entries += [r[2] for r in sorted(rows, key=lambda r: (r[0], r[1]))]
         return str(d), entries
 
 ST = State()
@@ -474,7 +663,7 @@ def make_demo_frame(lp=20.0, vmin=None, vmax=None, gamma=1.0, invert=False):
                          dmin=round(dmin,2), dmax=round(dmax,2)),
         histogram = dict(counts=cnt, edges=edges),
         info      = dict(filename='demo_micrograph.mrc', nx=nx, ny=ny, nframes=40,
-                         apix=apix, mode='2', is_eer=False,
+                         apix=apix, apix_known=True, mode='2', is_eer=False,
                          dmin=round(dmin,2), dmax=round(dmax,2), dmean=round(float(img.mean()),2))
     )
 
@@ -482,38 +671,112 @@ def make_demo_frame(lp=20.0, vmin=None, vmax=None, gamma=1.0, invert=False):
 # HTTP SERVER
 # ──────────────────────────────────────────────────────────────────────────────
 
+LOOPBACK_NAMES = {'localhost', '127.0.0.1', '[::1]'}
+
+
+def is_loopback(host):
+    return host in ('localhost', '::1') or host.startswith('127.')
+
+
+def _host_only(h):
+    h = (h or '').strip().lower()
+    if h.startswith('['):
+        return h[:h.find(']') + 1] if ']' in h else h
+    return h.rsplit(':', 1)[0] if h.count(':') == 1 else h
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
+    timeout = 60                     # idle keep-alive sockets are closed after this many seconds
+
+    # Set by main() (class attributes so the tests can configure them too)
+    allowed_hosts = LOOPBACK_NAMES   # None = no Host check
+    trusted_hosts = None             # public names given with --allowed-host (reverse proxy)
+    auth = None                      # "user:password" or None
+    max_upload = 2 * 1024**3         # bytes
 
     def log_message(self, *a): pass
 
-    def _send(self, body, ct='application/json', status=200):
+    def _send(self, body, ct='application/json', status=200, headers=None):
         if isinstance(body, dict):
-            body = json.dumps(body, ensure_ascii=False).encode()
+            body = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
         elif isinstance(body, str):
             body = body.encode()
         self.send_response(status)
         self.send_header('Content-Type', ct)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Connection', 'keep-alive')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
+        self.send_header('Cache-Control', 'no-store')
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def _error(self, e, status=None):
+        """JSON error without traceback (the traceback goes to the server log)."""
+        if status is None:
+            if isinstance(e, PermissionError):
+                status = 403
+            elif isinstance(e, (KeyError, FileNotFoundError)):
+                status = 404
+            elif isinstance(e, ValueError):
+                status = 400
+            else:
+                status = 500
+        if status >= 500:
+            traceback.print_exc(file=sys.stderr)
+        msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+        self._send(dict(error=msg or e.__class__.__name__), status=status)
+
+    def _guard(self):
+        """Host allow-list (DNS rebinding) and optional Basic auth. False = response sent."""
+        if self.allowed_hosts is not None and _host_only(self.headers.get('Host')) not in self.allowed_hosts:
+            self._send(dict(error='Forbidden host'), status=403)
+            return False
+        if self.auth:
+            hdr = self.headers.get('Authorization', '')
+            ok = False
+            if hdr[:6].lower() == 'basic ':
+                try:
+                    given = base64.b64decode(hdr[6:].strip()).decode('utf-8')
+                    ok = hmac.compare_digest(hashlib.sha256(given.encode()).digest(),
+                                             hashlib.sha256(self.auth.encode()).digest())
+                except Exception:
+                    ok = False
+            if not ok:
+                self._send(dict(error='Authentication required'), status=401,
+                           headers={'WWW-Authenticate': 'Basic realm="CryoViewer", charset="UTF-8"'})
+                return False
+        return True
+
     def do_GET(self):
         try:
-            self._route()
+            if self._guard():
+                self._route()
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
-            try: self._send({'error': str(e), 'trace': traceback.format_exc()}, status=500)
-            except: pass
+            try: self._error(e)
+            except Exception: pass
 
     def _route(self):
         parsed = urlparse(self.path)
         p, qs  = parsed.path, parse_qs(parsed.query)
         q      = lambda k, d=None: unquote(qs[k][0]) if k in qs else d
-        qf     = lambda k, d=0.0: float(q(k) or d)
-        qi     = lambda k, d=0:   int(q(k) or d)
+
+        def qf(k, d=0.0):
+            try:
+                v = float(q(k) or d)
+            except (TypeError, ValueError):
+                return d
+            return v if math.isfinite(v) else d
+
+        def qi(k, d=0):
+            try:
+                return int(q(k) or d)
+            except (TypeError, ValueError):
+                return d
 
         if p == '/':
             self._send(UI.encode(), 'text/html; charset=utf-8'); return
@@ -521,11 +784,14 @@ class Handler(BaseHTTPRequestHandler):
         # ── browse ──────────────────────────────────────────────────────────
         if p == '/api/browse':
             try:
-                cwd, entries = ST.browse(q('dir', ST.cwd))
+                d = q('dir') or ST.cwd
+                if d == '~' and ST.roots:
+                    d = ST.roots[0]          # "home" = first data root when roots are configured
+                cwd, entries = ST.browse(d)
                 ST.cwd = cwd
                 self._send(dict(cwd=cwd, entries=entries))
             except Exception as e:
-                self._send(dict(error=str(e)), status=400)
+                self._error(e, status=403 if isinstance(e, PermissionError) else 400)
             return
 
         # ── load ─────────────────────────────────────────────────────────────
@@ -535,18 +801,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(dict(error='no path'), status=400); return
             try:
                 cf = ST.open(path)
-                self._send(dict(ok=True, info=cf.info(), list=ST.list()))
+                self._send(dict(ok=True, key=ST.current, info=cf.info(), list=ST.list()))
             except Exception as e:
-                self._send(dict(error=str(e), trace=traceback.format_exc()), status=500)
+                self._error(e)
             return
 
         # ── frame ────────────────────────────────────────────────────────────
         if p == '/api/frame':
             path = q('path', ST.current or '')
-            if not path or path not in ST.files:
-                self._send(dict(error='File not loaded')); return
-            cf  = ST.files[path]
+            if not path:
+                self._send(dict(error='File not loaded'), status=404); return
             try:
+                _, cf = ST.get(path)
                 idx    = qi('idx')
                 gamma  = max(0.05, qf('gamma', 1.0))
                 inv    = q('invert', '0') == '1'
@@ -557,40 +823,43 @@ class Handler(BaseHTTPRequestHandler):
                 avg_e  = qi('avg_e', cf.nframes)
 
                 img = cf.get_average(avg_s, avg_e) if avg else cf.get_frame(idx)
+                img = sanitize(img)
 
                 if lp > 0:
                     img = lowpass_filter(img, lp, cf.apix)
 
-                dmin = float(img.min());  dmax = float(img.max())
-
+                st = image_stats(img)
                 if auto:
                     lo  = qf('lo', 2.0);  hi = qf('hi', 98.0)
                     vmin, vmax = auto_contrast(img, lo, hi)
                 else:
-                    vmin = qf('vmin', dmin)
-                    vmax = qf('vmax', dmax)
+                    vmin = qf('vmin', st['rlo'])
+                    vmax = qf('vmax', st['rhi'])
 
                 u8  = apply_contrast(img, vmin, vmax, gamma, inv)
-                cnt, edges = make_histogram(img)
+                cnt, edges = make_histogram(img, rng=(st['rlo'], st['rhi']))
 
+                # dmin/dmax = robust range used by the histogram and the contrast sliders
                 self._send(dict(
                     image     = to_png_b64(u8),
-                    stats     = dict(min=round(dmin,4), max=round(dmax,4),
-                                     mean=round(float(img.mean()),4), std=round(float(img.std()),4),
+                    stats     = dict(min=round(st['min'],4), max=round(st['max'],4),
+                                     mean=round(st['mean'],4), std=round(st['std'],4),
                                      vmin=round(vmin,4), vmax=round(vmax,4),
-                                     dmin=round(dmin,4), dmax=round(dmax,4)),
+                                     dmin=round(st['rlo'],4), dmax=round(st['rhi'],4)),
                     histogram = dict(counts=cnt, edges=edges)
                 ))
             except Exception as e:
-                self._send(dict(error=str(e), trace=traceback.format_exc()), status=500)
+                self._error(e)
             return
 
         # ── demo ─────────────────────────────────────────────────────────────
         if p == '/api/demo':
             lp     = qf('lp', 20.0)
             vmin_r = q('vmin'); vmax_r = q('vmax')
-            vmin   = float(vmin_r) if vmin_r else None
-            vmax   = float(vmax_r) if vmax_r else None
+            vmin   = qf('vmin', None) if vmin_r else None
+            vmax   = qf('vmax', None) if vmax_r else None
+            if vmin is None or vmax is None:
+                vmin = vmax = None
             gamma  = max(0.05, qf('gamma', 1.0))
             inv    = q('invert', '0') == '1'
             self._send(make_demo_frame(lp, vmin, vmax, gamma, inv))
@@ -600,9 +869,61 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/list':
             self._send(dict(list=ST.list())); return
 
-        self.send_response(404)
-        self.send_header('Content-Length', '0')
-        self.end_headers()
+        self._send(dict(error='Not found'), status=404)
+
+    # ── upload (drag & drop from the browser) ────────────────────────────────
+    def do_POST(self):
+        try:
+            if not self._guard():
+                return
+            if urlparse(self.path).path != '/api/upload':
+                self._send(dict(error='Not found'), status=404); return
+            # Refuse cross-site uploads (CSRF): a browser always sends Origin on POST.
+            origin = self.headers.get('Origin')
+            if origin is not None:
+                o = urlparse(origin)
+                same = bool(o.netloc) and o.netloc.lower() == (self.headers.get('Host') or '').lower()
+                proxied = bool(self.trusted_hosts) and _host_only(o.netloc) in self.trusted_hosts
+                if not (same or proxied):
+                    self._send(dict(error='Cross-origin upload refused'), status=403); return
+            try:
+                length = int(self.headers.get('Content-Length', ''))
+            except ValueError:
+                self._send(dict(error='Content-Length required'), status=411); return
+            if length <= 0:
+                self._send(dict(error='Empty upload'), status=400); return
+            if length > self.max_upload:
+                self.close_connection = True
+                self._send(dict(error=f'Upload too large (limit {_hsize(self.max_upload)})'), status=413)
+                return
+            filename = Path(unquote(self.headers.get('X-Filename', 'upload.mrc'))).name or 'upload.mrc'
+            ext      = Path(filename).suffix.lower()
+            if ext not in ALL_EXTS:
+                self.close_connection = True
+                self._send(dict(error=f'Unsupported format: {ext}'), status=400); return
+            # Stream to a temp file (not into RAM); deleted on replacement and at exit.
+            tmp = ST.new_upload_path(ext)
+            try:
+                remaining = length
+                with open(tmp, 'wb') as out:
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(remaining, 1 << 20))
+                        if not chunk:
+                            raise ValueError('Upload interrupted')
+                        out.write(chunk)
+                        remaining -= len(chunk)
+                key = ST.add_upload(filename, tmp)
+                cf = ST.open(key)
+            except Exception:
+                try: os.unlink(tmp)
+                except OSError: pass
+                raise
+            self._send(dict(ok=True, key=key, info=cf.info(), list=ST.list()))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            try: self._error(e)
+            except Exception: pass
 
 # ──────────────────────────────────────────────────────────────────────────────
 # UI  (HTML + CSS + JS)
@@ -613,8 +934,6 @@ UI = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <title>CryoViewer</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
 /* ── RESET & TOKENS ── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -624,7 +943,7 @@ UI = r"""<!DOCTYPE html>
   --acc:#00e5ff; --acc-dim:rgba(0,229,255,.12); --acc-glow:rgba(0,229,255,.25);
   --amber:#ffb340; --green:#39ff9a; --purple:#b48eff; --red:#ff4d6d;
   --txt:#b8d4e8; --dim:#4d6e87; --dim2:#253d52;
-  --mono:'JetBrains Mono',monospace; --sans:'Syne',sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; --sans:'Syne',system-ui,-apple-system,'Segoe UI',sans-serif;
 }
 html,body{height:100vh;overflow:hidden;background:var(--bg0);color:var(--txt);font-family:var(--mono);font-size:12px}
 
@@ -799,6 +1118,7 @@ input.ctrl.lp::-webkit-slider-thumb{background:var(--purple);box-shadow:0 0 5px 
 #toast.err{border-color:rgba(255,77,109,.4);color:var(--red)}
 #toast.off{opacity:0;transform:translateY(6px);pointer-events:none}
 .hidden{display:none!important}
+.irow.warn .iv{color:var(--amber)}
 </style>
 </head>
 <body>
@@ -856,9 +1176,9 @@ input.ctrl.lp::-webkit-slider-thumb{background:var(--purple);box-shadow:0 0 5px 
     <button class="tbtn amber" id="btn-avgr" onclick="toggleAvgRange()">Avg: OFF</button>
     <div id="avg-wrap" class="hidden" style="display:flex;align-items:center;gap:4px">
       <span class="lbl9">fr</span>
-      <input class="num-inp" id="avg-s" type="number" value="0" style="width:46px" oninput="debounceFetch()">
+      <input class="num-inp" id="avg-s" type="number" value="1" min="1" style="width:46px" oninput="onAvgRange()">
       <span class="lbl9">to</span>
-      <input class="num-inp" id="avg-e" type="number" value="1" style="width:46px" oninput="debounceFetch()">
+      <input class="num-inp" id="avg-e" type="number" value="1" min="1" style="width:46px" oninput="onAvgRange()">
     </div>
     <span class="dim-lbl" id="dim-lbl">—</span>
   </div>
@@ -1088,11 +1408,19 @@ function busy(v) {
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
-async function api(url) {
-  const r = await fetch(url);
-  const d = await r.json();
-  if (d.error) throw new Error(d.error);
+async function api(url, signal) {
+  const r = await fetch(url, { signal });
+  const d = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
   return d;
+}
+
+// ── DOM helper: file names are inserted as text, never as HTML ──────────────
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
 }
 
 // ── VIEWPORT TRANSFORM ────────────────────────────────────────────────────────
@@ -1284,31 +1612,32 @@ async function browseTo(dir) {
   } catch(e) { toast(e.message, 'err'); }
 }
 
-function esc(s) { return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-
 function renderBrowser(entries) {
-  const cnt  = entries.filter(e => e.kind === 'file').length;
-  document.getElementById('fbr-cnt').textContent = cnt;
-  let h = '';
-  for (const e of entries) {
-    if (e.kind === 'dir') {
-      const icon = e.name === '..' ? '&#8593;' : '&#128193;';
-      h += `<div class="b-item" onclick="browseTo('${esc(e.path)}')">`
-         + `<span class="b-icon">${icon}</span><span class="b-name dir">${e.name}</span></div>`;
-    }
-  }
   const files = entries.filter(e => e.kind === 'file');
+  document.getElementById('fbr-cnt').textContent = files.length;
+  const items = [];
+  for (const e of entries) {
+    if (e.kind !== 'dir') continue;
+    const row = el('div', 'b-item');
+    row.append(el('span', 'b-icon', e.name === '..' ? '↑' : '\u{1F4C1}'), el('span', 'b-name dir', e.name));
+    row.addEventListener('click', () => browseTo(e.path));
+    items.push(row);
+  }
   if (files.length) {
-    h += '<div class="fl-div"></div>';
+    items.push(el('div', 'fl-div'));
     for (const e of files) {
-      const act = e.path === S.file ? ' act' : '';
-      h += `<div class="b-item${act}" onclick="loadFile('${esc(e.path)}')">`
-         + `<span class="b-icon">&#128196;</span>`
-         + `<span class="b-name b-ext-${e.ext}">${e.name}</span>`
-         + `<span class="b-meta">${e.size||''}</span></div>`;
+      const row = el('div', 'b-item' + (e.path === S.file ? ' act' : ''));
+      const ext = String(e.ext || '').replace(/[^a-z0-9]/gi, '');
+      row.append(el('span', 'b-icon', '\u{1F4C4}'), el('span', 'b-name b-ext-' + ext, e.name),
+                 el('span', 'b-meta', e.size || ''));
+      row.addEventListener('click', () => loadFile(e.path));
+      items.push(row);
     }
   }
-  document.getElementById('browser-list').innerHTML = h;
+  const list = document.getElementById('browser-list');
+  const opened = document.getElementById('loaded-sec');
+  list.replaceChildren(...items);
+  if (opened) list.appendChild(opened);   // keep the "Opened" section
 }
 
 // ── LOAD FILE ─────────────────────────────────────────────────────────────────
@@ -1316,10 +1645,10 @@ async function loadFile(path) {
   busy(true); S.isDemo = false;
   try {
     const d = await api('/api/load?path=' + encodeURIComponent(path));
-    S.file = path; S.frame = 0; S.autoC = true;
+    S.file = d.key || path; S.frame = 0; S.autoC = true;
     applyInfo(d.info);
     if (d.list) renderLoaded(d.list);
-    await fetchFrame();
+    await fetchFrame({ rethrow: true });
     showViewer();
     toast(`Loaded: ${d.info.filename}`, 'ok');
     browseTo(document.getElementById('path-inp').value);
@@ -1337,12 +1666,14 @@ function applyInfo(info) {
   S.avgS = 0; S.avgE = S.nframes;
   document.getElementById('fslider').max = S.nframes - 1;
   document.getElementById('fslider').value = 0;
+  for (const id of ['avg-s', 'avg-e']) document.getElementById(id).max = S.nframes;
+  document.getElementById('avg-s').value = 1;
   document.getElementById('avg-e').value = S.nframes;
   const lbl = `1 / ${S.nframes}`;
   document.getElementById('fctr').textContent = lbl;
   document.getElementById('fsl-lbl').textContent = lbl;
   document.getElementById('dim-lbl').textContent =
-    `${info.nx}×${info.ny}  ·  ${S.nframes}fr  ·  ${info.apix}Å/px`;
+    `${info.nx}×${info.ny}  ·  ${S.nframes}fr  ·  ${info.apix}${info.apix_known ? '' : '?'}Å/px`;
   renderInfo(info);
 }
 
@@ -1353,20 +1684,22 @@ function showViewer() {
 }
 
 function renderLoaded(list) {
-  let el = document.getElementById('loaded-sec');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'loaded-sec';
-    document.getElementById('browser-list').appendChild(el);
+  let sec = document.getElementById('loaded-sec');
+  if (!sec) {
+    sec = el('div');
+    sec.id = 'loaded-sec';
+    document.getElementById('browser-list').appendChild(sec);
   }
   const loaded = list.filter(f => f.loaded);
-  if (!loaded.length) { el.innerHTML = ''; return; }
-  let h = '<div class="fl-div"></div><div class="fl-hdr">Opened</div>';
+  if (!loaded.length) { sec.replaceChildren(); return; }
+  const rows = [el('div', 'fl-div'), el('div', 'fl-hdr', 'Opened')];
   for (const f of loaded) {
-    h += `<div class="f-item${f.active?' act':''}" onclick="setActive('${esc(f.path)}')">`
-       + `<div class="f-dot"></div><span class="f-name">${f.name}</span></div>`;
+    const row = el('div', 'f-item' + (f.active ? ' act' : ''));
+    row.append(el('div', 'f-dot'), el('span', 'f-name', f.name));
+    row.addEventListener('click', () => setActive(f.path));
+    rows.push(row);
   }
-  el.innerHTML = h;
+  sec.replaceChildren(...rows);
 }
 
 async function setActive(path) {
@@ -1374,8 +1707,9 @@ async function setActive(path) {
   busy(true); S.file = path; S.frame = 0; S.autoC = true;
   try {
     const d = await api('/api/load?path=' + encodeURIComponent(path));
+    S.file = d.key || path;
     applyInfo(d.info);
-    await fetchFrame();
+    await fetchFrame({ rethrow: true });
     showViewer();
     if (d.list) renderLoaded(d.list);
   } catch(e) { toast(e.message, 'err'); }
@@ -1383,32 +1717,43 @@ async function setActive(path) {
 }
 
 // ── FETCH FRAME ───────────────────────────────────────────────────────────────
-async function fetchFrame() {
-  if (!S.file) return;
+// Only the latest request is rendered: a newer request aborts the previous one, and
+// responses that arrive late are ignored. Returns true when the frame was displayed.
+let _reqSeq = 0, _reqCtl = null;
+async function fetchFrame({ rethrow = false } = {}) {
+  if (!S.file) return false;
+  const seq = ++_reqSeq;
+  if (_reqCtl) _reqCtl.abort();
+  const ctl = _reqCtl = new AbortController();
 
+  let url;
   if (S.isDemo) {
     // For demo: pass current contrast params so server re-renders correctly
-    let url = `/api/demo?lp=${S.lp_on&&S.lp>0?S.lp:0}&gamma=${S.gamma.toFixed(3)}&invert=${S.invert?1:0}`;
+    url = `/api/demo?lp=${S.lp_on&&S.lp>0?S.lp:0}&gamma=${S.gamma.toFixed(3)}&invert=${S.invert?1:0}`;
     if (!S.autoC) url += `&vmin=${S.vmin}&vmax=${S.vmax}`;
-    try {
-      const d = await api(url);
-      renderImage(d.image);
-      receiveStats(d.stats, d.histogram, !S.autoC);
-    } catch(e) { toast(e.message,'err'); }
-    return;
+  } else {
+    url = `/api/frame?path=${encodeURIComponent(S.file)}`
+        + `&idx=${S.frame}&gamma=${S.gamma.toFixed(3)}&invert=${S.invert?1:0}`
+        + `&auto=${S.autoC?1:0}&lp=${S.lp_on&&S.lp>0?S.lp:0}`;
+    if (!S.autoC) url += `&vmin=${S.vmin}&vmax=${S.vmax}`;
+    if (S.avgMode) url += `&avg=1&avg_s=${S.avgS}&avg_e=${S.avgE}`;
   }
 
-  let url = `/api/frame?path=${encodeURIComponent(S.file)}`
-          + `&idx=${S.frame}&gamma=${S.gamma.toFixed(3)}&invert=${S.invert?1:0}`
-          + `&auto=${S.autoC?1:0}&lp=${S.lp_on&&S.lp>0?S.lp:0}`;
-  if (!S.autoC) url += `&vmin=${S.vmin}&vmax=${S.vmax}`;
-  if (S.avgMode) url += `&avg=1&avg_s=${S.avgS}&avg_e=${S.avgE}`;
-
   try {
-    const d = await api(url);
-    renderImage(d.image);
+    const d = await api(url, ctl.signal);
+    if (seq !== _reqSeq) return false;
+    await renderImage(d.image, seq);
+    if (seq !== _reqSeq) return false;
     receiveStats(d.stats, d.histogram, !S.autoC);
-  } catch(e) { toast(e.message,'err'); }
+    return true;
+  } catch(e) {
+    if (e.name === 'AbortError' || seq !== _reqSeq) return false;
+    if (rethrow) throw e;
+    toast(e.message, 'err');
+    return false;
+  } finally {
+    if (_reqCtl === ctl) _reqCtl = null;
+  }
 }
 
 function debounceFetch(ms=80) {
@@ -1449,9 +1794,12 @@ function fmt(v) {
 }
 
 // ── IMAGE RENDERING ───────────────────────────────────────────────────────────
-function renderImage(b64) {
+function renderImage(b64, seq) {
+  return new Promise(resolve => {
   const img = new Image();
+  img.onerror = () => resolve();
   img.onload = () => {
+    if (seq !== undefined && seq !== _reqSeq) return resolve();   // superseded
     $viewer.width  = img.width;
     $viewer.height = img.height;
     $vctx.drawImage(img, 0, 0);
@@ -1461,8 +1809,10 @@ function renderImage(b64) {
     $rcv.style.width  = img.width  + 'px';
     $rcv.style.height = img.height + 'px';
     redrawRuler();
+    resolve();
   };
   img.src = 'data:image/png;base64,' + b64;
+  });
 }
 
 // ── DEMO ──────────────────────────────────────────────────────────────────────
@@ -1655,46 +2005,67 @@ function prevFrame() { setFrame(S.frame-1); }
 function nextFrame() { setFrame(S.frame+1); }
 
 // ── PLAY ──────────────────────────────────────────────────────────────────────
+let _playGen = 0;
 function togglePlay() {
   S.playing = !S.playing;
   const btn = document.getElementById('pbtn');
-  btn.innerHTML = S.playing ? '&#9646;&#9646;' : '&#9654;';
+  btn.textContent = S.playing ? '❚❚' : '▶';
   btn.classList.toggle('on', S.playing);
-  if (S.playing) _tick(); else clearTimeout(S.playTimer);
+  clearTimeout(S.playTimer);
+  if (S.playing) _tick(++_playGen); else _playGen++;
 }
-function _tick() {
-  if (!S.playing) return;
-  S.playTimer = setTimeout(() => { setFrame(S.frame >= S.nframes-1 ? 0 : S.frame+1); _tick(); }, 1000/S.fps);
+async function _tick(gen) {
+  if (!S.playing || gen !== _playGen) return;
+  const t0 = performance.now();
+  S.frame = S.frame >= S.nframes-1 ? 0 : S.frame+1;
+  document.getElementById('fslider').value = S.frame;
+  updateFSL();
+  await fetchFrame();                       // wait until this frame is shown
+  if (!S.playing || gen !== _playGen) return;
+  S.playTimer = setTimeout(() => _tick(gen), Math.max(0, 1000/S.fps - (performance.now() - t0)));
 }
 
 // ── AVG ───────────────────────────────────────────────────────────────────────
-function toggleAvg() {
-  S.avgMode = !S.avgMode;
-  document.getElementById('btn-avg').classList.toggle('on', S.avgMode);
+function setAvgMode(on) {
+  S.avgMode = on;
+  document.getElementById('btn-avg').classList.toggle('on', on);
+  document.getElementById('avg-wrap').classList.toggle('hidden', !on);
+  const btn = document.getElementById('btn-avgr');
+  btn.textContent = `Avg: ${on ? 'ON' : 'OFF'}`;
+  btn.classList.toggle('on', on);
   fetchFrame();
 }
-function toggleAvgRange() {
-  S.avgMode = !S.avgMode;
-  const wrap = document.getElementById('avg-wrap');
-  const btn  = document.getElementById('btn-avgr');
-  wrap.classList.toggle('hidden', !S.avgMode);
-  btn.textContent = `Avg: ${S.avgMode?'ON':'OFF'}`;
-  btn.classList.toggle('on', S.avgMode);
-  if (S.avgMode) { document.getElementById('avg-e').value = S.nframes; S.avgE = S.nframes; }
-  fetchFrame();
+function toggleAvg()      { setAvgMode(!S.avgMode); }
+function toggleAvgRange() { setAvgMode(!S.avgMode); }
+// Range inputs are 1-based and inclusive, like the frame counter.
+function onAvgRange() {
+  const n = S.nframes;
+  let a = parseInt(document.getElementById('avg-s').value, 10);
+  let b = parseInt(document.getElementById('avg-e').value, 10);
+  if (!Number.isFinite(a)) a = 1;
+  if (!Number.isFinite(b)) b = n;
+  a = Math.max(1, Math.min(n, a));
+  b = Math.max(a, Math.min(n, b));
+  S.avgS = a - 1; S.avgE = b;               // server: 0-based start, exclusive end
+  if (S.avgMode) debounceFetch(200);
 }
 
 // ── FILE INFO ─────────────────────────────────────────────────────────────────
 function renderInfo(info) {
+  const format = info.is_eer ? `EER (${info.eer_fractions} fractions, ${info.eer_group} per frame)`
+               : info.mode === 'img' ? 'Image' : `MRC mode ${info.mode}`;
   const rows = [
     ['File',    info.filename],
     ['Size',    `${info.nx} × ${info.ny}`],
     ['Frames',  info.nframes],
-    ['Format',  info.is_eer ? 'EER' : `MRC mode ${info.mode}`],
-    ['Å/pixel', info.apix],
+    ['Format',  format],
+    ['Å/pixel', info.apix_known ? info.apix : `${info.apix} (unknown, set it in Ruler)`],
   ];
-  document.getElementById('info-panel').innerHTML =
-    rows.map(([k,v]) => `<div class="irow"><span class="ik">${k}</span><span class="iv">${v}</span></div>`).join('');
+  document.getElementById('info-panel').replaceChildren(...rows.map(([k, v]) => {
+    const r = el('div', 'irow' + (k === 'Å/pixel' && !info.apix_known ? ' warn' : ''));
+    r.append(el('span', 'ik', k), el('span', 'iv', v));
+    return r;
+  }));
 }
 
 // ── DRAG & DROP (whole page) ──────────────────────────────────────────────────
@@ -1737,8 +2108,11 @@ async function uploadFile(file) {
 
 // ── KEYBOARD ──────────────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  const tag = document.activeElement.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const a = document.activeElement;
+  const isRange = a && a.tagName === 'INPUT' && a.type === 'range';
+  if (a && (a.tagName === 'TEXTAREA' || a.isContentEditable || (a.tagName === 'INPUT' && !isRange))) return;
+  if (isRange && e.key.startsWith('Arrow')) return;   // let the focused slider handle arrows
   switch (e.key) {
     case 'ArrowLeft': case 'ArrowDown':  prevFrame(); break;
     case 'ArrowRight': case 'ArrowUp':   nextFrame(); break;
@@ -1760,7 +2134,11 @@ document.addEventListener('keydown', e => {
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 (async () => {
-  await browseTo('~');
+  try {
+    const d = await api('/api/browse');
+    document.getElementById('path-inp').value = d.cwd;
+    renderBrowser(d.entries);
+  } catch(e) { toast(e.message, 'err'); }
   try {
     const d = await api('/api/list');
     if (d.list && d.list.length > 0) {
@@ -1781,71 +2159,6 @@ document.addEventListener('keydown', e => {
 </html>"""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# UPLOAD ENDPOINT  (drag & drop from browser → BytesIO → CryoFile)
-# ──────────────────────────────────────────────────────────────────────────────
-
-# Patch Handler to handle POST /api/upload
-_orig_do_GET = Handler.do_GET
-
-class Handler(Handler):
-    def do_POST(self):
-        try:
-            length   = int(self.headers.get('Content-Length', 0))
-            filename = unquote(self.headers.get('X-Filename', 'upload.mrc'))
-            filename = Path(filename).name or 'upload.mrc'
-            ext      = Path(filename).suffix.lower()
-            if ext not in ALL_EXTS:
-                self._send({'error': f'Unsupported format: {ext}'}, status=400); return
-            if length == 0:
-                self._send({'error': 'Empty upload'}, status=400); return
-            data = self.rfile.read(length)
-            # Write to temp file so CryoFile can open it normally
-            import tempfile, os
-            suffix = ext
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp.write(data)
-                tp = tmp.name
-            key = f'__upload__{filename}'
-            cf  = CryoFile(tp)
-            ST.files[key] = cf
-            if key not in ST.order: ST.order.append(key)
-            ST.current = key
-            # Override path display name
-            cf.path = Path(filename)
-            self._send(dict(ok=True, key=key, info=cf.info(), list=ST.list()))
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except Exception as e:
-            try: self._send(dict(error=str(e), trace=traceback.format_exc()), status=500)
-            except: pass
-
-    def _send(self, body, ct='application/json', status=200):
-        if isinstance(body, dict):
-            body = json.dumps(body, ensure_ascii=False).encode()
-        elif isinstance(body, str):
-            body = body.encode()
-        self.send_response(status)
-        self.send_header('Content-Type', ct)
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Connection', 'keep-alive')
-        self.end_headers()
-        self.wfile.write(body)
-
-# Patch get_file_list_info for upload keys
-_orig_list = State.list
-def _patched_list(self):
-    result = []
-    for p in self.order:
-        if p.startswith('__upload__'):
-            name = p[len('__upload__'):]
-        else:
-            name = Path(p).name
-        result.append(dict(path=p, name=name,
-                           loaded=p in self.files, active=p==self.current))
-    return result
-State.list = _patched_list
-
-# ──────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1853,23 +2166,76 @@ def main():
     ap = argparse.ArgumentParser(description='CryoViewer')
     ap.add_argument('path', nargs='?')
     ap.add_argument('--port', type=int, default=7473)
+    ap.add_argument('--bind', default='127.0.0.1',
+                    help='address to listen on (default 127.0.0.1). A network address requires '
+                         '--root and authentication.')
+    ap.add_argument('--root', action='append', default=[],
+                    help='allowed data root (repeatable). Without it, every path is browsable '
+                         '(local use only).')
+    ap.add_argument('--auth-file', help='file containing "user:password" for HTTP Basic auth '
+                                        '(or set CRYOVIEWER_AUTH)')
+    ap.add_argument('--allowed-host', action='append', default=[],
+                    help='accepted Host header / public name, e.g. behind a reverse proxy (repeatable)')
+    ap.add_argument('--max-upload-mb', type=int, default=2048, help='drag & drop upload limit')
+    ap.add_argument('--insecure-no-auth', action='store_true',
+                    help='allow a network bind without authentication (not recommended)')
     ap.add_argument('--no-browser', action='store_true')
     args = ap.parse_args()
 
-    if args.path:
-        p = Path(args.path).expanduser().resolve()
-        if p.is_dir():
-            found = ST.scan(str(p)); ST.cwd = str(p)
-            print(f'[CryoViewer] Dir: {p}  ({len(found)} files)')
-        elif p.is_file():
-            ST.open(str(p)); ST.cwd = str(p.parent)
-            print(f'[CryoViewer] File: {p.name}')
+    auth = os.environ.get('CRYOVIEWER_AUTH') or None
+    if args.auth_file:
+        auth = Path(args.auth_file).read_text().strip()
+    if auth is not None and (':' not in auth or auth.startswith(':')):
+        sys.exit('[CryoViewer] Authentication must be given as "user:password"')
 
-    url = f'http://127.0.0.1:{args.port}'
-    srv = HTTPServer(('127.0.0.1', args.port), Handler)
-    print(f'\n  CryoViewer → {url}  (Ctrl+C to stop)\n')
+    loopback = is_loopback(args.bind)
+    if not loopback:
+        if not args.root:
+            sys.exit(f'[CryoViewer] Refusing to listen on {args.bind} without --root (data roots).')
+        if not auth and not args.insecure_no_auth:
+            sys.exit(f'[CryoViewer] Refusing to listen on {args.bind} without authentication '
+                     '(--auth-file or CRYOVIEWER_AUTH).')
+
+    try:
+        ST.set_roots(args.root)
+    except ValueError as e:
+        sys.exit(f'[CryoViewer] {e}')
+
+    Handler.auth = auth
+    Handler.max_upload = max(1, args.max_upload_mb) * 1024**2
+    extra = {_host_only(h) for h in args.allowed_host if h.strip()}
+    Handler.trusted_hosts = extra or None
+    if extra:
+        Handler.allowed_hosts = LOOPBACK_NAMES | extra
+    else:
+        Handler.allowed_hosts = LOOPBACK_NAMES if loopback else None
+
+    if args.path:
+        try:
+            p = Path(ST.check_path(args.path))
+            if p.is_dir():
+                found = ST.scan(str(p)); ST.cwd = str(p)
+                print(f'[CryoViewer] Dir: {p}  ({len(found)} files)')
+            elif p.is_file():
+                ST.open(str(p)); ST.cwd = str(p.parent)
+                print(f'[CryoViewer] File: {p.name}')
+        except (OSError, ValueError) as e:
+            sys.exit(f'[CryoViewer] Cannot open {args.path}: {e}')
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+        address_family = socket.AF_INET6 if ':' in args.bind else socket.AF_INET
+
+    srv = Server((args.bind, args.port), Handler)
+    port = srv.server_address[1]
+    shown = f'[{args.bind}]' if ':' in args.bind else args.bind
+    url = f'http://{shown}:{port}'
+    local_url = f'http://127.0.0.1:{port}' if args.bind in ('0.0.0.0', '::') else url
+    print(f'\n  CryoViewer → {url}  (Ctrl+C to stop)')
+    print(f'  data roots: {", ".join(ST.roots) if ST.roots else "none (all paths)"}'
+          f'  ·  auth: {"on" if auth else "off"}\n')
     if not args.no_browser:
-        threading.Timer(0.7, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.7, lambda: webbrowser.open(local_url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
