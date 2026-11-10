@@ -1,0 +1,789 @@
+"""The scanner of a watched directory tree.
+
+One :meth:`Scanner.cycle` brings the index up to date with the disk. It is built for network
+storage, where every ``stat`` is a round trip and file-change notifications do not exist:
+
+* a directory is listed again only when its modification time changed, or was recent at the
+  last look (a file added within the same second would otherwise be missed), or at the
+  periodic full rescan;
+* only files that are *not yet complete* are looked at one by one, each cycle, until they pass
+  the completeness test (:mod:`imagebio.live.completeness`); files completed recently are
+  checked a little longer in case they change after all;
+* a directory tree met for the first time is indexed from its listings alone: what lies in
+  directories that have been quiet for a long time is taken as complete, flagged *unverified*,
+  without a single ``stat``. "Quiet" is measured against the most recent directory date of the
+  tree itself, not against this server's clock: the two machines need not agree on the time.
+
+A cycle is one database transaction. If it fails, the database is as before the cycle and the
+scanner reloads its memory from it; a restarted server does the same. Time is an argument
+(``now``), never read from the clock here: tests replay hours of acquisition in seconds.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import stat as stat_module
+import time
+from collections import deque
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Final
+
+from imagebio.core.errors import CorruptFileError, ImageBioError
+from imagebio.cryo.mdoc import read_mdoc
+from imagebio.io.registry import Registry
+from imagebio.live.completeness import Integrity, check_integrity, is_stable
+from imagebio.live.index import Index
+from imagebio.live.layout import PRIMARY_ROLES, Member, category_of, classify, name_time, primary_rank
+
+__all__ = ["CycleReport", "Entry", "Fs", "ScanSettings", "Scanner"]
+
+log = logging.getLogger(__name__)
+
+_NS: Final = 1_000_000_000
+_WAITING_FOR_XML: Final = "waiting for the EPU metadata file (.xml)"
+_NO_XML: Final = "completed without its EPU metadata file (.xml)"
+_ROLE_ORDER: Final = {"xml": 0, "mdoc": 0, "preview": 1}  # metadata first: images wait for it
+_RECHECK_S: Final = 60.0  # a file that failed its check and did not change is checked again after this
+_DAY_NS: Final = 86_400 * 1_000_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class ScanSettings:
+    #: A file must keep its size and date for this long, over at least two polls.
+    min_stable_s: float = 10.0
+    #: How long a complete EPU image waits for its ``.xml`` before being accepted without it.
+    partner_timeout_s: float = 120.0
+    #: First scan of a tree: directories quiet for longer are indexed without looking at files.
+    settle_s: float = 900.0
+    full_rescan_s: float = 600.0
+    #: Completed files are looked at again for this long, in case they change after all.
+    verify_s: float = 300.0
+    #: A directory modified less than this before the last look is listed again next cycle.
+    hot_s: float = 30.0
+    max_depth: int = 12
+    max_dirs: int = 50_000
+    max_files: int = 2_000_000
+    #: Integrity checks per cycle (each opens a file): bounds the duration of a cycle.
+    max_checks: int = 200
+
+
+@dataclass(frozen=True, slots=True)
+class Entry:
+    name: str
+    is_dir: bool
+    is_file: bool
+
+
+class Fs:
+    """The only filesystem calls the scanner makes. Symbolic links are never followed: a link
+    is neither a directory to enter nor a file to index."""
+
+    def stat(self, path: str) -> os.stat_result:
+        return os.stat(path, follow_symlinks=False)
+
+    def scandir(self, path: str) -> list[Entry]:
+        with os.scandir(path) as it:
+            return [
+                Entry(e.name, e.is_dir(follow_symlinks=False), e.is_file(follow_symlinks=False)) for e in it
+            ]
+
+
+@dataclass(slots=True)
+class _Dir:
+    id: int
+    rel: str
+    mtime_ns: int
+    names: set[str] | None = None  # tracked file names; None: not loaded from the index yet
+
+
+@dataclass(slots=True)
+class _Pending:
+    id: int
+    dir_rel: str
+    name: str
+    role: str
+    exposure_id: int
+    category: str
+    size: int | None
+    mtime_ns: int | None
+    stable_since: float | None = None
+    polls: int = 0
+    integrity: Integrity | None = None  # of the file as it is now; None: not checked yet
+    checked_at: float = 0.0
+    ready_since: float | None = None
+
+
+@dataclass(slots=True)
+class _Recent:
+    dir_rel: str
+    name: str
+    role: str
+    exposure_id: int
+    category: str
+    size: int | None
+    mtime_ns: int | None
+    completed_at: float
+
+
+@dataclass(slots=True)
+class CycleReport:
+    now: float
+    full: bool = False
+    dirs_listed: int = 0
+    new_files: int = 0
+    completed: int = 0
+    removed: int = 0
+    pending: int = 0
+    checks: int = 0
+    duration_ms: float = 0.0
+    error: str | None = None
+    changed: set[int] = field(default_factory=set)  # exposures touched
+
+
+def _join(*parts: str) -> str:
+    return "/".join(p for p in parts if p)
+
+
+def _parent(rel: str) -> str:
+    return rel.rpartition("/")[0]
+
+
+def _storable(name: str) -> bool:
+    """Whether a file name can go in the index and in a logical path."""
+    if not name or name.startswith(".") or "\\" in name or "/" in name:
+        return False
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:  # bytes that are not text: no way to name the file to a client
+        return False
+    return name.isprintable()
+
+
+def _chunks(items: list[Any], size: int = 500) -> Iterable[list[Any]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
+
+
+class Scanner:
+    """Keeps the index of one watched directory (``root``, a real path) up to date."""
+
+    def __init__(
+        self,
+        index: Index,
+        root_id: int,
+        root: Path,
+        registry: Registry,
+        settings: ScanSettings | None = None,
+        fs: Fs | None = None,
+    ) -> None:
+        self._index = index
+        self._root_id = root_id
+        self._root = os.fspath(root)
+        self._registry = registry
+        self.settings = settings or ScanSettings()
+        self._fs = fs or Fs()
+        self._load()
+
+    # ── memory, rebuilt from the index ───────────────────────────────────────
+    def _load(self) -> None:
+        db = self._index.connection()
+        row = db.execute("SELECT seq FROM roots WHERE id = ?", (self._root_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no root {self._root_id} in the live index")
+        self._seq: int = row["seq"]
+        self._cold = True  # the first cycle of this instance looks at everything
+        self._full_at: float | None = None
+        self._dirs: dict[str, _Dir] = {}
+        self._children: dict[str, set[str]] = {}
+        for d in db.execute("SELECT id, rel, mtime_ns FROM dirs WHERE root_id = ?", (self._root_id,)):
+            self._remember_dir(_Dir(d["id"], d["rel"], d["mtime_ns"]))
+        self._server_ns = max((d.mtime_ns for d in self._dirs.values()), default=0)
+        self._n_files: int = db.execute(
+            "SELECT COUNT(*) FROM files f JOIN dirs d ON d.id = f.dir_id "
+            "WHERE d.root_id = ? AND f.state != 'deleted'",
+            (self._root_id,),
+        ).fetchone()[0]
+        self._pending: dict[int, _Pending] = {}
+        rows = db.execute(
+            "SELECT f.id, d.rel, f.name, f.role, f.exposure_id, e.category, f.size, f.mtime_ns "
+            "FROM files f JOIN dirs d ON d.id = f.dir_id JOIN exposures e ON e.id = f.exposure_id "
+            "WHERE d.root_id = ? AND f.state = 'pending'",
+            (self._root_id,),
+        )
+        for f in rows:
+            # no trust in timers from a previous life: two fresh polls are required again
+            self._pending[f["id"]] = _Pending(
+                f["id"],
+                f["rel"],
+                f["name"],
+                f["role"],
+                f["exposure_id"],
+                f["category"],
+                f["size"],
+                f["mtime_ns"],
+            )
+        self._recent: dict[int, _Recent] = {}
+
+    def _remember_dir(self, d: _Dir) -> None:
+        self._dirs[d.rel] = d
+        if d.rel:
+            self._children.setdefault(_parent(d.rel), set()).add(d.rel)
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _path(self, rel: str, name: str = "") -> str:
+        return os.path.join(self._root, *rel.split("/"), name) if rel else os.path.join(self._root, name)
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending)
+
+    # ── a cycle ──────────────────────────────────────────────────────────────
+    def cycle(self, now: float) -> CycleReport:
+        """Bring the index up to date. Never raises for what the disk does; an internal error
+        rolls the cycle back and is reported in ``CycleReport.error`` and in the index."""
+        started = time.perf_counter()
+        report = CycleReport(now)
+        report.full = (
+            self._cold or self._full_at is None or now - self._full_at >= self.settings.full_rescan_s
+        )
+        try:
+            with self._index.write() as db:
+                self._scan(db, now, report)
+                self._poll(db, now, report)
+                self._verify(db, now, report)
+                self._refresh(db, report.changed)
+                report.duration_ms = (time.perf_counter() - started) * 1000
+                db.execute(
+                    "UPDATE roots SET cycle_at = ?, full_at = COALESCE(?, full_at), cycle_ms = ?, "
+                    "error = NULL, "
+                    "seq = ? WHERE id = ?",
+                    (now, now if report.full else None, report.duration_ms, self._seq, self._root_id),
+                )
+        except Exception as e:  # the transaction rolled back: memory must follow
+            log.exception("live scan cycle failed for root %s", self._root_id)
+            report.error = (
+                e.public_message if isinstance(e, ImageBioError) else f"internal error ({type(e).__name__})"
+            )
+            self._load()
+            with self._index.write() as db:
+                db.execute(
+                    "UPDATE roots SET cycle_at = ?, error = ? WHERE id = ?",
+                    (now, report.error, self._root_id),
+                )
+            return report
+        if report.full:
+            self._full_at = now
+        self._cold = False
+        report.pending = len(self._pending)
+        return report
+
+    # ── directories ──────────────────────────────────────────────────────────
+    def _list(self, rel: str) -> tuple[int, list[Entry]] | None:
+        """``(mtime_ns, entries)`` of a directory, or None when it is gone or unreadable.
+        The date is taken before the listing: what is added meanwhile changes it again."""
+        path = self._path(rel)
+        try:
+            st = self._fs.stat(path)
+            if not stat_module.S_ISDIR(st.st_mode):
+                return None
+            return st.st_mtime_ns, self._fs.scandir(path)
+        except OSError:
+            return None
+
+    def _walk(self) -> list[tuple[str, int, list[Entry]]]:
+        """Every directory of the tree, breadth first, with its date and listing."""
+        out: list[tuple[str, int, list[Entry]]] = []
+        queue: deque[tuple[str, int]] = deque([("", 0)])
+        while queue:
+            rel, depth = queue.popleft()
+            listed = self._list(rel)
+            if listed is None:
+                continue
+            out.append((rel, *listed))
+            if depth >= self.settings.max_depth:
+                continue
+            for e in listed[1]:
+                if e.is_dir and _storable(e.name) and len(out) + len(queue) < self.settings.max_dirs:
+                    queue.append((_join(rel, e.name), depth + 1))
+        return out
+
+    def _scan(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
+        if report.full:
+            listing = self._walk()
+            self._server_ns = max([self._server_ns, *(mtime for _, mtime, _ in listing)])
+            seen: set[str] = set()
+            for rel, mtime_ns, entries in listing:
+                seen.add(rel)
+                settled = self._cold and self._at_rest(mtime_ns, now)
+                self._apply(db, rel, mtime_ns, entries, now, settled, report)
+            for rel in sorted(set(self._dirs) - seen):
+                self._drop_dir(db, rel, report)
+            return
+        queue: deque[str] = deque(self._dirs)
+        while queue:
+            rel = queue.popleft()
+            known = self._dirs.get(rel)
+            path = self._path(rel)
+            try:
+                st = self._fs.stat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                if known is not None:
+                    self._drop_dir(db, rel, report)
+                continue
+            except OSError:
+                continue  # a hiccup of the storage: try again next cycle
+            if not stat_module.S_ISDIR(st.st_mode):
+                if known is not None:
+                    self._drop_dir(db, rel, report)
+                continue
+            self._server_ns = max(self._server_ns, st.st_mtime_ns)
+            if known is not None and st.st_mtime_ns == known.mtime_ns:
+                continue
+            try:
+                entries = self._fs.scandir(path)
+            except OSError:
+                continue
+            depth = rel.count("/") + 1 if rel else 0
+            for name in self._apply(db, rel, st.st_mtime_ns, entries, now, False, report):
+                child = _join(rel, name)
+                if (
+                    child not in self._dirs
+                    and depth < self.settings.max_depth
+                    and len(self._dirs) + len(queue) < self.settings.max_dirs
+                ):
+                    queue.append(child)
+
+    def _at_rest(self, mtime_ns: int, now: float) -> bool:
+        """Whether something last modified at ``mtime_ns`` has been quiet for ``settle_s``.
+
+        Measured against the most recent directory date of the tree, which is on the same clock
+        as ``mtime_ns`` (the file server's): this server's clock may be minutes away from it.
+        A whole day by this server's clock is beyond any such difference, and settles the case
+        of a tree where nothing is recent.
+        """
+        settle_ns = int(self.settings.settle_s * _NS)
+        return self._server_ns - mtime_ns > settle_ns or int(now * _NS) - mtime_ns > _DAY_NS
+
+    def _apply(
+        self,
+        db: sqlite3.Connection,
+        rel: str,
+        mtime_ns: int,
+        entries: list[Entry],
+        now: float,
+        settled: bool,
+        report: CycleReport,
+    ) -> set[str]:
+        """Record the listing of directory ``rel``; returns the names of its sub-directories."""
+        report.dirs_listed += 1
+        d = self._dirs.get(rel)
+        if d is None:
+            db.execute(
+                "INSERT INTO dirs (root_id, rel, mtime_ns) VALUES (?, ?, -1) "
+                "ON CONFLICT (root_id, rel) DO NOTHING",
+                (self._root_id, rel),
+            )
+            row = db.execute(
+                "SELECT id FROM dirs WHERE root_id = ? AND rel = ?", (self._root_id, rel)
+            ).fetchone()
+            d = _Dir(row["id"], rel, -1)
+            self._remember_dir(d)
+        if d.names is None:
+            d.names = {
+                r["name"]
+                for r in db.execute("SELECT name FROM files WHERE dir_id = ? AND state != 'deleted'", (d.id,))
+            }
+        tracked: dict[str, Member] = {}
+        subdirs: set[str] = set()
+        for e in entries:
+            if not _storable(e.name):
+                continue
+            if e.is_dir:
+                subdirs.add(e.name)
+            elif e.is_file:
+                member = classify(e.name)
+                if member is not None:
+                    tracked[e.name] = member
+        new = {name: member for name, member in tracked.items() if name not in d.names}
+        gone = d.names - tracked.keys()
+        added = self._add_files(db, d, new, now, settled, report) if new else set()
+        if gone:
+            self._remove_files(db, d, gone, report)
+        d.names = (d.names | added) - gone
+        # a directory that changed recently is listed again next cycle whatever its date says
+        hot = self._server_ns - mtime_ns < int(self.settings.hot_s * _NS)
+        stored = -1 if hot else mtime_ns
+        if stored != d.mtime_ns:
+            d.mtime_ns = stored
+            db.execute("UPDATE dirs SET mtime_ns = ? WHERE id = ?", (stored, d.id))
+        for child in sorted(self._children.get(rel, ())):
+            if child.rpartition("/")[2] not in subdirs:
+                self._drop_dir(db, child, report)
+        return subdirs
+
+    def _drop_dir(self, db: sqlite3.Connection, rel: str, report: CycleReport) -> None:
+        """Directory ``rel`` and everything under it are gone."""
+        doomed = [r for r in self._dirs if r == rel or r.startswith(rel + "/")]
+        for r in doomed:
+            d = self._dirs.pop(r)
+            self._children.pop(r, None)
+            self._children.get(_parent(r), set()).discard(r)
+            rows = db.execute(
+                "SELECT DISTINCT exposure_id FROM files WHERE dir_id = ? AND state != 'deleted'", (d.id,)
+            ).fetchall()
+            report.changed.update(row["exposure_id"] for row in rows)
+            cursor = db.execute(
+                "UPDATE files SET state = 'deleted' WHERE dir_id = ? AND state != 'deleted'", (d.id,)
+            )
+            report.removed += cursor.rowcount
+            self._n_files -= cursor.rowcount
+            db.execute("UPDATE dirs SET mtime_ns = -1 WHERE id = ?", (d.id,))
+        gone = set(doomed)
+        for file_id in [i for i, p in self._pending.items() if p.dir_rel in gone]:
+            del self._pending[file_id]
+        for file_id in [i for i, r in self._recent.items() if r.dir_rel in gone]:
+            del self._recent[file_id]
+
+    # ── files appearing and disappearing ─────────────────────────────────────
+    def _exposure_ids(
+        self, db: sqlite3.Connection, dir_id: int, names: list[str]
+    ) -> dict[str, tuple[int, str]]:
+        """``{exposure name: (id, category)}`` for the given names of a directory."""
+        out: dict[str, tuple[int, str]] = {}
+        for chunk in _chunks(names):
+            marks = ",".join("?" * len(chunk))
+            for r in db.execute(
+                f"SELECT id, name, category FROM exposures WHERE dir_id = ? AND name IN ({marks})",  # noqa: S608
+                (dir_id, *chunk),
+            ):
+                out[r["name"]] = (r["id"], r["category"])
+        return out
+
+    def _add_files(
+        self,
+        db: sqlite3.Connection,
+        d: _Dir,
+        new: dict[str, Member],
+        now: float,
+        settled: bool,
+        report: CycleReport,
+    ) -> set[str]:
+        """Index the new files of a directory; returns the names recorded.
+
+        ``settled``: the directory has been quiet for long, its files are recorded as complete
+        without being looked at. Otherwise each new file is looked at once; on the first scan
+        of a tree, a file that is itself old is complete too, and only recent ones go through
+        the completeness test. Files that appear later always do.
+        """
+        room = self.settings.max_files - self._n_files
+        if room <= 0:
+            return set()
+        if len(new) > room:
+            new = dict(list(new.items())[:room])
+        names = sorted({m.exposure for m in new.values()})
+        exposures = self._exposure_ids(db, d.id, names)
+        missing = [n for n in names if n not in exposures]
+        if missing:
+            rows = []
+            for name in missing:
+                when = name_time(name)
+                rows.append(
+                    (self._root_id, d.id, name, category_of(d.rel, name), now, when, "name" if when else None)
+                )
+            db.executemany(
+                "INSERT INTO exposures "
+                "(root_id, dir_id, name, category, state, first_seen, time, time_source, seq) "
+                "VALUES (?, ?, ?, ?, 'incoming', ?, ?, ?, 0)",
+                rows,
+            )
+            exposures.update(self._exposure_ids(db, d.id, missing))
+
+        file_rows: list[tuple[Any, ...]] = []
+        pending: list[tuple[str, Member, int | None, int | None]] = []
+        for name, member in new.items():
+            exposure_id = exposures[member.exposure][0]
+            if settled:
+                file_rows.append((d.id, exposure_id, name, member.role, "complete", None, None, None, now))
+                continue
+            try:
+                st = self._fs.stat(self._path(d.rel, name))
+            except OSError:
+                continue  # gone already: the next listing will tell
+            if self._cold and self._at_rest(st.st_mtime_ns, now):
+                file_rows.append(
+                    (d.id, exposure_id, name, member.role, "complete", st.st_size, st.st_mtime_ns, None, now)
+                )
+                continue
+            file_rows.append(
+                (d.id, exposure_id, name, member.role, "pending", st.st_size, st.st_mtime_ns, now, None)
+            )
+            pending.append((name, member, st.st_size, st.st_mtime_ns))
+        db.executemany(
+            "INSERT INTO files "
+            "(dir_id, exposure_id, name, role, state, size, mtime_ns, stable_since, completed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (dir_id, name) DO UPDATE SET "
+            "exposure_id = excluded.exposure_id, role = excluded.role, "
+            "state = excluded.state, size = excluded.size, mtime_ns = excluded.mtime_ns, "
+            "stable_since = excluded.stable_since, ready_since = NULL, completed_at = excluded.completed_at, "
+            "verified = 0, note = NULL",
+            file_rows,
+        )
+        self._n_files += len(file_rows)
+        report.new_files += len(file_rows)
+        if pending:
+            ids: dict[str, int] = {}
+            for chunk in _chunks([name for name, *_ in pending]):
+                marks = ",".join("?" * len(chunk))
+                for r in db.execute(
+                    f"SELECT id, name FROM files WHERE dir_id = ? AND name IN ({marks})",  # noqa: S608
+                    (d.id, *chunk),
+                ):
+                    ids[r["name"]] = r["id"]
+            for name, member, size, mtime_ns in pending:
+                exposure_id, category = exposures[member.exposure]
+                self._pending[ids[name]] = _Pending(
+                    ids[name], d.rel, name, member.role, exposure_id, category, size, mtime_ns, now, 1
+                )
+        report.changed.update(exposures[m.exposure][0] for m in new.values())
+        return {row[2] for row in file_rows}
+
+    def _remove_files(self, db: sqlite3.Connection, d: _Dir, gone: set[str], report: CycleReport) -> None:
+        for chunk in _chunks(sorted(gone)):
+            marks = ",".join("?" * len(chunk))
+            rows = db.execute(
+                f"SELECT id, exposure_id FROM files WHERE dir_id = ? AND name IN ({marks})",  # noqa: S608
+                (d.id, *chunk),
+            ).fetchall()
+            for r in rows:
+                report.changed.add(r["exposure_id"])
+                self._pending.pop(r["id"], None)
+                self._recent.pop(r["id"], None)
+            cursor = db.execute(
+                "UPDATE files SET state = 'deleted' "  # noqa: S608
+                f"WHERE dir_id = ? AND state != 'deleted' AND name IN ({marks})",
+                (d.id, *chunk),
+            )
+            self._n_files -= cursor.rowcount
+            report.removed += cursor.rowcount
+
+    # ── files being written ──────────────────────────────────────────────────
+    def _poll(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
+        order = sorted(self._pending.values(), key=lambda p: (_ROLE_ORDER.get(p.role, 2), p.id))
+        for p in order:
+            try:
+                st = self._fs.stat(self._path(p.dir_rel, p.name))
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # the listing of its directory will record the removal
+            except OSError:
+                continue
+            if p.polls == 0 or (st.st_size, st.st_mtime_ns) != (p.size, p.mtime_ns):
+                grew = st.st_size != p.size
+                p.size, p.mtime_ns = st.st_size, st.st_mtime_ns
+                p.stable_since, p.polls, p.integrity, p.ready_since = now, 1, None, None
+                db.execute(
+                    "UPDATE files SET size = ?, mtime_ns = ?, stable_since = ?, ready_since = NULL, "
+                    "note = NULL "
+                    "WHERE id = ?",
+                    (p.size, p.mtime_ns, now, p.id),
+                )
+                if grew:
+                    report.changed.add(p.exposure_id)
+                continue
+            p.polls += 1
+            assert p.stable_since is not None
+            if not is_stable(p.stable_since, p.polls, now, self.settings.min_stable_s):
+                continue
+            if p.integrity is not None and not p.integrity.ok and now - p.checked_at >= _RECHECK_S:
+                p.integrity = None  # the same bytes rarely pass later, but a read error may have been passing
+            if p.integrity is None:
+                if report.checks >= self.settings.max_checks:
+                    continue  # next cycle
+                report.checks += 1
+                p.integrity = check_integrity(Path(self._path(p.dir_rel, p.name)), p.role, self._registry)
+                p.checked_at = now
+                if not p.integrity.ok:
+                    cursor = db.execute(
+                        "UPDATE files SET note = ? WHERE id = ? AND note IS NOT ?",
+                        (p.integrity.reason, p.id, p.integrity.reason),
+                    )
+                    if cursor.rowcount:
+                        report.changed.add(p.exposure_id)
+                    continue
+                p.ready_since = now
+                db.execute("UPDATE files SET ready_since = ? WHERE id = ?", (now, p.id))
+            if not p.integrity.ok:
+                continue
+            warning = None
+            if p.role in PRIMARY_ROLES and p.category == "data" and not self._has_xml(db, p.exposure_id):
+                assert p.ready_since is not None
+                if now - p.ready_since < self.settings.partner_timeout_s:
+                    cursor = db.execute(
+                        "UPDATE files SET note = ? WHERE id = ? AND note IS NOT ?",
+                        (_WAITING_FOR_XML, p.id, _WAITING_FOR_XML),
+                    )
+                    if cursor.rowcount:
+                        report.changed.add(p.exposure_id)
+                    continue
+                warning = _NO_XML
+            self._complete(db, p, now, warning, report)
+
+    def _has_xml(self, db: sqlite3.Connection, exposure_id: int) -> bool:
+        row = db.execute(
+            "SELECT 1 FROM files WHERE exposure_id = ? AND role = 'xml' AND state = 'complete' LIMIT 1",
+            (exposure_id,),
+        ).fetchone()
+        return row is not None
+
+    def _complete(
+        self, db: sqlite3.Connection, p: _Pending, now: float, warning: str | None, report: CycleReport
+    ) -> None:
+        db.execute(
+            "UPDATE files SET state = 'complete', completed_at = ?, verified = 1, note = ? WHERE id = ?",
+            (now, warning, p.id),
+        )
+        del self._pending[p.id]
+        self._recent[p.id] = _Recent(
+            p.dir_rel, p.name, p.role, p.exposure_id, p.category, p.size, p.mtime_ns, now
+        )
+        report.completed += 1
+        report.changed.add(p.exposure_id)
+        self._record_metadata(db, p)
+
+    def _record_metadata(self, db: sqlite3.Connection, p: _Pending) -> None:
+        """Keep what the completeness check learnt about the exposure."""
+        integrity = p.integrity
+        update: dict[str, Any] = {}
+        when: tuple[float, str] | None = None
+        if p.role == "xml" and integrity is not None and integrity.epu is not None:
+            update["epu"] = integrity.epu.to_json()
+            if integrity.epu.acquired_at is not None:
+                when = (integrity.epu.acquired_at, "xml")
+        elif p.role == "mdoc":
+            try:
+                sections = read_mdoc(Path(self._path(p.dir_rel, p.name))).images()
+            except CorruptFileError:
+                sections = ()
+            if sections:
+                summary = sections[0].summary()
+                update["mdoc"] = {**summary, "sections": len(sections)}
+                if "acquired_at" in summary:
+                    when = (summary["acquired_at"], "mdoc")
+        elif integrity is not None and integrity.info is not None:
+            info = integrity.info
+            update[p.role] = {
+                "x": info.size_x,
+                "y": info.size_y,
+                "frames": info.size_t * info.size_z,
+                "dtype": info.dtype.name,
+                "pixel_size": info.calibration.x.to_angstrom(),
+                "pixel_source": info.calibration.x.source.value,
+            }
+        if not update:
+            return
+        row = db.execute("SELECT meta, time_source FROM exposures WHERE id = ?", (p.exposure_id,)).fetchone()
+        meta = {**json.loads(row["meta"]), **update}
+        db.execute(
+            "UPDATE exposures SET meta = ? WHERE id = ?", (json.dumps(meta, allow_nan=False), p.exposure_id)
+        )
+        # the XML knows best, then the mdoc; a time read from the file name only fills a gap
+        if when is not None and (when[1] == "xml" or row["time_source"] != "xml"):
+            db.execute("UPDATE exposures SET time = ?, time_source = ? WHERE id = ?", (*when, p.exposure_id))
+
+    def _verify(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
+        """Files completed recently are looked at again: if one changed, it is not complete."""
+        for file_id, r in list(self._recent.items()):
+            if now - r.completed_at > self.settings.verify_s:
+                del self._recent[file_id]
+                continue
+            try:
+                st = self._fs.stat(self._path(r.dir_rel, r.name))
+            except OSError:
+                continue
+            if (st.st_size, st.st_mtime_ns) == (r.size, r.mtime_ns):
+                continue
+            del self._recent[file_id]
+            self._pending[file_id] = _Pending(
+                file_id,
+                r.dir_rel,
+                r.name,
+                r.role,
+                r.exposure_id,
+                r.category,
+                st.st_size,
+                st.st_mtime_ns,
+                now,
+                1,
+            )
+            db.execute(
+                "UPDATE files SET state = 'pending', size = ?, mtime_ns = ?, stable_since = ?, "
+                "ready_since = NULL, "
+                "completed_at = NULL, verified = 0, note = 'changed after it looked complete' WHERE id = ?",
+                (st.st_size, st.st_mtime_ns, now, file_id),
+            )
+            report.changed.add(r.exposure_id)
+
+    # ── exposures ────────────────────────────────────────────────────────────
+    def _refresh(self, db: sqlite3.Connection, exposure_ids: set[int]) -> None:
+        """Recompute the given exposures from their files; each one that changed, or whose
+        metadata changed, gets the next sequence number."""
+        for exposure_id in sorted(exposure_ids):
+            members = db.execute(
+                "SELECT name, role, state, size, mtime_ns, completed_at, verified, note FROM files "
+                "WHERE exposure_id = ? AND state != 'deleted'",
+                (exposure_id,),
+            ).fetchall()
+            old = db.execute(
+                "SELECT state, primary_name, time, time_source FROM exposures WHERE id = ?", (exposure_id,)
+            ).fetchone()
+            shown = [m for m in members if m["role"] in PRIMARY_ROLES]
+            states: dict[str, str] = {}
+            for m in members:  # of several files in one role, the one still being written counts
+                if states.get(m["role"]) != "pending":
+                    states[m["role"]] = m["state"]
+            if not shown:
+                # Nothing to draw. An exposure that was announced is now gone, and clients are
+                # told; one that never was (only its metadata arrived so far) stays unlisted.
+                if old["primary_name"] is not None and old["state"] != "deleted":
+                    db.execute(
+                        "UPDATE exposures SET state = 'deleted', members = ?, seq = ? WHERE id = ?",
+                        (json.dumps(states), self._next_seq(), exposure_id),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE exposures SET members = ? WHERE id = ?", (json.dumps(states), exposure_id)
+                    )
+                continue
+            primary = min(shown, key=lambda m: (primary_rank(m["role"]), m["name"]))
+            complete = primary["state"] == "complete"
+            when, source = old["time"], old["time_source"]
+            if source in (None, "mtime") and primary["mtime_ns"] is not None:
+                when, source = primary["mtime_ns"] / _NS, "mtime"
+            db.execute(
+                "UPDATE exposures SET state = ?, primary_name = ?, primary_role = ?, size = ?, mtime_ns = ?, "
+                "completed_at = ?, verified = ?, note = ?, members = ?, time = ?, time_source = ?, seq = ? "
+                "WHERE id = ?",
+                (
+                    "complete" if complete else "incoming",
+                    primary["name"],
+                    primary["role"],
+                    primary["size"],
+                    primary["mtime_ns"],
+                    primary["completed_at"] if complete else None,
+                    primary["verified"] if complete else 0,
+                    primary["note"],
+                    json.dumps(states),
+                    when,
+                    source,
+                    self._next_seq(),
+                    exposure_id,
+                ),
+            )
