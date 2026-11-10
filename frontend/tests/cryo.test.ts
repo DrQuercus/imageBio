@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { DirEntry } from "../src/api/types";
 import {
   averageEnd,
+  dirname,
   filterProblem,
   formatResolution,
+  gainCandidates,
+  gainOf,
   ICE_RING,
+  keepsGain,
   NO_CRYO,
+  ORIENTATION_LABELS,
   processingKey,
   processingOf,
   resolutionAt,
@@ -55,6 +61,73 @@ describe("processing requested from the server", () => {
   it("gives different keys to different processings", () => {
     const keys = [{}, { t_end: 6 }, { lp: 6 }, { hp: 6 }, { lp: 6, apix: 1 }, { lp: 6, apix: 2 }].map(processingKey);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("gain reference", () => {
+  const withGain = { ...NO_CRYO, gain: "cryo/s1/ref.gain" };
+
+  it("is sent with its orientation and kind, defaults left out", () => {
+    expect(gainOf(NO_CRYO)).toEqual({});
+    expect(gainOf(withGain)).toEqual({ gain: "cryo/s1/ref.gain" });
+    expect(gainOf({ ...withGain, gainOrient: 6, gainInvert: true })).toEqual({ gain: "cryo/s1/ref.gain", gain_orient: 6, gain_inv: true });
+    expect(gainOf({ ...NO_CRYO, gainOrient: 6, gainInvert: true })).toEqual({}); // no file, nothing to orient
+    expect(processingOf({ ...withGain, average: 5 }, 0, 40, null, false)).toEqual({ t_end: 4, gain: "cryo/s1/ref.gain" });
+  });
+
+  it("changes the cache key with the file, the orientation and the kind", () => {
+    const keys = [
+      {},
+      { gain: "a.gain" },
+      { gain: "b.gain" },
+      { gain: "a.gain", gain_orient: 6 },
+      { gain: "a.gain", gain_inv: true },
+      { gain: "a.gain", gain_orient: 6, gain_inv: true },
+    ].map(processingKey);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("names the eight orientations of the server", () => {
+    expect(ORIENTATION_LABELS).toHaveLength(8);
+    expect(new Set(ORIENTATION_LABELS).size).toBe(8);
+    expect(ORIENTATION_LABELS[6]).toBe("miroir haut-bas"); // flip_y in cryo/gain.py
+    expect(ORIENTATION_LABELS[4]).toBe("miroir gauche-droite"); // flip_x
+  });
+
+  it("is kept only for a file of the same kind in the same directory", () => {
+    expect(keepsGain("cryo/s1/a.eer", "cryo/s1/b.eer")).toBe(true);
+    expect(keepsGain("cryo/s1/a.eer", "cryo/s1/B.EER")).toBe(true);
+    expect(keepsGain("cryo/s1/a.eer", "cryo/s1/a_aligned.mrc")).toBe(false); // already corrected
+    expect(keepsGain("cryo/s1/a.eer", "cryo/s2/a.eer")).toBe(false);
+    expect(keepsGain(null, "cryo/s1/a.eer")).toBe(false);
+    expect(dirname("cryo/s1/a.eer")).toBe("cryo/s1");
+    expect(dirname("cryo")).toBe("");
+  });
+
+  it("is looked for among the readable files with gain in their name", () => {
+    const entry = (name: string, kind: DirEntry["kind"] = "file", supported = true): DirEntry => ({
+      name,
+      path: `cryo/s1/${name}`,
+      kind,
+      size: 1,
+      mtime: 0,
+      is_symlink: false,
+      supported,
+    });
+    const entries = [
+      entry("20240101_EER_GainReference.gain"),
+      entry("K3_gain.tiff"),
+      entry("CountRef-gain-ref.MRC"),
+      entry("movie_0001.eer"),
+      entry("gain_notes.txt", "file", false),
+      entry("gain", "dir"),
+      entry("FoilHole_gain.eer"),
+    ];
+    expect(gainCandidates(entries, "cryo/s1/FoilHole_gain.eer").map((e) => e.name)).toEqual([
+      "20240101_EER_GainReference.gain",
+      "K3_gain.tiff",
+      "CountRef-gain-ref.MRC",
+    ]);
   });
 });
 

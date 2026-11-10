@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
-import type { DatasetInfo, ReaderOptions } from "../api/types";
-import { averageEnd, type CryoSettings, formatResolution, LOWPASS_PRESETS } from "../viewer/cryo";
+import { api, isAbort } from "../api/client";
+import type { DatasetInfo, DirEntry, GainCheck, ReaderOptions } from "../api/types";
+import {
+  averageEnd,
+  type CryoSettings,
+  dirname,
+  formatResolution,
+  gainCandidates,
+  gainOf,
+  LOWPASS_PRESETS,
+  ORIENTATION_LABELS,
+} from "../viewer/cryo";
 
 interface FieldProps {
   value: number | null;
@@ -39,7 +49,114 @@ function NumberField({ value, onCommit, label, testid, min, max, integer, placeh
   );
 }
 
+interface GainProps {
+  path: string;
+  etag: string;
+  options: ReaderOptions;
+  cryo: CryoSettings;
+  onChange: (patch: Partial<CryoSettings>) => void;
+}
+
+/** Choice of a gain reference among the files next to the movie, and the check of its
+ *  orientation: nothing in the files says how a reference is turned relative to the frames. */
+function GainSection({ path, etag, options, cryo, onChange }: GainProps) {
+  const [candidates, setCandidates] = useState<DirEntry[]>([]);
+  const [check, setCheck] = useState<GainCheck | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const dir = dirname(path);
+  const optionsKey = JSON.stringify(options);
+
+  // gain files in the directory of the movie and one level up
+  useEffect(() => {
+    const controller = new AbortController();
+    const dirs = dirname(dir) ? [dir, dirname(dir)] : [dir];
+    Promise.all(dirs.map((d) => api.list(d, 0, 1000, controller.signal).then((l) => l.entries, () => [])))
+      .then((lists) => !controller.signal.aborted && setCandidates(gainCandidates(lists.flat(), path)));
+    return () => controller.abort();
+  }, [dir, path]);
+
+  useEffect(() => {
+    setCheck(null);
+    setFailure(null);
+    if (!cryo.gain) return;
+    const controller = new AbortController();
+    api
+      .gainCheck(path, gainOf(cryo), options, controller.signal)
+      .then(setCheck)
+      .catch((e) => !isAbort(e) && setFailure(e instanceof Error ? e.message : String(e)));
+    return () => controller.abort();
+    // options are compared by value
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, etag, optionsKey, cryo.gain, cryo.gainOrient, cryo.gainInvert]);
+
+  const known = candidates.some((c) => c.path === cryo.gain);
+  if (!candidates.length && !cryo.gain) return null; // nothing to offer here
+
+  let status = <div className="note" data-testid="gain-status">Vérification de l'orientation…</div>;
+  if (failure) {
+    status = <div className="note warn" data-testid="gain-status">{failure}</div>;
+  } else if (check && !check.confident) {
+    status = (
+      <div className="note warn" data-testid="gain-status">
+        Orientation non vérifiable sur ce film : trop peu de dose, ou un gain sans motif.
+      </div>
+    );
+  } else if (check && !check.current_is_best) {
+    status = (
+      <div className="note warn" data-testid="gain-status">
+        Ce gain n'est pas enregistré dans l'orientation du film : il l'aplanit mieux en « {ORIENTATION_LABELS[check.best]} ».{" "}
+        <button data-testid="gain-fix" onClick={() => onChange({ gainOrient: check.best })}>Corriger</button>
+      </div>
+    );
+  } else if (check && !check.improves) {
+    status = (
+      <div className="note warn" data-testid="gain-status">
+        Ce gain n'aplanit pas l'image : est-ce bien celui de ce détecteur ?
+      </div>
+    );
+  } else if (check) {
+    status = (
+      <div className="note" data-testid="gain-status">
+        Orientation vérifiée sur {check.frames} frame{check.frames > 1 ? "s" : ""} · {check.defects} pixel{check.defects > 1 ? "s" : ""} défectueux
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="field-label">Référence de gain</div>
+      <select className={`wide ${cryo.gain ? "on" : ""}`} value={cryo.gain ?? ""} aria-label="Référence de gain" data-testid="gain-select"
+        onChange={(e) => onChange({ gain: e.target.value || null, gainOrient: 0, gainInvert: false })}>
+        <option value="">Aucune</option>
+        {candidates.map((c) => (
+          <option key={c.path} value={c.path}>{dirname(c.path) === dir ? c.name : `../${c.name}`}</option>
+        ))}
+        {cryo.gain && !known && <option value={cryo.gain}>{cryo.gain.slice(cryo.gain.lastIndexOf("/") + 1)}</option>}
+      </select>
+      {cryo.gain && (
+        <>
+          <select className="wide" value={cryo.gainOrient} aria-label="Orientation du gain" data-testid="gain-orient"
+            onChange={(e) => onChange({ gainOrient: Number(e.target.value) })}>
+            {ORIENTATION_LABELS.map((label, k) => (
+              <option key={label} value={k}>Orientation : {label}</option>
+            ))}
+          </select>
+          <label className="check">
+            <input type="checkbox" checked={cryo.gainInvert} data-testid="gain-invert"
+              onChange={(e) => onChange({ gainInvert: e.target.checked })} />
+            image de coups à inverser (champ plat)
+          </label>
+          {status}
+        </>
+      )}
+    </>
+  );
+}
+
 interface Props {
+  /** Logical path and version of the file on screen. */
+  path: string;
+  etag: string;
   info: DatasetInfo;
   cryo: CryoSettings;
   onChange: (patch: Partial<CryoSettings>) => void;
@@ -54,7 +171,7 @@ interface Props {
 }
 
 /** Cryo-EM tools: resolution filters, frame average, EER grouping, power spectrum. */
-export function CryoPanel({ info, cryo, onChange, t, apix, problem, options, onOptions }: Props) {
+export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, options, onOptions }: Props) {
   const frames = info.shape.t;
   const end = averageEnd(t, cryo.average, frames);
   const fractions = typeof info.metadata.n_fractions === "number" ? info.metadata.n_fractions : null;
@@ -126,6 +243,8 @@ export function CryoPanel({ info, cryo, onChange, t, apix, problem, options, onO
           </div>
         </>
       )}
+
+      <GainSection path={path} etag={etag} options={options} cryo={cryo} onChange={onChange} />
 
       <div className="buttons">
         <button className={cryo.spectrum ? "on" : ""} data-testid="spectrum-toggle" title="Spectre de puissance (P)"

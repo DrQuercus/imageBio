@@ -5,6 +5,7 @@ import type {
   DatasetInfoResponse,
   DirListing,
   Dtype,
+  GainCheck,
   Me,
   Plane,
   PlaneArray,
@@ -115,10 +116,8 @@ export interface PlaneRequest extends PlaneIndex {
   proc?: Processing;
 }
 
-/** A plane, or the mean of frames t..t_end, for the power spectrum. */
-export interface SpectrumRequest extends PlaneIndex {
-  t_end?: number;
-}
+/** A plane, or the mean of frames t..t_end, gain-corrected or not, for the power spectrum. */
+export interface SpectrumRequest extends PlaneIndex, Pick<Processing, "t_end" | "gain" | "gain_orient" | "gain_inv"> {}
 
 export const api = {
   me: (signal?: AbortSignal) => getJson<Me>("/api/me", signal),
@@ -149,4 +148,11 @@ export const api = {
 
   spectrumProfile: (path: string, req: SpectrumRequest, options?: ReaderOptions, signal?: AbortSignal) =>
     getJson<SpectrumProfile>(`/api/datasets/spectrum/profile?${buildQuery({ path, ...req }, options)}`, signal),
+
+  gainCheck: (
+    path: string,
+    gain: Pick<Processing, "gain" | "gain_orient" | "gain_inv">,
+    options?: ReaderOptions,
+    signal?: AbortSignal,
+  ) => getJson<GainCheck>(`/api/cryo/gain/check?${buildQuery({ path, ...gain }, options)}`, signal),
 };

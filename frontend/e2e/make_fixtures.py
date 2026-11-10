@@ -86,6 +86,20 @@ def main(out: Path) -> None:
     # EER movie: 24 fractions, one electron on pixel (x=20, y=10) in every fraction
     write_eer(demo / "falcon.eer", n_fractions=24, shape=(64, 64), events=150, hot=(10 * 64 + 20,), seed=7)
 
+    # A detector with a fixed pattern (per-pixel sensitivity and shading) and a hot pixel, its
+    # gain reference stored as it should be and stored upside down.
+    falcon = demo / "falcon"
+    falcon.mkdir(exist_ok=True)
+    gy, gx = np.mgrid[0:128, 0:128]
+    sensitivity = np.clip(rng.normal(1.0, 0.2, (128, 128)), 0.4, 1.6) * (1.0 + 0.3 * gx / 128 + 0.15 * (gy / 128) ** 2)
+    write_eer(falcon / "pattern.eer", n_fractions=24, shape=(128, 128), events=4000, hot=(40 * 128 + 70,),
+              sensitivity=sensitivity, seed=5)
+    gain = (sensitivity.mean() / sensitivity).astype(np.float32)
+    gain[40, 70] = 0
+    tifffile.imwrite(falcon / "good.gain", gain)
+    tifffile.imwrite(falcon / "flipped.gain", gain[::-1, :])
+    write_mrc(falcon / "aligned.mrc", np.ones((16, 16), np.float32), 1.0)
+
     # a hostile file name must be shown as text
     write_mrc(demo / "<img src=x onerror=alert(1)>.mrc", np.ones((8, 8), np.float32), 1.0)
     write_mrc(demo / "session" / "inside.mrc", np.full((8, 8), 7, np.float32), 2.0)

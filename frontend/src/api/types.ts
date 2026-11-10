@@ -115,6 +115,29 @@ export interface Processing {
   hp?: number;
   /** Å per pixel given by the user, for a file that does not store its pixel size. */
   apix?: number;
+  /** Gain reference (logical path), the orientation it is stored in (0 to 7) and whether it
+   *  is a flat-field counts image to invert. */
+  gain?: string;
+  gain_orient?: number;
+  gain_inv?: boolean;
+}
+
+/** Answer of /api/cryo/gain/check: which orientation of a gain flattens a movie best. */
+export interface GainCheck {
+  orientations: { index: number; name: string; score: number | null }[];
+  best: number;
+  best_name: string;
+  current: number;
+  current_is_best: boolean;
+  /** Score of the runner-up over the score of the best. */
+  ratio: number | null;
+  confident: boolean;
+  uncorrected: number | null;
+  /** Whether the best orientation makes the image flatter than no gain at all. */
+  improves: boolean;
+  frames: number;
+  defects: number;
+  gain_shape: { x: number; y: number };
 }
 
 /** A power spectrum: side x side values, zero frequency at [side / 2, side / 2]. */

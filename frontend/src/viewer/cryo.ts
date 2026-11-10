@@ -1,7 +1,7 @@
 /** Cryo mode, pure logic: what is asked of the server (frame average, resolution filters) and
  *  the geometry of a power spectrum (where a resolution lies, which rings to draw). */
 
-import type { Processing } from "../api/types";
+import type { DirEntry, Processing } from "../api/types";
 
 export interface CryoSettings {
   /** Low-pass cut-off in Å (detail finer than this is removed), or null. */
@@ -12,9 +12,35 @@ export interface CryoSettings {
   average: number;
   /** Show the power spectrum next to the image. */
   spectrum: boolean;
+  /** Gain reference applied to the frames (logical path), or null. */
+  gain: string | null;
+  /** Orientation the gain file is stored in: 0 to 7, see ORIENTATION_LABELS. */
+  gainOrient: number;
+  /** The gain file is a flat-field counts image, to be inverted. */
+  gainInvert: boolean;
 }
 
-export const NO_CRYO: CryoSettings = { lowpass: null, highpass: null, average: 1, spectrum: false };
+export const NO_CRYO: CryoSettings = {
+  lowpass: null,
+  highpass: null,
+  average: 1,
+  spectrum: false,
+  gain: null,
+  gainOrient: 0,
+  gainInvert: false,
+};
+
+/** The eight orientations of a gain reference, in the order of the server (cryo/gain.py). */
+export const ORIENTATION_LABELS = [
+  "telle quelle",
+  "rotation de 90°",
+  "rotation de 180°",
+  "rotation de 270°",
+  "miroir gauche-droite",
+  "transposée",
+  "miroir haut-bas",
+  "anti-transposée",
+];
 
 /** Low-pass cut-offs offered as buttons, in Å. */
 export const LOWPASS_PRESETS = [20, 10, 5];
@@ -60,12 +86,43 @@ export function processingOf(
     if (cryo.highpass !== null) proc.hp = cryo.highpass;
     if ((proc.lp !== undefined || proc.hp !== undefined) && !apixFromFile) proc.apix = apix;
   }
+  Object.assign(proc, gainOf(cryo));
   return proc;
+}
+
+/** The gain part of a request: nothing without a gain, defaults left out. */
+export function gainOf(cryo: CryoSettings): Pick<Processing, "gain" | "gain_orient" | "gain_inv"> {
+  if (!cryo.gain) return {};
+  const gain: Pick<Processing, "gain" | "gain_orient" | "gain_inv"> = { gain: cryo.gain };
+  if (cryo.gainOrient) gain.gain_orient = cryo.gainOrient;
+  if (cryo.gainInvert) gain.gain_inv = true;
+  return gain;
 }
 
 /** Identifies a processing in cache keys. */
 export function processingKey(proc: Processing): string {
-  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""}`;
+  const gain = proc.gain ? `${proc.gain_orient ?? 0}${proc.gain_inv ? "i" : ""}:${proc.gain}` : "";
+  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""};${gain}`;
+}
+
+/** Directory of a logical path ("root/a/b.eer" gives "root/a"). */
+export function dirname(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut < 0 ? "" : path.slice(0, cut);
+}
+
+const extension = (path: string) => /\.[^./]+$/.exec(path)?.[0].toLowerCase() ?? "";
+
+/** Whether a gain chosen for `previous` may be kept for `next`: only for a file of the same
+ *  kind in the same directory. Applied to an already corrected image, it would correct twice. */
+export function keepsGain(previous: string | null, next: string): boolean {
+  return previous !== null && dirname(previous) === dirname(next) && extension(previous) === extension(next);
+}
+
+/** The files of a listing that look like gain references: "gain" in the name (.gain,
+ *  *_gain.tiff, *-gain-ref.MRC) and a format that can be read. */
+export function gainCandidates(entries: DirEntry[], except?: string): DirEntry[] {
+  return entries.filter((e) => e.kind === "file" && e.supported && e.path !== except && /gain/i.test(e.name));
 }
 
 // ── power spectrum ───────────────────────────────────────────────────────────

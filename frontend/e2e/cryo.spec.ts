@@ -208,3 +208,57 @@ test("colour pictures have no Cryo tools", async ({ page }) => {
   await expect(page.getByTestId("spectrum")).toHaveCount(0);
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
+
+test("a gain stored upside down is noticed, and corrected in one click", async ({ page }) => {
+  // 24 fractions from a detector with a fixed pattern; the mean of all of them is on screen
+  await openFile(page, "demo/falcon/pattern.eer", "&avg=24");
+  await expect(page.getByTestId("t-label")).toHaveText("Frames 1–24 / 24");
+  const raw = await shownStd(page);
+  await expect(page.getByTestId("gain-select").locator("option")).toHaveText(["Aucune", "flipped.gain", "good.gain"]);
+  await expect(page.getByTestId("gain-status")).toHaveCount(0);
+
+  const applied = planeWith(page, "gain=demo%2Ffalcon%2Fflipped.gain");
+  await page.getByTestId("gain-select").selectOption({ label: "flipped.gain" });
+  expect(await applied).not.toContain("gain_orient");
+  await expect(page.getByTestId("gain-status")).toContainText("miroir haut-bas");
+  await expect.poll(() => shownStd(page)).toBeGreaterThan(raw); // upside down, it adds its pattern to the detector's
+
+  const fixed = planeWith(page, "gain_orient=6");
+  await page.getByTestId("gain-fix").click();
+  await fixed;
+  await expect(page.getByTestId("gain-orient")).toHaveValue("6");
+  await expect(page.getByTestId("gain-status")).toContainText("Orientation vérifiée sur 20 frames · 1 pixel défectueux");
+  // The pattern is gone and shot noise remains: 0.244 count per pixel and fraction, at most one
+  // per fraction, gives sqrt(0.244 x 0.756 / 24) = 0.088 on the mean of 24, and 0.090 once
+  // weighted by the gain. The raw image adds the pattern of the detector (0.05) to it.
+  await expect.poll(() => shownStd(page)).toBeLessThan(raw * 0.96);
+  expect(await shownStd(page)).toBeGreaterThan(0.085);
+  expect(await shownStd(page)).toBeLessThan(0.096);
+  await page.waitForTimeout(300);
+  await hoverPixel(page, 70, 40); // the hot pixel: 1 count per fraction in the file
+  const hot = Number((await page.getByTestId("hover-value").innerText()).split(" ")[0]);
+  expect(hot).toBeLessThan(0.6); // filled from its neighbours, which hold about a quarter of a count
+  await expect.poll(() => page.url()).toContain("gain=demo%2Ffalcon%2Fflipped.gain");
+  expect(page.url()).toContain("go=6");
+
+  // the reference stored the right way is confirmed as it is
+  await page.getByTestId("gain-select").selectOption({ label: "good.gain" });
+  await expect(page.getByTestId("gain-orient")).toHaveValue("0");
+  await expect(page.getByTestId("gain-status")).toContainText("Orientation vérifiée");
+  await expect.poll(() => shownStd(page)).toBeLessThan(raw * 0.96);
+
+  // the spectrum is that of the corrected image
+  const spectrum = page.waitForResponse((r) => r.url().includes("/api/datasets/spectrum?") && r.url().includes("gain=") && r.ok());
+  await page.getByTestId("spectrum-toggle").click();
+  await spectrum;
+  await expect(page.getByTestId("spectrum-rings")).toContainText("gain appliqué");
+
+  // another kind of file in the same directory does not inherit the gain
+  const sent: string[] = [];
+  page.on("request", (r) => r.url().includes("/api/datasets/") && sent.push(r.url()));
+  await page.getByTestId("browser").getByRole("button", { name: "aligned.mrc" }).click();
+  await ready(page, "demo/falcon/aligned.mrc");
+  await expect(page.getByTestId("gain-select")).toHaveValue("");
+  expect(sent.filter((u) => u.includes("aligned.mrc")).some((u) => u.includes("gain="))).toBe(false);
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});

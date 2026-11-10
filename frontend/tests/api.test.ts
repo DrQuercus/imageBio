@@ -58,7 +58,7 @@ describe("links", () => {
       view: { zoom: 0.4375, cx: 2048.5, cy: 1000 },
       display: { min: -12.5, max: 480, gamma: 1.4, lut: "fire", invert: true, auto: false },
       apix: 0.83,
-      cryo: { lowpass: 20, highpass: 500, average: 5, spectrum: true },
+      cryo: { lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true },
     };
     const link = formatLink(state);
     expect(link.startsWith("#path=cryo%2Fsession+1%2Fmovie.eer")).toBe(true);
@@ -69,13 +69,15 @@ describe("links", () => {
     const link = formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, display: { auto: true, gamma: 1, lut: "grays", invert: false, min: 0, max: 1 } });
     expect(link).toBe("#path=a.mrc");
     expect(formatLink({ index: { t: 0, c: 0, z: 0 }, options: {} })).toBe("");
-    const off = { lowpass: null, highpass: null, average: 1, spectrum: false };
+    const off = { lowpass: null, highpass: null, average: 1, spectrum: false, gain: null, gainOrient: 0, gainInvert: false };
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, gainOrient: 3 } })).toBe("#path=a.mrc");
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, gain: "r/g.gain" } })).toBe("#path=a.mrc&gain=r%2Fg.gain");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: off })).toBe("#path=a.mrc");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, lowpass: 7.5 } })).toBe("#path=a.mrc&lp=7.5");
   });
 
   it("ignores garbage", () => {
-    const state = parseLink("#path=x.mrc&t=-3&z=abc&zoom=0&cx=1&cy=2&min=5&max=1&gamma=-1&apix=nan&opt.=1&lp=-4&hp=x&avg=2.5&ps=yes");
+    const state = parseLink("#path=x.mrc&t=-3&z=abc&zoom=0&cx=1&cy=2&min=5&max=1&gamma=-1&apix=nan&opt.=1&lp=-4&hp=x&avg=2.5&ps=yes&go=6&gi=1");
     expect(state).toEqual({ path: "x.mrc", index: { t: 0, c: 0, z: 0 }, options: {} });
     expect(parseLink("")).toEqual({ index: { t: 0, c: 0, z: 0 }, options: {} });
   });

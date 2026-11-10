@@ -3,15 +3,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "../api/client";
-import type { PlaneIndex, ReaderOptions, Spectrum, SpectrumProfile } from "../api/types";
+import type { PlaneIndex, Processing, ReaderOptions, Spectrum, SpectrumProfile } from "../api/types";
 import { formatResolution, resolutionAt, type Ring, spectrumRings, spectrumToRgba, spectrumWindow } from "./cryo";
 
 interface Props {
   path: string;
   etag: string;
   index: PlaneIndex;
-  /** Last frame of the average shown, or null for a single frame. */
-  tEnd: number | null;
+  /** Frame average and gain of the image shown; its resolution filters do not apply here. */
+  proc: Processing;
   options: ReaderOptions;
   /** Å per image pixel, or null when unknown: no ring can be placed then. */
   apix: number | null;
@@ -25,7 +25,7 @@ const FONT = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 const ringLabel = (ring: Ring) => (ring.ice ? `glace ${ring.d} Å` : `${ring.d} Å`);
 
-export function SpectrumView({ path, etag, index, tEnd, options, apix, onError }: Props) {
+export function SpectrumView({ path, etag, index, proc, options, apix, onError }: Props) {
   const boxRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -38,11 +38,12 @@ export function SpectrumView({ path, etag, index, tEnd, options, apix, onError }
   const report = useRef(onError);
   report.current = onError;
   const optionsKey = JSON.stringify(options);
+  const { t_end: tEnd, gain, gain_orient: gainOrient, gain_inv: gainInvert } = proc;
 
   // ── data: latest wins ──────────────────────────────────────────────────────
   useEffect(() => {
     const controller = new AbortController();
-    const request = { t: index.t, c: index.c, z: index.z, t_end: tEnd ?? undefined };
+    const request = { t: index.t, c: index.c, z: index.z, t_end: tEnd, gain, gain_orient: gainOrient, gain_inv: gainInvert };
     Promise.all([
       api.spectrum(path, request, options, controller.signal),
       api.spectrumProfile(path, request, options, controller.signal),
@@ -60,7 +61,7 @@ export function SpectrumView({ path, etag, index, tEnd, options, apix, onError }
     return () => controller.abort();
     // options are compared by value
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, etag, optionsKey, index.t, index.c, index.z, tEnd]);
+  }, [path, etag, optionsKey, index.t, index.c, index.z, tEnd, gain, gainOrient, gainInvert]);
 
   useEffect(() => {
     const el = boxRef.current;
@@ -244,7 +245,8 @@ export function SpectrumView({ path, etag, index, tEnd, options, apix, onError }
             ? `Anneaux : ${rings.map(ringLabel).join(", ")} · Nyquist ${formatResolution(2 * apix)}`
             : `Nyquist ${formatResolution(2 * apix)}`
           : "Taille de pixel inconnue : pas d'anneaux de résolution."}
-        {tEnd !== null && ` · moyenne des frames ${index.t + 1} à ${tEnd + 1}`}
+        {tEnd !== undefined && ` · moyenne des frames ${index.t + 1} à ${tEnd + 1}`}
+        {gain && " · gain appliqué"}
       </div>
     </section>
   );

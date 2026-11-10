@@ -73,6 +73,13 @@ export function parseLink(hash: string): LinkState {
   if (hp !== undefined && hp > 0) cryo.highpass = hp;
   if (avg !== undefined && Number.isInteger(avg) && avg > 1) cryo.average = avg;
   if (q.get("ps") === "1") cryo.spectrum = true;
+  const gain = q.get("gain");
+  if (gain) {
+    cryo.gain = gain;
+    const orient = num(q.get("go"));
+    if (orient !== undefined && Number.isInteger(orient) && orient >= 1 && orient <= 7) cryo.gainOrient = orient;
+    if (q.get("gi") === "1") cryo.gainInvert = true;
+  }
   if (Object.keys(cryo).length) state.cryo = cryo;
   return state;
 }
@@ -107,6 +114,11 @@ export function formatLink(state: LinkState): string {
     if (cryo.highpass) q.set("hp", short(cryo.highpass));
     if (cryo.average && cryo.average > 1) q.set("avg", String(cryo.average));
     if (cryo.spectrum) q.set("ps", "1");
+    if (cryo.gain) {
+      q.set("gain", cryo.gain);
+      if (cryo.gainOrient) q.set("go", String(cryo.gainOrient));
+      if (cryo.gainInvert) q.set("gi", "1");
+    }
   }
   return `#${q.toString()}`;
 }

@@ -6,7 +6,7 @@ import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
-import { averageEnd, type CryoSettings, filterProblem, NO_CRYO, processingKey, processingOf } from "./viewer/cryo";
+import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, processingKey, processingOf } from "./viewer/cryo";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
@@ -66,8 +66,13 @@ export function App() {
   // Set when the next file to arrive must be fitted to the window. The view cannot simply be
   // cleared here: the previous file is still on screen and would be refitted in its place.
   const fitOnLoad = useRef(false);
+  const pathRef = useRef(path);
+  pathRef.current = path;
   const openFile = useCallback((next: string) => {
     fitOnLoad.current = true;
+    // filters and frame average follow the user from file to file; a gain only to a file of
+    // the same kind in the same directory (an already corrected image must not get it again)
+    if (!keepsGain(pathRef.current, next)) setCryo((c) => ({ ...c, gain: null, gainOrient: 0, gainInvert: false }));
     setPath(next);
     setOptions({});
     setIndex({ t: 0, c: 0, z: 0 });
@@ -291,7 +296,7 @@ export function App() {
           )}
         </div>
         {response && cryoOn && cryo.spectrum && (
-          <SpectrumView path={response.path} etag={etag} index={index} tEnd={tEnd} options={options} apix={apix} onError={onError} />
+          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={options} apix={apix} onError={onError} />
         )}
       </main>
 
@@ -302,8 +307,8 @@ export function App() {
             <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps}
               averageEnd={tEnd} />
             {cryoOn && (
-              <CryoPanel info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix} problem={filterProblem(cryo, apix)}
-                options={options} onOptions={setOptions} />
+              <CryoPanel path={response.path} etag={etag} info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix}
+                problem={filterProblem(cryo, apix)} options={options} onOptions={setOptions} />
             )}
             <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
           </>
