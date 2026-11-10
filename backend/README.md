@@ -32,6 +32,11 @@ mode = "proxy"                             # l'identité arrive dans X-Forwarded
 [cache]
 plane_bytes = "4GiB"
 
+[live]
+state_dir = "/var/lib/imagebio"            # index des sessions suivies et vignettes (SQLite)
+interval = 5                               # secondes entre deux passages sur un dossier surveillé
+min_stable = 10                            # un fichier doit garder sa taille ce temps pour être complet
+
 [[roots]]
 name = "glacios"                           # premier élément des chemins vus par les clients
 path = "/srv/glacios"
@@ -44,9 +49,15 @@ Pour voir ce qu'un lecteur comprend d'un fichier :
 imagebio info movie.eer
 ```
 
+Pour essayer le mode Live sans microscope, un microscope simulé écrit une session de type EPU (films écrits image par image, pauses, XML en dernier) :
+
+```bash
+imagebio simulate /chemin/vers/mes/donnees/session_test --rate 600
+```
+
 ## API
 
-Toutes les routes sont en `GET`. Les fichiers sont désignés par un chemin logique, `<racine>/<chemin relatif>`, jamais par un chemin du serveur.
+Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les fichiers sont désignés par un chemin logique, `<racine>/<chemin relatif>`, jamais par un chemin du serveur.
 
 | Route | Réponse |
 |---|---|
@@ -67,6 +78,28 @@ Toutes les routes sont en `GET`. Les fichiers sont désignés par un chemin logi
 - Les plans sont compressés en zstd ou gzip quand le client l'accepte et que les données s'y prêtent.
 - Chaque réponse porte un `ETag` lié au contenu du fichier (taille et date) : un fichier modifié est relu.
 - Les erreurs sont en JSON, `{"error": {"code": …, "message": …}}`, sans chemin du serveur.
+
+## Mode Live
+
+Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent (conception : [ADR 007](../docs/adr/007-live.md)).
+
+| Route | Réponse |
+|---|---|
+| `GET /api/live/watches` | Les surveillances de l'utilisateur |
+| `POST /api/live/watches?path=` | Surveiller un dossier ; le refaire rend la même surveillance |
+| `GET /api/live/watches/{id}` | Résumé : compteurs, débit des arrivées, dernière image, disque, état du scrutateur |
+| `DELETE /api/live/watches/{id}` | Arrêter sa surveillance (l'index est conservé) |
+| `GET /api/live/watches/{id}/items?since=&limit=&category=` | Expositions qui ont changé depuis le numéro de séquence `since` |
+| `GET /api/live/watches/{id}/history?bucket=` | Acquisitions par tranche de temps |
+| `GET /api/live/thumb?path=&size=` | Vignette JPEG d'un fichier, binnée par moyenne |
+
+- **Scrutation.** Un dossier n'est relu que si sa date de modification a changé ; seuls les fichiers pas encore complets sont regardés un par un. Une session de 50 000 fichiers coûte un `stat` par dossier à chaque passage.
+- **Complétude.** Un fichier est complet quand sa taille et sa date n'ont pas changé sur deux passages espacés de `min_stable`, qu'il passe le contrôle d'intégrité de son format, et, pour une acquisition EPU, que son `.xml` est là. Une image dont l'écriture fait une pause reste « en cours ».
+- **Expositions.** L'image intégrée, son film (`_Fractions`, `_EER`), son aperçu et ses métadonnées (`.xml` d'EPU, `.mdoc` de SerialEM) forment une exposition. Les métadonnées lues (taille de pixel, dose, défocus visé, horodatage) sont dans `meta`.
+- **Suivi.** Chaque changement d'une exposition reçoit un numéro de séquence ; un client redemande `items?since=<dernier numéro>` et ne reçoit que ce qui a changé, suppressions comprises.
+- **Session ancienne.** À la première indexation, les dossiers au repos depuis plus de 15 minutes sont indexés sans regarder leurs fichiers ; leurs expositions ont `verified: false`.
+- **Par utilisateur.** Une surveillance appartient à celui qui l'a créée ; le dossier est autorisé de nouveau à chaque requête. Huit surveillances actives au plus par utilisateur.
+- **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
 
 ## Traitements du mode Cryo
 
@@ -107,9 +140,19 @@ src/imagebio/
   proc/              binning.py (moyenne par blocs), stats.py (statistiques robustes),
                      fourier.py (filtres en Å, spectre de puissance, moyenne radiale)
   cryo/gain.py       références de gain : application, défauts, vérification de l'orientation
+  cryo/epu.py        métadonnées EPU (.xml par image), nom commun des fichiers d'une exposition
+  cryo/mdoc.py       métadonnées SerialEM et Tomo5 (.mdoc)
+  live/layout.py     rôle de chaque fichier et exposition à laquelle il appartient, d'après son nom
+  live/completeness.py  un fichier est-il complet ? taille stable et contrôle d'intégrité
+  live/index.py      index SQLite : surveillances, dossiers, fichiers, expositions, vignettes
+  live/scanner.py    scrutateur d'un dossier surveillé (un passage = une transaction)
+  live/service.py    surveillances par utilisateur, scrutateurs partagés, résumé, vignettes
+  live/thumbs.py     vignettes binnées par moyenne
+  live/simulator.py  microscope simulé (tests et démonstration)
   fs/roots.py        chemins logiques et confinement dans les racines
   service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques
-  api/               app.py (FastAPI), security.py (identité, Host), cli.py
+  api/               app.py (FastAPI), live.py (routes du Live), security.py (identité, Host,
+                     requêtes venues d'un autre site), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test
 ```
 

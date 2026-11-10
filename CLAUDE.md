@@ -26,14 +26,16 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Tests compare against a reference (mrcfile, tifffile, Pillow, a naive loop), never against imagebio itself.
 - Cryo processing (ADR 006) happens on the server, on the full-resolution plane, in a fixed order: frame mean, gain, filters, then crop and bin (`service/planes.py`, `Processing`). Every new processing parameter must be part of `Processing.key()`: it feeds the cache keys and the ETag.
 - A gain reference is a logical path, authorised like any file. Its orientation is checked and reported (`cryo/gain.py`), never corrected silently.
+- Live mode (ADR 007, `live/`): the scanner takes time as an argument (`cycle(now)`) and never reads the clock; tests drive it with `live/simulator.py`, which knows when each file really got its last byte. "At rest" is judged against the newest date found in the tree (the file server's clock), not this server's. Never mark a file complete on a stable size alone: integrity check too. Every change to an exposure bumps its `seq`.
+- Routes that change something (POST, DELETE) are refused when another site sends them (`SecurityMiddleware`); a watch belongs to its user and its directory is re-authorised on every request.
 
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)
 
-- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
+- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `live/store.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
 - Checks before every commit, from `frontend/`: `npm run typecheck`, `npm test`, then `npm run build && npm run e2e` (Playwright against the real backend on generated files).
 - Contrast, gamma, inversion and colour tables are GPU-side: changing them must never trigger a request. Plane requests are "latest wins" (AbortController).
 - Requests for pixels are built from what is on screen (`onScreen`, `shownOptions` and the clamped `index` in `App.tsx`), never from the `path`, `options` or index being loaded: mixing the two asks the server for planes that do not exist. End-to-end tests can assert it with `trackRefused`.
-- The page's CSP forbids eval and inline scripts: no inline `style`/`script`, and in Playwright pass functions (not strings) to `waitForFunction`.
+- The page's CSP forbids eval and inline scripts: no inline `style`/`script` in markup (React's `style` prop is fine: it goes through the CSSOM, and the Live grid needs it), and in Playwright pass functions (not strings) to `waitForFunction`.
 - No `dangerouslySetInnerHTML`, no `innerHTML`: file names are untrusted text.
 
 ## Working within the usage limit

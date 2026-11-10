@@ -6,7 +6,7 @@ Application web d'imagerie scientifique à déployer sur le réseau du labo. Ell
 - un mode **Cryo**, avec les outils spécifiques à la cryo-EM ;
 - un mode **Live**, pour suivre en temps réel une collecte au microscope.
 
-Le backend (jalon M1, [`backend/`](backend/README.md)), la visionneuse web (jalon M2, [`frontend/`](frontend/README.md)) et une première tranche du mode Cryo (jalon M4 : filtres en Å, moyenne de frames, spectre de puissance, référence de gain) sont écrits. Pour essayer :
+Le backend (jalon M1, [`backend/`](backend/README.md)), la visionneuse web (jalon M2, [`frontend/`](frontend/README.md)), le cœur du mode Live (jalon M3 : suivi d'une session, vignettes, débit) et une première tranche du mode Cryo (jalon M4 : filtres en Å, moyenne de frames, spectre de puissance, référence de gain) sont écrits. Pour essayer :
 
 ```bash
 pip install -e "./backend[dev]" && (cd frontend && npm ci && npm run build)
@@ -16,7 +16,13 @@ pip install -e "./backend[dev]" && (cd frontend && npm ci && npm run build)
 imagebio serve --local /chemin/vers/mes/donnees
 ```
 
-Puis ouvrir `http://127.0.0.1:8000`. Documents à lire :
+Puis ouvrir `http://127.0.0.1:8000`. Pour voir le mode Live sans microscope, lancer dans un autre terminal un microscope simulé qui écrit dans un sous-dossier, puis le surveiller depuis le bouton **Live** :
+
+```bash
+imagebio simulate /chemin/vers/mes/donnees/session_test
+```
+
+Documents à lire :
 
 - [`docs/PLAN.md`](docs/PLAN.md) : évaluation du projet, architecture cible, feuille de route et choix du modèle.
 - [`docs/adr/`](docs/adr/README.md) : décisions d'architecture.
