@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { isAbort } from "../api/client";
-import type { DatasetInfo, PlaneIndex, ReaderOptions } from "../api/types";
+import type { DatasetInfo, PlaneIndex, Processing, ReaderOptions } from "../api/types";
 import type { DisplaySettings } from "../state/url";
 import { type GpuLayer, Renderer } from "./gl";
 import type { Lut } from "./luts";
@@ -45,6 +45,8 @@ interface Props {
   info: DatasetInfo;
   index: PlaneIndex;
   options: ReaderOptions;
+  /** Frame average and filters applied by the server (compared by value). */
+  proc: Processing;
   display: DisplaySettings;
   lut: Lut;
   view: View | null;
@@ -69,7 +71,7 @@ interface Loaded {
 const DETAIL_DELAY_MS = 120;
 
 export function ViewerCanvas(props: Props) {
-  const { path, etag, info, index, options, display, lut, view, tool, ruler, apix } = props;
+  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const glRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -84,8 +86,7 @@ export function ViewerCanvas(props: Props) {
 
   const image = useMemo<Size>(() => ({ width: info.shape.x, height: info.shape.y }), [info.shape.x, info.shape.y]);
   const channels = useMemo(() => (info.rgb ? [0, 1, 2] : [index.c]), [info.rgb, index.c]);
-  const optionsKey = JSON.stringify(options);
-  const planeKey = planeKeyOf(etag, options, index, channels);
+  const planeKey = planeKeyOf(etag, options, index, channels, proc);
 
   // ── drawing ────────────────────────────────────────────────────────────────
   const state = useRef({ view, viewport, display, ruler, apix, planeKey, rgb: info.rgb });
@@ -175,7 +176,7 @@ export function ViewerCanvas(props: Props) {
     const renderer = rendererRef.current;
     if (!renderer) return;
     const controller = new AbortController();
-    loadPlanes(path, etag, options, index, channels, baseBin(image), undefined, controller.signal)
+    loadPlanes(path, etag, options, index, channels, proc, baseBin(image), undefined, controller.signal)
       .then((set) => {
         if (controller.signal.aborted) return;
         const layer = renderer.createLayer(set.planes.map(toFloat32), set.width, set.height, set.region, set.bin);
@@ -193,9 +194,9 @@ export function ViewerCanvas(props: Props) {
         if (!isAbort(e)) callbacks.current.onError(e instanceof Error ? e.message : String(e));
       });
     return () => controller.abort();
-    // options and channels are compared by value
+    // options, channels and processing are compared by value: planeKey holds them all
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, etag, optionsKey, index.t, index.z, channels.join(","), image, draw]);
+  }, [path, planeKey, image, draw]);
 
   // ── detail: the visible region at the resolution the screen can show ───────
   useEffect(() => {
@@ -219,7 +220,7 @@ export function ViewerCanvas(props: Props) {
     }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      loadPlanes(path, etag, options, index, channels, wanted.bin, wanted.region, controller.signal)
+      loadPlanes(path, etag, options, index, channels, proc, wanted.bin, wanted.region, controller.signal)
         .then((set) => {
           if (controller.signal.aborted) return;
           const layer = renderer.createLayer(set.planes.map(toFloat32), set.width, set.height, set.region, set.bin);
@@ -236,7 +237,7 @@ export function ViewerCanvas(props: Props) {
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, viewport, baseVersion, planeKey, path, etag, optionsKey, image, draw]);
+  }, [view, viewport, baseVersion, planeKey, path, image, draw]);
 
   // ── interaction ────────────────────────────────────────────────────────────
   const drag = useRef<{ kind: Tool; x: number; y: number } | null>(null);

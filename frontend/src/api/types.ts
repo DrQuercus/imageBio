@@ -105,3 +105,27 @@ export interface PlaneIndex {
   c: number;
   z: number;
 }
+
+/** What the server does to a plane before cropping and binning it (service/planes.py). */
+export interface Processing {
+  /** The plane is the mean of frames t..t_end (inclusive). */
+  t_end?: number;
+  /** Low-pass and high-pass cut-offs, as resolutions in Å. */
+  lp?: number;
+  hp?: number;
+  /** Å per pixel given by the user, for a file that does not store its pixel size. */
+  apix?: number;
+}
+
+/** A power spectrum: side x side values, zero frequency at [side / 2, side / 2]. */
+export interface Spectrum {
+  data: Float32Array;
+  side: number;
+}
+
+/** Rotational average of a power spectrum; frequencies in cycles per pixel (0 to 0.5). */
+export interface SpectrumProfile {
+  side: number;
+  frequency: number[];
+  power: number[];
+}

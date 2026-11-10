@@ -2,7 +2,8 @@
  *  client (replaying a movie or going back to a plane costs no request). */
 
 import { api } from "../api/client";
-import type { Plane, PlaneIndex, ReaderOptions, Region } from "../api/types";
+import type { Plane, PlaneIndex, Processing, ReaderOptions, Region } from "../api/types";
+import { processingKey } from "./cryo";
 
 const CACHE_BYTES = 256 * 2 ** 20;
 
@@ -26,8 +27,8 @@ function remember(key: string, plane: Plane): void {
 }
 
 export interface PlaneSet {
-  key: string; // identifies file version, options, plane, bin and region
-  planeKey: string; // identifies file version, options and plane only
+  key: string; // identifies file version, options, plane, processing, bin and region
+  planeKey: string; // identifies file version, options, plane and processing only
   planes: Plane[]; // one per channel shown
   width: number;
   height: number;
@@ -35,22 +36,29 @@ export interface PlaneSet {
   region: Region;
 }
 
-export function planeKeyOf(etag: string, options: ReaderOptions, index: PlaneIndex, channels: number[]): string {
-  return `${etag}|${JSON.stringify(options)}|${index.t},${index.z}|${channels.join(",")}`;
+export function planeKeyOf(
+  etag: string,
+  options: ReaderOptions,
+  index: PlaneIndex,
+  channels: number[],
+  proc: Processing,
+): string {
+  return `${etag}|${JSON.stringify(options)}|${index.t},${index.z}|${channels.join(",")}|${processingKey(proc)}`;
 }
 
-/** Load the given channels of plane (t, z) at `bin`, optionally cropped to `region`. */
+/** Load the given channels of plane (t, z) after `proc`, at `bin`, optionally cropped to `region`. */
 export async function loadPlanes(
   path: string,
   etag: string,
   options: ReaderOptions,
   index: PlaneIndex,
   channels: number[],
+  proc: Processing,
   bin: number,
   region: Region | undefined,
   signal: AbortSignal,
 ): Promise<PlaneSet> {
-  const planeKey = planeKeyOf(etag, options, index, channels);
+  const planeKey = planeKeyOf(etag, options, index, channels, proc);
   const key = `${path}|${planeKey}|${bin}|${region?.join(",") ?? "full"}`;
   const planes = await Promise.all(
     channels.map(async (c) => {
@@ -61,7 +69,7 @@ export async function loadPlanes(
         cache.set(k, hit); // most recently used
         return hit;
       }
-      const plane = await api.plane(path, { t: index.t, c, z: index.z, bin, region }, options, signal);
+      const plane = await api.plane(path, { t: index.t, c, z: index.z, bin, region, proc }, options, signal);
       remember(k, plane);
       return plane;
     }),

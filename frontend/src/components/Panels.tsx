@@ -16,10 +16,12 @@ interface StackProps {
   onPlay: (playing: boolean) => void;
   fps: number;
   onFps: (fps: number) => void;
+  /** Last frame of the average shown (it starts at the current frame), or null. */
+  averageEnd: number | null;
 }
 
 /** Sliders for the axes that have more than one plane, and the player. */
-export function StackControls({ info, index, onChange, playing, onPlay, fps, onFps }: StackProps) {
+export function StackControls({ info, index, onChange, playing, onPlay, fps, onFps, averageEnd }: StackProps) {
   const axes = AXES.filter((a) => info.shape[a.size] > 1 && !(a.key === "c" && info.rgb));
   if (!axes.length) return null;
   const canPlay = info.shape.t > 1 || info.shape.z > 1;
@@ -29,7 +31,9 @@ export function StackControls({ info, index, onChange, playing, onPlay, fps, onF
       {axes.map((a) => (
         <label key={a.key} className="slider">
           <span data-testid={`${a.key}-label`}>
-            {a.label} {index[a.key] + 1} / {info.shape[a.size]}
+            {a.key === "t" && averageEnd !== null
+              ? `Frames ${index.t + 1}–${averageEnd + 1} / ${info.shape.t}`
+              : `${a.label} ${index[a.key] + 1} / ${info.shape[a.size]}`}
           </span>
           <input type="range" min={0} max={info.shape[a.size] - 1} value={index[a.key]} data-testid={`${a.key}-slider`}
             onChange={(e) => onChange({ ...index, [a.key]: Number(e.target.value) })} />
@@ -100,7 +104,7 @@ export function InfoPanel({ response, stats, userApix, onUserApix }: InfoProps) 
         {stats && (
           <>
             <dt>Moyenne</dt>
-            <dd>{formatValue(stats.mean)} ± {formatValue(stats.std)}</dd>
+            <dd data-testid="mean-std">{formatValue(stats.mean)} ± {formatValue(stats.std)}</dd>
             <dt>Min / max</dt>
             <dd>{formatValue(stats.min)} / {formatValue(stats.max)}</dd>
             {stats.n_nan + stats.n_posinf + stats.n_neginf > 0 && (

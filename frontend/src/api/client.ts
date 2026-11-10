@@ -10,8 +10,11 @@ import type {
   PlaneArray,
   PlaneIndex,
   PlaneStats,
+  Processing,
   ReaderOptions,
   Region,
+  Spectrum,
+  SpectrumProfile,
 } from "./types";
 
 export class ApiError extends Error {
@@ -70,26 +73,51 @@ const ARRAYS: Record<Dtype, { new (buffer: ArrayBuffer): PlaneArray; BYTES_PER_E
   float64: Float64Array,
 };
 
-/** Decode the body of a plane response (little-endian, C order) from its headers. */
-export function decodePlane(buffer: ArrayBuffer, headers: { get(name: string): string | null }): Plane {
+type HeaderSource = { get(name: string): string | null };
+
+/** Decode a 2-D array sent as raw bytes (little-endian, C order) from its headers. */
+function decodeArray(buffer: ArrayBuffer, headers: HeaderSource) {
   const dtype = headers.get("X-Dtype") as Dtype | null;
   const shape = (headers.get("X-Shape") ?? "").split(",").map(Number);
-  const region = (headers.get("X-Region") ?? "").split(",").map(Number);
-  const bin = Number(headers.get("X-Bin") ?? "1");
   const ctor = dtype ? ARRAYS[dtype] : undefined;
   const [height, width] = shape;
-  if (!ctor || !dtype || shape.length !== 2 || region.length !== 4 || height === undefined || width === undefined) {
+  if (!ctor || !dtype || shape.length !== 2 || height === undefined || width === undefined) {
     throw new ApiError(502, "bad_plane", "the server sent a plane that cannot be decoded");
   }
-  if (!(width > 0 && height > 0 && bin >= 1) || buffer.byteLength !== width * height * ctor.BYTES_PER_ELEMENT) {
+  if (!(width > 0 && height > 0) || buffer.byteLength !== width * height * ctor.BYTES_PER_ELEMENT) {
     throw new ApiError(502, "bad_plane", "the server sent a plane whose size does not match its headers");
   }
-  return { data: new ctor(buffer), width, height, dtype, bin, region: region as Region };
+  return { data: new ctor(buffer), width, height, dtype };
+}
+
+/** Decode the body of a plane response from its headers. */
+export function decodePlane(buffer: ArrayBuffer, headers: HeaderSource): Plane {
+  const region = (headers.get("X-Region") ?? "").split(",").map(Number);
+  const bin = Number(headers.get("X-Bin") ?? "1");
+  if (region.length !== 4 || !region.every(Number.isFinite) || !(bin >= 1)) {
+    throw new ApiError(502, "bad_plane", "the server sent a plane that cannot be decoded");
+  }
+  return { ...decodeArray(buffer, headers), bin, region: region as Region };
+}
+
+/** Decode the body of a power-spectrum response: a square float32 image. */
+export function decodeSpectrum(buffer: ArrayBuffer, headers: HeaderSource): Spectrum {
+  const { data, width, height } = decodeArray(buffer, headers);
+  if (!(data instanceof Float32Array) || width !== height) {
+    throw new ApiError(502, "bad_plane", "the server sent a spectrum that cannot be decoded");
+  }
+  return { data, side: width };
 }
 
 export interface PlaneRequest extends PlaneIndex {
   bin: number;
   region?: Region;
+  proc?: Processing;
+}
+
+/** A plane, or the mean of frames t..t_end, for the power spectrum. */
+export interface SpectrumRequest extends PlaneIndex {
+  t_end?: number;
 }
 
 export const api = {
@@ -104,13 +132,21 @@ export const api = {
   info: (path: string, options?: ReaderOptions, signal?: AbortSignal) =>
     getJson<DatasetInfoResponse>(`/api/datasets/info?${buildQuery({ path }, options)}`, signal),
 
-  stats: (path: string, index: PlaneIndex, options?: ReaderOptions, signal?: AbortSignal) =>
-    getJson<PlaneStats>(`/api/datasets/stats?${buildQuery({ path, ...index }, options)}`, signal),
+  stats: (path: string, index: PlaneIndex, options?: ReaderOptions, signal?: AbortSignal, proc?: Processing) =>
+    getJson<PlaneStats>(`/api/datasets/stats?${buildQuery({ path, ...index, ...proc }, options)}`, signal),
 
   async plane(path: string, req: PlaneRequest, options?: ReaderOptions, signal?: AbortSignal): Promise<Plane> {
     const [x, y, w, h] = req.region ?? [];
-    const query = buildQuery({ path, t: req.t, c: req.c, z: req.z, bin: req.bin, x, y, w, h }, options);
+    const query = buildQuery({ path, t: req.t, c: req.c, z: req.z, bin: req.bin, x, y, w, h, ...req.proc }, options);
     const response = await request(`/api/datasets/plane?${query}`, signal);
     return decodePlane(await response.arrayBuffer(), response.headers);
   },
+
+  async spectrum(path: string, req: SpectrumRequest, options?: ReaderOptions, signal?: AbortSignal): Promise<Spectrum> {
+    const response = await request(`/api/datasets/spectrum?${buildQuery({ path, ...req }, options)}`, signal);
+    return decodeSpectrum(await response.arrayBuffer(), response.headers);
+  },
+
+  spectrumProfile: (path: string, req: SpectrumRequest, options?: ReaderOptions, signal?: AbortSignal) =>
+    getJson<SpectrumProfile>(`/api/datasets/spectrum/profile?${buildQuery({ path, ...req }, options)}`, signal),
 };

@@ -77,7 +77,8 @@ input[type="number"], input:not([type]), select, .filter {
 .left { grid-area: left; border-right: 1px solid var(--line); }
 .right { grid-area: right; border-left: 1px solid var(--line); }
 
-.center { grid-area: center; position: relative; min-width: 0; min-height: 0; }
+.center { grid-area: center; display: flex; min-width: 0; min-height: 0; }
+.stage { position: relative; flex: 1; min-width: 0; min-height: 0; }
 
 .viewer { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab; }
 .viewer:active { cursor: grabbing; }
@@ -177,3 +178,33 @@ dd input { width: 100%; }
 }
 .status [data-testid="hover-value"] { color: var(--text); }
 .status [data-testid="ruler-length"] { color: var(--amber); }
+
+/* ── Cryo mode ─────────────────────────────────────────────────────────────── */
+.field-label { color: var(--dim); font-size: 12px; margin: 8px 0 3px; }
+.field-label:first-of-type { margin-top: 0; }
+.buttons.tight { margin-top: 0; gap: 4px; }
+.buttons.tight button { padding: 3px 7px; }
+.unit { display: flex; align-items: center; gap: 4px; color: var(--dim); }
+.unit input { width: 56px; font-family: var(--mono); }
+.unit.on input { border-color: var(--accent); color: var(--accent); }
+.note { color: var(--dim); font-size: 12px; margin-top: 4px; }
+.note.warn { color: var(--amber); }
+
+.spectrum {
+  flex: none;
+  width: min(46%, 520px);
+  padding: 10px 12px;
+  background: var(--bg1);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+.spectrum-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.spectrum-head .panel-title { margin-bottom: 0; }
+.spectrum-head button { padding: 2px 7px; }
+.spectrum-box { position: relative; width: 100%; aspect-ratio: 1; background: #05080c; border: 1px solid var(--line); cursor: crosshair; }
+.spectrum-box canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.spectrum-overlay { pointer-events: none; }
+.spectrum-wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); }
+.spectrum-readout { font: 12px var(--mono); margin: 6px 0; min-height: 17px; }
+.spectrum-profile { display: block; width: 100%; height: 130px; border: 1px solid var(--line); cursor: crosshair; }
+.spectrum-note { color: var(--dim); font-size: 12px; margin-top: 6px; }

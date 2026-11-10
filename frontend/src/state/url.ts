@@ -1,6 +1,7 @@
 /** The state of a view in the URL fragment, so that a link reproduces what its author saw. */
 
 import type { PlaneIndex, ReaderOptions } from "../api/types";
+import type { CryoSettings } from "../viewer/cryo";
 import type { View } from "../viewer/view";
 
 export interface DisplaySettings {
@@ -21,6 +22,8 @@ export interface LinkState {
   display?: Partial<DisplaySettings>;
   /** Pixel size set by the user, in Å, when the file does not give one. */
   apix?: number;
+  /** Cryo mode: filters, frame average, power spectrum. */
+  cryo?: Partial<CryoSettings>;
 }
 
 const num = (value: string | null): number | undefined => {
@@ -62,6 +65,15 @@ export function parseLink(hash: string): LinkState {
   if (Object.keys(display).length) state.display = display;
   const apix = num(q.get("apix"));
   if (apix !== undefined && apix > 0) state.apix = apix;
+  const cryo: Partial<CryoSettings> = {};
+  const lp = num(q.get("lp"));
+  const hp = num(q.get("hp"));
+  const avg = num(q.get("avg"));
+  if (lp !== undefined && lp > 0) cryo.lowpass = lp;
+  if (hp !== undefined && hp > 0) cryo.highpass = hp;
+  if (avg !== undefined && Number.isInteger(avg) && avg > 1) cryo.average = avg;
+  if (q.get("ps") === "1") cryo.spectrum = true;
+  if (Object.keys(cryo).length) state.cryo = cryo;
   return state;
 }
 
@@ -89,5 +101,12 @@ export function formatLink(state: LinkState): string {
     if (d.invert) q.set("inv", "1");
   }
   if (state.apix) q.set("apix", short(state.apix));
+  const cryo = state.cryo;
+  if (cryo) {
+    if (cryo.lowpass) q.set("lp", short(cryo.lowpass));
+    if (cryo.highpass) q.set("hp", short(cryo.highpass));
+    if (cryo.average && cryo.average > 1) q.set("avg", String(cryo.average));
+    if (cryo.spectrum) q.set("ps", "1");
+  }
   return `#${q.toString()}`;
 }

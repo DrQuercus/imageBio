@@ -13,6 +13,10 @@ import numpy as np
 import tifffile
 from PIL import Image
 
+# the synthetic EER writer of the backend tests (it does not use the reader under test)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend" / "tests"))
+from fixtures.eer import write_eer  # noqa: E402
+
 
 def write_mrc(path: Path, data: np.ndarray, apix: float | None, stack: bool = False) -> None:
     with mrcfile.new(path, overwrite=True) as m:
@@ -67,6 +71,20 @@ def main(out: Path) -> None:
             for c in range(2):
                 hyper[t, z, c] = 1000 * t + 100 * z + 10 * c
     tifffile.imwrite(demo / "hyper.tif", hyper, imagej=True, metadata={"axes": "TZCYX"})
+
+    # Cryo mode. A lattice of period 8 px = 10 Å at 1.25 Å per pixel, in noise, around 100:
+    # its power spectrum has two peaks 64 px from the centre of a 512 px spectrum.
+    lx = np.mgrid[0:1024, 0:1024][1]
+    lattice = 100 + np.cos(2 * np.pi * lx / 8.0) + rng.normal(0, 0.3, (1024, 1024))
+    write_mrc(demo / "lattice.mrc", lattice.astype(np.float32), 1.25)
+
+    # 10 frames: frame k (from 0) is 10 (k + 1) + x, so a mean of frames is known exactly
+    sx = np.mgrid[0:32, 0:32][1]
+    steps = np.stack([10 * (k + 1) + sx for k in range(10)]).astype(np.float32)
+    write_mrc(demo / "steps.mrc", steps, 1.0, stack=True)
+
+    # EER movie: 24 fractions, one electron on pixel (x=20, y=10) in every fraction
+    write_eer(demo / "falcon.eer", n_fractions=24, shape=(64, 64), events=150, hot=(10 * 64 + 20,), seed=7)
 
     # a hostile file name must be shown as text
     write_mrc(demo / "<img src=x onerror=alert(1)>.mrc", np.ones((8, 8), np.float32), 1.0)

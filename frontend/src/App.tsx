@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "./api/client";
 import type { DatasetInfoResponse, Me, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
 import { ContrastPanel } from "./components/ContrastPanel";
+import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
+import { averageEnd, type CryoSettings, filterProblem, NO_CRYO, processingKey, processingOf } from "./viewer/cryo";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
+import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
 import { clamp, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
 
@@ -23,6 +26,7 @@ export function App() {
   const [view, setView] = useState<View | null>(initial.view ?? null);
   const [display, setDisplay] = useState<DisplaySettings>({ ...DEFAULT_DISPLAY, ...initial.display });
   const [userApix, setUserApix] = useState<number | null>(initial.apix ?? null);
+  const [cryo, setCryo] = useState<CryoSettings>({ ...NO_CRYO, ...initial.cryo });
   const [customLut, setCustomLut] = useState<Lut | null>(null);
   const [stats, setStats] = useState<PlaneStats | null>(null);
   const [tool, setTool] = useState<Tool>("pan");
@@ -39,6 +43,20 @@ export function App() {
   const info = response?.info ?? null;
   const etag = response?.file.etag ?? "";
   const onError = useCallback((m: string) => setError(m), []);
+
+  // Pixel size in effect: the file's, else the one typed by the user. Filters and the frame
+  // average are kept from one file to the next; a typed pixel size is not (see openFile).
+  const fileApix = info?.calibration.x.angstrom ?? null;
+  const apix = info ? (fileApix ?? userApix) : null;
+  const frames = info?.shape.t ?? 1;
+  // the Cryo tools work on one channel of data, not on a colour picture
+  const cryoOn = info !== null && !info.rgb;
+  const current = processingOf(cryoOn ? cryo : NO_CRYO, index.t, frames, apix, fileApix !== null);
+  const procKey = processingKey(current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const proc = useMemo(() => current, [procKey]);
+  const tEnd = cryoOn ? averageEnd(index.t, cryo.average, frames) : null;
+  const changeCryo = useCallback((patch: Partial<CryoSettings>) => setCryo((c) => ({ ...c, ...patch })), []);
 
   useEffect(() => {
     api.me().then(setMe).catch((e) => setError(message(e)));
@@ -91,6 +109,7 @@ export function App() {
       if (link.view) setView(link.view);
       setDisplay((d) => ({ ...d, auto: true, ...link.display }));
       setUserApix(link.apix ?? null);
+      setCryo({ ...NO_CRYO, ...link.cryo });
       setRuler(null);
       setPlaying(false);
     };
@@ -104,7 +123,7 @@ export function App() {
     if (!path || !etag) return;
     const controller = new AbortController();
     api
-      .stats(path, { t: index.t, c: statsChannel, z: index.z }, options, controller.signal)
+      .stats(path, { t: index.t, c: statsChannel, z: index.z }, options, controller.signal, proc)
       .then((s) => {
         setStats(s);
         setDisplay((d) => (d.auto ? { ...d, min: s.auto[0], max: s.auto[1] } : d));
@@ -112,7 +131,7 @@ export function App() {
       .catch((e) => !isAbort(e) && setError(message(e)));
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, etag, optionsKey, index.t, index.z, statsChannel]);
+  }, [path, etag, optionsKey, index.t, index.z, statsChannel, procKey]);
 
   const changeDisplay = useCallback(
     (patch: Partial<DisplaySettings>) => {
@@ -165,15 +184,15 @@ export function App() {
   // ── the view in the address bar ────────────────────────────────────────────
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined });
+      const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo });
       window.history.replaceState(null, "", link || window.location.pathname);
     }, 200);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, indexKey, optionsKey, view, display, userApix]);
+  }, [path, indexKey, optionsKey, view, display, userApix, cryo]);
 
   const copyLink = () => {
-    const link = window.location.origin + window.location.pathname + formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined });
+    const link = window.location.origin + window.location.pathname + formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo });
     void navigator.clipboard?.writeText(link).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
@@ -196,6 +215,7 @@ export function App() {
         case "a": case "A": changeDisplay({ auto: true }); break;
         case "i": case "I": changeDisplay({ invert: !display.invert }); break;
         case "r": case "R": setTool((t) => (t === "ruler" ? "pan" : "ruler")); break;
+        case "p": case "P": setCryo((c) => ({ ...c, spectrum: !c.spectrum })); break;
         case "Escape": setTool("pan"); setRuler(null); break;
         case "f": case "F": case "0": setView(null); break;
         case "1": setView((v) => v && { ...v, zoom: 1 }); break;
@@ -208,7 +228,6 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [step, changeDisplay, display.invert, zoomBy]);
 
-  const apix = info ? (info.calibration.x.angstrom ?? userApix) : null;
   const rulerText = ruler ? rulerLabel(Math.hypot(ruler.x1 - ruler.x0, ruler.y1 - ruler.y0), apix) : null;
   const onShown = useCallback((i: PlaneIndex) => setShown(`${path}|${i.t},${i.c},${i.z}`), [path]);
 
@@ -236,37 +255,43 @@ export function App() {
       </aside>
 
       <main className="center">
-        {error && (
-          <div className="error" role="alert" data-testid="error">
-            <span>{error}</span>
-            <button onClick={() => setError(null)} aria-label="Fermer">×</button>
-          </div>
-        )}
-        {response && info ? (
-          <ViewerCanvas
-            key={`${response.path}|${etag}|${optionsKey}`}
-            path={response.path}
-            etag={etag}
-            info={info}
-            index={index}
-            options={options}
-            display={display}
-            lut={lut}
-            view={view}
-            onViewChange={setView}
-            tool={tool}
-            ruler={ruler}
-            onRulerChange={setRuler}
-            apix={apix}
-            onHover={setHover}
-            onShown={onShown}
-            onError={onError}
-            onLevel={setLevel}
-          />
-        ) : (
-          <div className="empty" data-testid="empty">
-            {path && !error ? "Ouverture…" : "Choisissez un fichier dans la liste de gauche."}
-          </div>
+        <div className="stage">
+          {error && (
+            <div className="error" role="alert" data-testid="error">
+              <span>{error}</span>
+              <button onClick={() => setError(null)} aria-label="Fermer">×</button>
+            </div>
+          )}
+          {response && info ? (
+            <ViewerCanvas
+              key={`${response.path}|${etag}|${optionsKey}`}
+              path={response.path}
+              etag={etag}
+              info={info}
+              index={index}
+              options={options}
+              proc={proc}
+              display={display}
+              lut={lut}
+              view={view}
+              onViewChange={setView}
+              tool={tool}
+              ruler={ruler}
+              onRulerChange={setRuler}
+              apix={apix}
+              onHover={setHover}
+              onShown={onShown}
+              onError={onError}
+              onLevel={setLevel}
+            />
+          ) : (
+            <div className="empty" data-testid="empty">
+              {path && !error ? "Ouverture…" : "Choisissez un fichier dans la liste de gauche."}
+            </div>
+          )}
+        </div>
+        {response && cryoOn && cryo.spectrum && (
+          <SpectrumView path={response.path} etag={etag} index={index} tEnd={tEnd} options={options} apix={apix} onError={onError} />
         )}
       </main>
 
@@ -274,7 +299,12 @@ export function App() {
         {response && info && (
           <>
             <ContrastPanel stats={stats} display={display} rgb={info.rgb} customLut={customLut !== null} onChange={changeDisplay} onLutFile={loadLutFile} />
-            <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps} />
+            <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps}
+              averageEnd={tEnd} />
+            {cryoOn && (
+              <CryoPanel info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix} problem={filterProblem(cryo, apix)}
+                options={options} onOptions={setOptions} />
+            )}
             <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
           </>
         )}
