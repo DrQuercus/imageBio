@@ -116,7 +116,9 @@ def fit_gain(gain: Gain, shape: tuple[int, int]) -> Gain:
         blocks = gain.reshape(h, f, w, f)
         valid = (blocks > 0).sum(axis=(1, 3))
         total = blocks.sum(axis=(1, 3), dtype=np.float64)
-        return np.divide(total, valid, out=np.zeros((h, w), np.float64), where=valid > 0).astype(np.float32)
+        mean = np.zeros((h, w), np.float64)
+        np.divide(total, valid, out=mean, where=valid > 0)
+        return mean.astype(np.float32)
     if h % gh == 0 and w % gw == 0 and h // gh == w // gw:
         f = h // gh
         return np.ascontiguousarray(np.repeat(np.repeat(gain, f, axis=0), f, axis=1))

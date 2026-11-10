@@ -21,6 +21,7 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 
 - Read `backend/README.md` and `docs/adr/`. Contract: `core/model.py` (Dataset, calibration provenance), `core/errors.py`, `io/registry.py` (Reader).
 - Checks before every commit, from `backend/`: `python -m pytest`, `ruff check src tests`, `ruff format --check src tests`, `python -m mypy` (strict). Performance budgets: `python -m pytest -m perf`.
+- CI also runs on Python 3.11, where pip installs an older numpy whose stubs type some calls as `Any` (twice a CI-only mypy failure). To reproduce: `python3.11 -m venv V && V/bin/pip install -e ".[dev]" && V/bin/python -m mypy`.
 - Public error messages never contain a server path. Clients only use logical paths (`<root>/<relative>`); authorisation happens on every request, before any cache lookup.
 - Tests compare against a reference (mrcfile, tifffile, Pillow, a naive loop), never against imagebio itself.
 - Cryo processing (ADR 006) happens on the server, on the full-resolution plane, in a fixed order: frame mean, gain, filters, then crop and bin (`service/planes.py`, `Processing`). Every new processing parameter must be part of `Processing.key()`: it feeds the cache keys and the ETag.
