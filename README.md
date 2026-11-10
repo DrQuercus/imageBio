@@ -6,7 +6,7 @@ Application web d'imagerie scientifique à déployer sur le réseau du labo. Ell
 - un mode **Cryo**, avec les outils spécifiques à la cryo-EM ;
 - un mode **Live**, pour suivre en temps réel une collecte au microscope.
 
-Le backend (jalon M1, [`backend/`](backend/README.md)) et la visionneuse web (jalon M2, [`frontend/`](frontend/README.md)) sont écrits. Pour essayer :
+Le backend (jalon M1, [`backend/`](backend/README.md)), la visionneuse web (jalon M2, [`frontend/`](frontend/README.md)) et une première tranche du mode Cryo (jalon M4 : filtres en Å, moyenne de frames, spectre de puissance, référence de gain) sont écrits. Pour essayer :
 
 ```bash
 pip install -e "./backend[dev]" && (cd frontend && npm ci && npm run build)

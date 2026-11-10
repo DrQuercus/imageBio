@@ -35,7 +35,17 @@ npm run dev
 - **Règle et barre d'échelle** en Å, nm ou µm.
 - **Piles** : curseurs T, Z et C ; le lecteur ne demande le plan suivant qu'une fois le plan courant affiché.
 - **Palettes** : gris, Fire et Ice d'ImageJ, Viridis, HiLo, couleurs pures, import d'un fichier `.lut`.
-- **Lien partageable** : le fichier, le plan, le zoom, la fenêtre et la palette sont dans l'adresse.
+- **Lien partageable** : le fichier, le plan, le zoom, la fenêtre, la palette et les réglages du mode Cryo sont dans l'adresse.
+
+## Mode Cryo
+
+Le panneau **Cryo** apparaît pour toute image qui n'est pas en couleurs. Les calculs sont faits par le serveur, à pleine résolution, avant la découpe et le binning ; les réglages se conservent d'un fichier au suivant.
+
+- **Passe-bas et passe-haut en Å.** Préréglages 20, 10 et 5 Å ou valeur libre (validée par Entrée). Filtres gaussiens de gain ½ à la coupure. Si la taille de pixel est inconnue, le filtre attend qu'elle soit saisie ; si le passe-bas n'est pas plus fin que le passe-haut, il n'est pas envoyé. Le panneau dit pourquoi dans les deux cas.
+- **Moyenne de frames.** Une fenêtre de N frames à partir de la frame courante : « 5 frames » sur la frame 3 donne la moyenne des frames 3 à 7. La fenêtre suit le curseur de frames et le lecteur ; « Toutes » couvre le film entier.
+- **Fractions EER par frame** : le nombre de fractions sommées dans chaque frame affichée.
+- **Référence de gain.** La liste propose les fichiers dont le nom contient « gain » dans le dossier du film et dans le dossier parent. Le serveur vérifie l'orientation de la référence sur le film : confirmée, non vérifiable (trop peu de dose), ou enregistrée dans une autre orientation, avec un bouton **Corriger**. L'orientation et l'inversion (image de coups) se règlent aussi à la main. Un gain n'est conservé d'un fichier au suivant que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
+- **Spectre de puissance** (touche `P`), à côté de l'image : spectre en échelle logarithmique, anneaux de résolution en Å, anneau de la glace à 3,7 Å, moyenne radiale, résolution sous le curseur, agrandissement du centre ×2 et ×4. Il est calculé sur l'image après moyenne et gain, mais sans les filtres.
 
 | Touche | Action |
 |---|---|
@@ -44,6 +54,7 @@ npm run dev
 | `A` | Contraste automatique |
 | `I` | Inverser |
 | `R` | Règle ; `Échap` pour revenir au déplacement |
+| `P` | Spectre de puissance |
 | `F` ou `0` | Ajuster à la fenêtre |
 | `1` | 1 pixel image = 1 pixel écran |
 | `+` `-` | Zoom |
@@ -60,7 +71,9 @@ src/
   viewer/planes.ts            chargement des plans, cache côté client
   viewer/luts.ts              palettes et lecture des fichiers .lut
   viewer/ViewerCanvas.tsx     canevas, interactions, règle, barre d'échelle
-  components/                 navigateur de fichiers, contraste, pile, informations
+  viewer/cryo.ts              mode Cryo : traitements demandés au serveur, géométrie du spectre (fonctions pures)
+  viewer/SpectrumView.tsx     spectre de puissance, anneaux de résolution, moyenne radiale
+  components/                 navigateur de fichiers, contraste, pile, panneau Cryo, informations
   state/url.ts                état de la vue dans l'adresse
   App.tsx                     l'application
 tests/                        tests unitaires (vitest)
@@ -81,6 +94,9 @@ npm test
 npm run build && npm run e2e
 ```
 
-Les tests de bout en bout lancent le vrai backend sur des fichiers générés par `e2e/make_fixtures.py`, dont les valeurs sont prévisibles à partir de la position du pixel. Ils vérifient les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte.
+Les tests de bout en bout lancent le vrai backend sur des fichiers générés par `e2e/make_fixtures.py`, dont les valeurs sont prévisibles à partir de la position du pixel.
+
+- `e2e/viewer.spec.ts` vérifie les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte.
+- `e2e/cryo.spec.ts` vérifie le mode Cryo sur des fichiers dont la réponse est connue : un réseau de période 10 Å (passe-bas, pic du spectre sur l'anneau de 10 Å), une pile en escalier (moyenne des frames 3 à 7), un film EER (regroupement des fractions) et un détecteur synthétique dont le gain est enregistré tête en bas (détection et correction).
 
 La page interdit `eval` et les scripts en ligne (Content-Security-Policy). Dans un test Playwright, passez une fonction à `page.waitForFunction`, pas une chaîne.

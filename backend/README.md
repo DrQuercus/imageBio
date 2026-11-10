@@ -57,12 +57,31 @@ Toutes les routes sont en `GET`. Les fichiers sont désignés par un chemin logi
 | `/api/datasets/info?path=` | Description du fichier : dimensions, type, calibration et sa provenance, métadonnées, avertissements |
 | `/api/datasets/plane?path=&t=&c=&z=&bin=&x=&y=&w=&h=` | Un plan en octets bruts, petit-boutiste. En-têtes `X-Dtype`, `X-Shape`, `X-Bin`, `X-Region`, `X-Pixel-Size` |
 | `/api/datasets/stats?path=&t=&c=&z=` | Statistiques robustes et histogramme d'un plan |
+| `/api/datasets/spectrum?path=&t=&c=&z=&tile=` | Spectre de puissance d'un plan : image carrée `float32`, fréquence nulle au centre |
+| `/api/datasets/spectrum/profile?…` | Moyenne radiale du spectre : fréquences (cycles par pixel) et puissances |
+| `/api/cryo/gain/check?path=&gain=` | Vérification de l'orientation d'une référence de gain sur un film |
 
 - `bin=N` renvoie la moyenne des blocs N×N en `float32` (jamais un pixel sur N). `x, y, w, h` découpe une région, en pixels pleine résolution.
 - Les options d'un lecteur passent en paramètres préfixés par `opt.` : `opt.group=40&opt.superres=1` pour un film EER.
+- Les traitements du mode Cryo (voir plus bas) s'ajoutent aux routes `plane` et `stats` : `t_end`, `gain`, `gain_orient`, `gain_inv`, `lp`, `hp`, `apix`. Le spectre accepte `t_end` et le gain.
 - Les plans sont compressés en zstd ou gzip quand le client l'accepte et que les données s'y prêtent.
 - Chaque réponse porte un `ETag` lié au contenu du fichier (taille et date) : un fichier modifié est relu.
 - Les erreurs sont en JSON, `{"error": {"code": …, "message": …}}`, sans chemin du serveur.
+
+## Traitements du mode Cryo
+
+Ils sont appliqués par le serveur au plan en pleine résolution, toujours dans cet ordre, puis viennent la découpe (`x, y, w, h`) et le binning. Un plan traité est en `float32`.
+
+| Paramètres | Traitement |
+|---|---|
+| `t_end=N` | Le plan devient la moyenne des frames `t` à `N` incluses (accumulée en `float64`) |
+| `gain=<chemin logique>` | Multiplication par une référence de gain ; les pixels de gain nul sont des défauts, remplacés par la médiane de leurs voisins valides. `gain_orient=0..7` : orientation dans laquelle la référence est enregistrée. `gain_inv=true` : la référence est une image de coups (champ plat), convertie en `moyenne / coups` |
+| `lp=D`, `hp=D` | Passe-bas et passe-haut gaussiens, coupures en Å (gain ½ à la coupure) ; les deux ensemble font un passe-bande. L'image est prolongée en miroir avant la transformée pour que les bords ne se mélangent pas ; le passe-haut conserve la moyenne |
+| `apix=A` | Taille de pixel en Å, pour un fichier qui ne la contient pas. Sans elle, un filtre en Å sur un tel fichier est refusé |
+
+- La référence de gain est un fichier comme un autre : chemin logique, mêmes droits, mêmes lecteurs (`.gain`, TIFF, MRC). Elle peut être un nombre entier de fois plus fine ou plus grossière que l'image (référence 8K pour un rendu 4K, référence 4K pour un rendu en super-résolution). Un fichier dont plus d'un dixième des pixels sont inutilisables est refusé.
+- `/api/cryo/gain/check` corrige la moyenne des 20 premières frames avec la référence dans ses huit orientations et mesure chaque fois la planéité de l'image (médiane, sur des blocs de 64 pixels, de la variance divisée par le carré de la moyenne). La bonne orientation annule le motif fixe du détecteur, les autres en ajoutent un second. La réponse donne les huit scores, la meilleure orientation, si la marge est significative (`confident`) et si le gain améliore l'image par rapport à l'absence de gain (`improves`).
+- Le spectre de puissance est un périodogramme moyenné sur des tuiles de `tile` pixels (512 par défaut) fenêtrées et recouvrantes. Une période de `d` Å se trouve à `côté × Å-par-pixel / d` pixels du centre. Il est calculé après la moyenne et le gain, sans les filtres.
 
 ## Formats lus
 
@@ -70,7 +89,7 @@ Toutes les routes sont en `GET`. Les fichiers sont désignés par un chemin logi
 |---|---|---|
 | MRC, MRCS, MAP, REC, ST, ALI | `mrc` | Modes 0, 1, 2, 6, 12, 16 et 101 ; taille de pixel de l'en-tête ou de l'extension FEI1/FEI2 ; fichiers en cours d'écriture |
 | EER | `eer` | Fractions sommées par groupes (`group`), super-résolution (`superres`) ; la taille de pixel n'est pas dans le fichier |
-| TIFF, BigTIFF, OME-TIFF, TIFF ImageJ | `tiff` | Hyperstacks, films multi-pages compressés, RGB, palettes |
+| TIFF, BigTIFF, OME-TIFF, TIFF ImageJ, `.gain` | `tiff` | Hyperstacks, films multi-pages compressés, RGB, palettes ; références de gain d'EPU |
 | PNG, JPEG, BMP, GIF, WebP | `raster` | PNG 16 bits exacts, animations sur l'axe T |
 
 Un lecteur est choisi par l'extension et par le contenu : un TIFF nommé `.mrc` est ouvert comme un TIFF.
@@ -85,9 +104,11 @@ src/imagebio/
   core/cache.py      ByteLRU (plans, borné en octets) et DatasetPool (fichiers ouverts)
   io/registry.py     contrat des lecteurs et registre
   io/readers/        mrc.py, eer.py, tiff.py, raster.py
-  proc/              binning.py (moyenne par blocs), stats.py (statistiques robustes)
+  proc/              binning.py (moyenne par blocs), stats.py (statistiques robustes),
+                     fourier.py (filtres en Å, spectre de puissance, moyenne radiale)
+  cryo/gain.py       références de gain : application, défauts, vérification de l'orientation
   fs/roots.py        chemins logiques et confinement dans les racines
-  service/planes.py  service de plans : pool, cache, binning, statistiques
+  service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques
   api/               app.py (FastAPI), security.py (identité, Host), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test
 ```

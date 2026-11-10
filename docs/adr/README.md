@@ -9,3 +9,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [003](003-chemins-logiques-api-sans-etat.md) | Chemins logiques et API de datasets sans état | Acceptée |
 | [004](004-modele-de-donnees.md) | Modèle de données : axes TCZYX, plans 2D, calibration avec provenance | Acceptée |
 | [005](005-authentification.md) | Authentification déléguée au reverse proxy, écoute en local | Proposée (à confirmer) |
+| [006](006-traitements-cote-serveur.md) | Traitements du mode Cryo côté serveur, dans un ordre fixe | Acceptée |

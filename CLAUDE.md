@@ -23,10 +23,12 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Checks before every commit, from `backend/`: `python -m pytest`, `ruff check src tests`, `ruff format --check src tests`, `python -m mypy` (strict). Performance budgets: `python -m pytest -m perf`.
 - Public error messages never contain a server path. Clients only use logical paths (`<root>/<relative>`); authorisation happens on every request, before any cache lookup.
 - Tests compare against a reference (mrcfile, tifffile, Pillow, a naive loop), never against imagebio itself.
+- Cryo processing (ADR 006) happens on the server, on the full-resolution plane, in a fixed order: frame mean, gain, filters, then crop and bin (`service/planes.py`, `Processing`). Every new processing parameter must be part of `Processing.key()`: it feeds the cache keys and the ETag.
+- A gain reference is a logical path, authorised like any file. Its orientation is checked and reported (`cryo/gain.py`), never corrected silently.
 
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)
 
-- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
+- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
 - Checks before every commit, from `frontend/`: `npm run typecheck`, `npm test`, then `npm run build && npm run e2e` (Playwright against the real backend on generated files).
 - Contrast, gamma, inversion and colour tables are GPU-side: changing them must never trigger a request. Plane requests are "latest wins" (AbortController).
 - The page's CSP forbids eval and inline scripts: no inline `style`/`script`, and in Playwright pass functions (not strings) to `waitForFunction`.

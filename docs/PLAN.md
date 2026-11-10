@@ -339,11 +339,11 @@ Critères d'acceptation :
 | Lecture de frames : au plus une requête en vol | Oui, y compris en maintenant la flèche |
 | Les images avec NaN et pixel chaud s'affichent | Oui |
 | Un lien partagé reproduit la même vue | Oui, vérifié pixel par pixel dans un second onglet |
-| L'ancien CryoViewer est éteint | **Non.** Il reste nécessaire pour le filtre passe-bas en Å et la moyenne de frames, prévus au jalon M4 |
+| L'ancien CryoViewer est éteint | **Non.** Il restait nécessaire pour le filtre passe-bas en Å et la moyenne de frames ; ces deux fonctions sont arrivées avec M4, il peut être éteint après un essai |
 
 Écarts et limites :
 - Images RGB : affichage composite avec une fenêtre commune aux trois canaux. Les hyperstacks montrent un canal à la fois ; le composite multi-canal est prévu en M5.
-- Les options de lecture (regroupement EER) passent par l'adresse (`opt.group=40`) ; il n'y a pas encore de contrôle dans l'interface (M4).
+- Les options de lecture (regroupement EER) passent par l'adresse (`opt.group=40`) ; le contrôle dans l'interface est arrivé avec M4.
 - Testé sous Chromium, à densité d'écran 1 et 2. Pas encore essayé sous Firefox ni Safari.
 - Une image très allongée (plus de 16 000 pixels sur un côté après binning) peut dépasser la taille de texture de certaines cartes graphiques ; un message le signale.
 
@@ -387,6 +387,41 @@ Critères d'acceptation :
 - Rayon d'anneau = N·apix/d à 0,5 px près.
 - Gain du passe-bas de 20 Å = 0,5 ± 0,03.
 - La moyenne des frames 3 à 7 est égale à la moyenne numpy de ces frames.
+
+**Avancement de M4 (10 novembre 2026) : première tranche faite.** Les quatre critères d'acceptation passent ; les pointés et les galeries restent à faire. La décision de conception est dans l'[ADR 006](adr/006-traitements-cote-serveur.md).
+
+Fait (852 tests côté backend, 45 tests unitaires et 17 tests de bout en bout côté interface) :
+- **Filtres en Å** (`proc/fourier.py`) : passe-bas, passe-haut et passe-bande gaussiens, gain ½ à la coupure. L'image est prolongée en miroir avant la transformée, ce qui corrige le mélange des bords de l'ancien CryoViewer (CV-18). Le passe-haut conserve la moyenne ; les pixels non carrés sont pris en compte ; les NaN et Inf sont remis en place après le filtre.
+- **Moyenne de frames** sur une plage, accumulée en `float64`.
+- **Spectre de puissance** : périodogramme moyenné sur des tuiles de 512 pixels, moyenne radiale. Dans l'interface : anneaux de résolution en Å, anneau de la glace à 3,7 Å, résolution sous le curseur, agrandissement du centre.
+- **Gain** (`cryo/gain.py`) : référence multiplicative ou image de coups à inverser, pixels défectueux comblés par la médiane de leurs voisins valides, référence plus fine ou plus grossière que l'image d'un facteur entier, **vérification des huit orientations** sur le film.
+- **Chaîne de traitement côté serveur**, dans un ordre fixe : moyenne, gain, filtres, puis découpe et binning. Le résultat en pleine résolution est mis en cache ; la clé contient tous les paramètres et l'identité du fichier de gain.
+- **Panneau Cryo** : préréglages de passe-bas, passe-haut, moyenne de frames, fractions EER par frame, choix du gain parmi les fichiers voisins avec correction de l'orientation en un clic. Tous les réglages sont dans le lien.
+
+Critères d'acceptation :
+
+| Critère | Résultat |
+|---|---|
+| Un EER synthétique avec gain volontairement retourné est détecté | Oui. Un film EER synthétique issu d'un détecteur à motif fixe, avec son gain enregistré tête en bas : l'API répond `flip_y`, et l'interface propose la correction. Les huit orientations sont retrouvées sur un détecteur synthétique |
+| Rayon d'anneau = N·apix/d à 0,5 px près | Oui : un réseau de période 10 Å à 1,25 Å/px donne un pic à 64 px du centre d'un spectre de 512 px |
+| Gain du passe-bas de 20 Å = 0,5 ± 0,03 | Oui, mesuré sur des sinusoïdes à la fréquence de coupure |
+| La moyenne des frames 3 à 7 est égale à la moyenne numpy | Oui, à l'identique |
+
+Temps mesurés sur une image 4096 × 4096 (un cœur) : passe-bas 0,7 s, spectre de puissance 0,6 s, application du gain avec 9 000 pixels défectueux 0,06 s, vérification de l'orientation 1,7 s (faite une fois par couple film et gain).
+
+Reste à faire dans M4 :
+- Superposition des pointés (STAR, `.cs`, `.box`, `.cbox`) ; galeries de particules et de classes 2D.
+- Regroupement EER automatique par dose (environ 1 e/Å² par frame) : le réglage manuel existe, pas le calcul à partir de la dose.
+- Somme pondérée par la dose (elle demande des frames alignées) ; binning dans Fourier (le binning reste une moyenne de blocs).
+- La liste de défauts du tag 65100 des fichiers `.gain` n'est pas lue : seuls les pixels de gain nul sont traités comme défauts.
+
+Écarts et limites :
+- **La moyenne de frames est une fenêtre glissante** (N frames à partir de la frame courante) plutôt qu'une plage fixe. Elle couvre le cas « frames 3 à 7 » et permet de lire un film en moyenne glissante.
+- **L'orientation du gain n'est jamais corrigée d'office** : le serveur mesure, l'interface montre, l'utilisateur corrige. Si la marge entre les deux meilleures orientations est inférieure à 2 % (trop peu de dose, gain sans motif), la vérification est déclarée non concluante.
+- **Recherche du gain** : fichiers dont le nom contient « gain », dans le dossier du film et le dossier parent, parmi les 1 000 premières entrées. Le nom donné par le XML d'EPU (`EerGainReference`) sera exploité avec le parseur EPU de M3. En attendant, un gain rangé ailleurs se désigne par le lien (`gain=<chemin logique>`).
+- **Un gain n'est conservé d'un fichier au suivant** que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
+- **Aucun essai sur de vraies données.** Les conventions (gain `.gain` multiplicatif, sans retournement) viennent de l'étude et de RELION ; elles sont à confirmer sur un film et un gain du Falcon du labo. C'est le premier essai à faire.
+- **L'ancien CryoViewer peut être éteint** : les deux fonctions qui le retenaient (passe-bas en Å, moyenne de frames) sont dans imageBio. À faire après un essai sur vos fichiers.
 
 ### M5 : cœur ImageJ, partie 1 (5-7 sessions)
 
@@ -550,9 +585,9 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Premier message suggéré pour la prochaine session (M3 ou M4) :**
+**Premier message suggéré pour la prochaine session (M3, ou la suite de M4) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 et M2), `backend/README.md`, `frontend/README.md` et les ADR. Réalise le jalon M3 (Live v2 : scrutateur indexé dans SQLite, test de complétude, parseurs EPU XML et mdoc, une surveillance par utilisateur, grille de vignettes portée dans le frontend) — ou M4 (mode Cryo : passe-bas en Å, spectre de puissance, moyenne de frames, gain EER) si c'est la priorité. Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1, M2 et M4), `backend/README.md`, `frontend/README.md` et les ADR. Réalise le jalon M3 (Live v2 : scrutateur indexé dans SQLite, test de complétude, parseurs EPU XML et mdoc, une surveillance par utilisateur, grille de vignettes portée dans le frontend) — ou la suite de M4 (superposition des pointés STAR, `.cs`, `.box` et `.cbox`, galeries de particules et de classes 2D, regroupement EER par dose) si c'est la priorité. Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 
