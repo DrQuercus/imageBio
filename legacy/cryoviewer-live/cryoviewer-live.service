@@ -17,7 +17,9 @@ Environment=NODE_ENV=production
 # Allowed data roots, separated by ':'. Watching is disabled without it. ADAPT to your storage.
 Environment=CVL_ROOTS=/srv/glacios
 # Option A (recommended): loopback only, behind a reverse proxy (TLS + auth) or an SSH tunnel.
+# Behind a proxy, also give the public name of the service.
 Environment=HOST=127.0.0.1
+#Environment=CVL_ALLOWED_HOSTS=cryoviewer.lab.example
 # Option B: listen on the network with the built-in Basic auth. The file contains
 # "user:password" and must be readable by the service user only (chmod 600).
 #Environment=HOST=0.0.0.0

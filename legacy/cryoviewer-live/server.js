@@ -12,12 +12,14 @@ const security = require('./security');
 // HOST                 bind address (default 127.0.0.1; put a reverse proxy in front)
 // CVL_ROOTS            allowed data roots, separated by ':' (watching is disabled without it)
 // CVL_AUTH             "user:password" for HTTP Basic auth (or CVL_AUTH_FILE: file with that content)
-// CVL_ALLOWED_HOSTS    optional comma-separated Host header allow-list
+// CVL_ALLOWED_HOSTS    public names (reverse proxy), comma-separated, accepted as Host/Origin
+// CVL_THUMB_CACHE_MB   thumbnail disk cache limit (default 512)
 // CVL_INSECURE_NO_AUTH=1  allow a non-loopback bind without auth (not recommended)
 const HOST = process.env.HOST || '127.0.0.1';
 const ROOTS = security.parseRoots(process.env.CVL_ROOTS);
 const AUTH = security.loadAuth(process.env);
 const ALLOWED_HOSTS = security.parseAllowedHosts(process.env, HOST);
+const TRUSTED_HOSTS = security.parseTrustedHosts(process.env);
 
 if (!security.isLoopbackHost(HOST) && !AUTH && process.env.CVL_INSECURE_NO_AUTH !== '1') {
   console.error(`[Security] Refusing to listen on ${HOST} without authentication.`);
@@ -33,7 +35,7 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({
   server,
   maxPayload: 64 * 1024,
-  verifyClient: security.wsVerifier({ auth: AUTH, allowedHosts: ALLOWED_HOSTS }),
+  verifyClient: security.wsVerifier({ auth: AUTH, allowedHosts: ALLOWED_HOSTS, trustedHosts: TRUSTED_HOSTS }),
 });
 
 app.use(security.httpGuard({ auth: AUTH, allowedHosts: ALLOWED_HOSTS }));
@@ -42,6 +44,9 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // ─── Config ─────────────────────────────────────────────────────────────────
 const THUMB_SIZE = 128;
 const THUMB_CACHE_DIR = path.join(__dirname, '.thumb_cache');
+const THUMB_SIZES = [64, 128, 256];   // requested sizes are rounded up to one of these
+const THUMB_CACHE_MAX_BYTES = (Number(process.env.CVL_THUMB_CACHE_MB) || 512) * 1024 * 1024;
+const WATCH_RESTART_MIN_MS = 2000;   // a new watch restarts a full scan: rate-limit it
 const STATS_INTERVAL_MS = 2000;
 const MAX_CONCURRENT_READS = 8;       // max parallel file reads
 const WATCHER_BATCH_DELAY_INIT = 500; // ms batch delay during initial scan
@@ -245,8 +250,10 @@ async function getCachedThumbnailAsync(filePath, size, st) {
       const thumb = await generateThumbnailAsync(filePath, size);
       if (!thumb || thumb.error) return thumb;
       // Write cache (fire-and-forget, don't block response)
-      fsp.writeFile(cachePath, thumb.data).catch(() => {});
-      fsp.writeFile(metaPath, JSON.stringify({ w: thumb.width, h: thumb.height })).catch(() => {});
+      const meta = JSON.stringify({ w: thumb.width, h: thumb.height });
+      Promise.all([fsp.writeFile(cachePath, thumb.data), fsp.writeFile(metaPath, meta)])
+        .then(() => accountThumbCache(thumb.data.length + meta.length))
+        .catch(() => {});
       return thumb;
     } finally {
       readSemaphore.release();
@@ -257,6 +264,51 @@ async function getCachedThumbnailAsync(filePath, size, st) {
   thumbInFlight.set(key, promise);
   return promise;
 }
+
+// ─── Thumbnail disk cache bound (bytes) ─────────────────────────────────────
+let thumbCacheBytes = 0;
+let thumbCachePruning = false;
+
+async function thumbCacheEntries() {
+  const names = await fsp.readdir(THUMB_CACHE_DIR);
+  const entries = [];
+  for (const name of names) {
+    try {
+      const st = await fsp.stat(path.join(THUMB_CACHE_DIR, name));
+      entries.push({ name, size: st.size, mtime: st.mtimeMs });
+    } catch { /* removed meanwhile */ }
+  }
+  return entries;
+}
+
+function accountThumbCache(bytes) {
+  thumbCacheBytes += bytes;
+  if (thumbCacheBytes > THUMB_CACHE_MAX_BYTES && !thumbCachePruning) pruneThumbCache();
+}
+
+// Delete the oldest cache files until the cache is below 80 % of its limit.
+async function pruneThumbCache() {
+  thumbCachePruning = true;
+  try {
+    const entries = await thumbCacheEntries();
+    entries.sort((a, b) => a.mtime - b.mtime);
+    let total = entries.reduce((acc, e) => acc + e.size, 0);
+    for (const e of entries) {
+      if (total <= THUMB_CACHE_MAX_BYTES * 0.8) break;
+      await fsp.unlink(path.join(THUMB_CACHE_DIR, e.name)).catch(() => {});
+      total -= e.size;
+    }
+    thumbCacheBytes = total;
+  } catch (e) {
+    console.error('[Thumb] Cache pruning failed:', e.message);
+  } finally {
+    thumbCachePruning = false;
+  }
+}
+
+thumbCacheEntries()
+  .then(entries => accountThumbCache(entries.reduce((acc, e) => acc + e.size, 0)))
+  .catch(() => {});
 
 // ─── Async MRC data for preview ─────────────────────────────────────────────
 // Returns the preview data, { error } for an invalid/unsupported file, or null on I/O error.
@@ -502,6 +554,7 @@ function stopWatching() {
     for (const f of files) fsp.unlink(path.join(THUMB_CACHE_DIR, f)).catch(() => {});
   }).catch(() => {});
   thumbInFlight.clear();
+  thumbCacheBytes = 0;
   broadcast({ type: 'watch_stopped' });
   console.log('[Watch] Stopped — all state cleared');
 }
@@ -560,7 +613,8 @@ app.get('/api/thumbnail', async (req, res) => {
   try {
     const f = await resolveServedFile(req, res);
     if (!f) return;
-    const size = Math.max(16, Math.min(256, parseInt(req.query.size, 10) || THUMB_SIZE));
+    const wanted = parseInt(req.query.size, 10) || THUMB_SIZE;
+    const size = THUMB_SIZES.find(s => s >= wanted) || THUMB_SIZES[THUMB_SIZES.length - 1];
     if (notModified(req, res, f.st, `-${size}`)) return;
 
     const ext = path.extname(f.filePath).toLowerCase();
@@ -628,6 +682,7 @@ app.get('/api/rate-history', (req, res) => {
 });
 
 // ─── WebSocket ──────────────────────────────────────────────────────────────
+let lastWatchStart = 0;
 wss.on('connection', (ws) => {
   console.log(`[WS] Client connected (total: ${wss.clients.size})`);
 
@@ -662,6 +717,11 @@ wss.on('connection', (ws) => {
           safeSend(ws, { type: 'watch_error', message: watch.error });
           return;
         }
+        if (Date.now() - lastWatchStart < WATCH_RESTART_MIN_MS) {
+          safeSend(ws, { type: 'watch_error', message: 'A watch was just started: wait a few seconds.' });
+          return;
+        }
+        lastWatchStart = Date.now();
         startWatching(watch);
       } else if (data && data.type === 'stop_watch') {
         stopWatching();

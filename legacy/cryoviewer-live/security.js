@@ -117,14 +117,23 @@ async function validateWatchPattern(pattern, roots) {
 }
 
 // ─── Host header allow-list ─────────────────────────────────────────────────
+const LOOPBACK_NAMES = ['localhost', '127.0.0.1', '[::1]'];
+
+// Public names configured by the operator (e.g. the reverse proxy's server name).
+function parseTrustedHosts(env) {
+  const set = new Set(String(env.CVL_ALLOWED_HOSTS || '').split(',')
+    .map(h => hostOnly(h.trim())).filter(Boolean));
+  return set.size ? set : null;
+}
+
 function parseAllowedHosts(env, bindHost) {
-  if (env.CVL_ALLOWED_HOSTS) {
-    const set = new Set(env.CVL_ALLOWED_HOSTS.split(',').map(h => h.trim().toLowerCase()).filter(Boolean));
-    return set.size ? set : null;
+  const trusted = parseTrustedHosts(env);
+  if (isLoopbackHost(bindHost)) {
+    // Loopback: only loopback names (DNS rebinding) plus the configured public names,
+    // e.g. CVL_ALLOWED_HOSTS=cryoviewer.lab.example behind Caddy/nginx.
+    return new Set([...LOOPBACK_NAMES, ...(trusted || [])]);
   }
-  // Bound to loopback: only accept loopback names (protects against DNS rebinding).
-  if (isLoopbackHost(bindHost)) return new Set(['localhost', '127.0.0.1', '[::1]']);
-  return null; // network-bound: auth is mandatory, no Host restriction unless configured
+  return trusted; // network-bound: auth is mandatory, no Host restriction unless configured
 }
 
 function hostOnly(hostHeader) {
@@ -208,15 +217,18 @@ function httpGuard({ auth, allowedHosts }) {
   };
 }
 
-// ws verifyClient: Host check, same-origin check, auth.
-function wsVerifier({ auth, allowedHosts }) {
+// ws verifyClient: Host check, same-origin check (or an origin whose name the operator
+// configured in CVL_ALLOWED_HOSTS, for proxies that rewrite Host), auth.
+function wsVerifier({ auth, allowedHosts, trustedHosts }) {
   return (info, cb) => {
     const req = info.req;
     if (!hostAllowed(req.headers.host, allowedHosts)) return cb(false, 403, 'Forbidden host');
     if (info.origin) {
       let originHost;
       try { originHost = new URL(info.origin).host.toLowerCase(); } catch { return cb(false, 403, 'Bad origin'); }
-      if (originHost !== String(req.headers.host || '').toLowerCase()) return cb(false, 403, 'Cross-origin WebSocket refused');
+      const sameOrigin = originHost === String(req.headers.host || '').toLowerCase();
+      const trusted = Boolean(trustedHosts) && trustedHosts.has(hostOnly(originHost));
+      if (!sameOrigin && !trusted) return cb(false, 403, 'Cross-origin WebSocket refused');
     }
     if (!isAuthenticated(req, auth)) return cb(false, 401, 'Authentication required');
     return cb(true);
@@ -230,6 +242,7 @@ module.exports = {
   realpathInsideRoots,
   validateWatchPattern,
   parseAllowedHosts,
+  parseTrustedHosts,
   hostAllowed,
   loadAuth,
   httpGuard,

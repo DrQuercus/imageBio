@@ -191,7 +191,16 @@ test('server without auth (loopback)', async (t) => {
     }
   });
 
+  await t.test('starting watches is rate-limited', async () => {
+    await sleep(2100);
+    assert.equal((await watch(ws, `${tree.data}/*.jpg`)).type, 'watch_started');
+    const r = await watch(ws, `${tree.data}/*.mrc`);
+    assert.equal(r.type, 'watch_error');
+    assert.match(r.message, /wait/);
+  });
+
   await t.test('watching the root lists images but not symlinks escaping it', async () => {
+    await sleep(2100);
     const r = await watch(ws, `${tree.root}/**/*`);
     assert.equal(r.type, 'watch_started');
     await ws.waitFor(m => m.type === 'scan_complete');
@@ -241,6 +250,7 @@ test('server without auth (loopback)', async (t) => {
     const p = path.join(tree.data, 'good.mrc');
     const a = await request(srv.port, `/api/thumbnail?path=${q(p)}&size=32`);
     assert.equal(a.status, 200);
+    assert.equal(a.headers['x-width'], '64');          // sizes are rounded up to 64/128/256
     assert.equal(a.headers['cache-control'], 'private, no-cache');
     const again = await request(srv.port, `/api/thumbnail?path=${q(p)}&size=32`, { 'If-None-Match': a.headers.etag });
     assert.equal(again.status, 304);
@@ -266,6 +276,44 @@ test('server without auth (loopback)', async (t) => {
     const same = await connectWs(srv.port, { Origin: `http://127.0.0.1:${srv.port}` });
     same.terminate();
   });
+});
+
+// ─── Thumbnail disk cache stays under its limit ─────────────────────────────
+test('thumbnail disk cache is bounded in bytes', async (t) => {
+  const tree = makeTree();
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(tree.data, `m${i}.mrc`), mrcBuffer(128, 128, j => (j * (i + 1)) % 97));
+  const capMb = 0.03;                                   // ~31 KB, each 128x128 thumbnail is 16 KB
+  const srv = await startServer({ HOST: '127.0.0.1', CVL_ROOTS: tree.root, CVL_THUMB_CACHE_MB: String(capMb) });
+  t.after(() => stopServer(srv));
+  const ws = await connectWs(srv.port);
+  t.after(() => ws.terminate());
+  assert.equal((await watch(ws, `${tree.data}/m*.mrc`)).type, 'watch_started');
+  await ws.waitFor(m => m.type === 'scan_complete');
+  await sleep(300);
+  for (let i = 0; i < 8; i++) {
+    const res = await request(srv.port, `/api/thumbnail?path=${q(path.join(tree.data, `m${i}.mrc`))}&size=256`);
+    assert.equal(res.status, 200);
+  }
+  await sleep(500);
+  const dir = path.join(__dirname, '..', '.thumb_cache');
+  const total = fs.readdirSync(dir).reduce((acc, f) => acc + fs.statSync(path.join(dir, f)).size, 0);
+  assert.ok(total <= capMb * 1024 * 1024, `cache is ${total} bytes`);
+});
+
+// ─── Integration tests: behind a reverse proxy ───────────────────────────────
+test('server behind a reverse proxy (CVL_ALLOWED_HOSTS)', async (t) => {
+  const tree = makeTree();
+  const srv = await startServer({ HOST: '127.0.0.1', CVL_ROOTS: tree.root, CVL_ALLOWED_HOSTS: 'cryoviewer.lab.example' });
+  t.after(() => stopServer(srv));
+  const pub = 'cryoviewer.lab.example';
+
+  // Caddy (keeps the public Host) and nginx (rewrites Host to the upstream)
+  assert.equal((await request(srv.port, '/api/images', { Host: pub })).status, 200);
+  assert.equal((await request(srv.port, '/api/images', { Host: `127.0.0.1:${srv.port}` })).status, 200);
+  assert.equal((await request(srv.port, '/api/images', { Host: 'evil.example' })).status, 403);
+  (await connectWs(srv.port, { Host: pub, Origin: `https://${pub}` })).terminate();
+  (await connectWs(srv.port, { Host: `127.0.0.1:${srv.port}`, Origin: `https://${pub}` })).terminate();
+  await assert.rejects(connectWs(srv.port, { Host: pub, Origin: 'https://evil.example' }), { status: 403 });
 });
 
 // ─── Integration tests: Basic auth ──────────────────────────────────────────

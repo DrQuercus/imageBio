@@ -71,7 +71,8 @@ sudo systemctl enable --now cryoviewer-live
 | `HOST` | `127.0.0.1` | Bind address. Listening on anything other than loopback requires auth (below). |
 | `CVL_ROOTS` | *(empty)* | Allowed data roots, separated by `:`. Watch patterns and served files must resolve (realpath, symlinks included) inside one of them. Empty means watching is disabled. |
 | `CVL_AUTH` / `CVL_AUTH_FILE` | *(none)* | `user:password` for HTTP Basic auth, given directly or in a file (preferred, `chmod 600`). |
-| `CVL_ALLOWED_HOSTS` | loopback names when `HOST` is loopback | Optional comma-separated allow-list of `Host` headers. |
+| `CVL_ALLOWED_HOSTS` | *(none)* | Public names of the service, comma-separated (e.g. the reverse proxy's server name). Accepted as `Host` and as WebSocket `Origin`. With a loopback `HOST`, only loopback names and these are accepted. |
+| `CVL_THUMB_CACHE_MB` | `512` | Size limit of the thumbnail disk cache (`.thumb_cache/`); the oldest entries are deleted. |
 | `CVL_INSECURE_NO_AUTH` | — | `1` allows a network bind without auth. Not recommended. |
 
 The file watcher polls every 3 s (`server.js`).
@@ -90,7 +91,7 @@ Since the M0 hotfix (see `docs/audit/AUDIT.md` at the repository root):
 
 There are two ways to expose the service to the lab network:
 
-1. **Recommended: reverse proxy with TLS.** Keep `HOST=127.0.0.1` and put a proxy in front, for example Caddy (`caddy hash-password` produces the hash):
+1. **Recommended: reverse proxy with TLS.** Keep `HOST=127.0.0.1`, set `CVL_ALLOWED_HOSTS=cryoviewer.lab.example` (the public name), and put a proxy in front. For example Caddy (`caddy hash-password` produces the hash; WebSockets are proxied automatically):
 
    ```
    cryoviewer.lab.example {
@@ -102,9 +103,25 @@ There are two ways to expose the service to the lab network:
    }
    ```
 
+   With nginx, also forward the WebSocket upgrade:
+
+   ```
+   location / {
+       proxy_pass http://127.0.0.1:4200;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+   }
+   ```
+
 2. **Quick: built-in Basic auth.** Set `HOST=0.0.0.0` and `CVL_AUTH_FILE=/etc/cryoviewer-live/auth`. Without TLS, the password travels in clear text on the network.
 
-Known limitation: the watch is still global to the server. Any authenticated user can replace or stop it. This is fixed by design in the new backend (milestone M3).
+Known limitations of this stopgap (fixed by design in the new backend, milestone M3):
+
+- The watch is still global to the server. Any authenticated user can replace or stop it; starting a new watch is rate-limited to one every 2 s.
+- The built-in Basic auth has no brute-force protection and its session cookie does not expire. On a shared network, prefer the reverse proxy.
+- A user who can write inside a data root could swap a path for a symlink between the check and the read.
 
 ## Development
 
