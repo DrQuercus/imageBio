@@ -1,0 +1,286 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, isAbort } from "./api/client";
+import type { DatasetInfoResponse, Me, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
+import { ContrastPanel } from "./components/ContrastPanel";
+import { FileBrowser } from "./components/FileBrowser";
+import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
+import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
+import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
+import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
+import { clamp, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
+
+const DEFAULT_DISPLAY: DisplaySettings = { min: 0, max: 1, gamma: 1, invert: false, lut: "grays", auto: true };
+
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+export function App() {
+  const initial = useMemo<LinkState>(() => parseLink(window.location.hash), []);
+  const [me, setMe] = useState<Me | null>(null);
+  const [path, setPath] = useState<string | null>(initial.path ?? null);
+  const [options, setOptions] = useState<ReaderOptions>(initial.options);
+  const [response, setResponse] = useState<DatasetInfoResponse | null>(null);
+  const [index, setIndex] = useState<PlaneIndex>(initial.index);
+  const [view, setView] = useState<View | null>(initial.view ?? null);
+  const [display, setDisplay] = useState<DisplaySettings>({ ...DEFAULT_DISPLAY, ...initial.display });
+  const [userApix, setUserApix] = useState<number | null>(initial.apix ?? null);
+  const [customLut, setCustomLut] = useState<Lut | null>(null);
+  const [stats, setStats] = useState<PlaneStats | null>(null);
+  const [tool, setTool] = useState<Tool>("pan");
+  const [ruler, setRuler] = useState<Ruler | null>(null);
+  const [hover, setHover] = useState<HoverInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [fps, setFps] = useState(8);
+  const [level, setLevel] = useState(1);
+  const [shown, setShown] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  const optionsKey = JSON.stringify(options);
+  const info = response?.info ?? null;
+  const etag = response?.file.etag ?? "";
+  const onError = useCallback((m: string) => setError(m), []);
+
+  useEffect(() => {
+    api.me().then(setMe).catch((e) => setError(message(e)));
+  }, []);
+
+  // ── opening a file ─────────────────────────────────────────────────────────
+  // Set when the next file to arrive must be fitted to the window. The view cannot simply be
+  // cleared here: the previous file is still on screen and would be refitted in its place.
+  const fitOnLoad = useRef(false);
+  const openFile = useCallback((next: string) => {
+    fitOnLoad.current = true;
+    setPath(next);
+    setOptions({});
+    setIndex({ t: 0, c: 0, z: 0 });
+    setDisplay((d) => ({ ...d, auto: true }));
+    setRuler(null);
+    setPlaying(false);
+    setUserApix(null);
+    setError(null);
+  }, []);
+
+  useEffect(() => {
+    setResponse(null);
+    setStats(null);
+    if (!path) return;
+    const controller = new AbortController();
+    api
+      .info(path, options, controller.signal)
+      .then((r) => {
+        setResponse(r);
+        if (fitOnLoad.current) setView(null);
+        fitOnLoad.current = false;
+        const s = r.info.shape;
+        setIndex((i) => ({ t: Math.min(i.t, s.t - 1), c: Math.min(i.c, s.c - 1), z: Math.min(i.z, s.z - 1) }));
+      })
+      .catch((e) => !isAbort(e) && setError(message(e)));
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, optionsKey]);
+
+  // a link pasted in the address bar of an open tab
+  useEffect(() => {
+    const onHash = () => {
+      const link = parseLink(window.location.hash);
+      if (!link.path) return;
+      fitOnLoad.current = !link.view;
+      setPath(link.path);
+      setOptions(link.options);
+      setIndex(link.index);
+      if (link.view) setView(link.view);
+      setDisplay((d) => ({ ...d, auto: true, ...link.display }));
+      setUserApix(link.apix ?? null);
+      setRuler(null);
+      setPlaying(false);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // ── statistics of the plane on screen: histogram and automatic window ──────
+  const statsChannel = info?.rgb ? 0 : index.c;
+  useEffect(() => {
+    if (!path || !etag) return;
+    const controller = new AbortController();
+    api
+      .stats(path, { t: index.t, c: statsChannel, z: index.z }, options, controller.signal)
+      .then((s) => {
+        setStats(s);
+        setDisplay((d) => (d.auto ? { ...d, min: s.auto[0], max: s.auto[1] } : d));
+      })
+      .catch((e) => !isAbort(e) && setError(message(e)));
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, etag, optionsKey, index.t, index.z, statsChannel]);
+
+  const changeDisplay = useCallback(
+    (patch: Partial<DisplaySettings>) => {
+      if (patch.lut) setCustomLut(null);
+      setDisplay((d) => {
+        const next = { ...d, ...patch };
+        return patch.auto && stats ? { ...next, min: stats.auto[0], max: stats.auto[1] } : next;
+      });
+    },
+    [stats],
+  );
+
+  const loadLutFile = useCallback((file: File) => {
+    file
+      .arrayBuffer()
+      .then((buffer) => setCustomLut(parseLutFile(buffer)))
+      .catch((e) => setError(message(e)));
+  }, []);
+
+  const lut = useMemo<Lut>(() => customLut ?? (LUTS[display.lut] ?? LUTS.grays!)(), [customLut, display.lut]);
+
+  // ── player: the next plane is requested once the current one is on screen ──
+  const indexKey = `${index.t},${index.c},${index.z}`;
+  const advancedAt = useRef(0);
+  useEffect(() => {
+    if (!playing || !info || shown !== `${path}|${indexKey}`) return;
+    const axis = info.shape.t > 1 ? "t" : "z";
+    const count = info.shape[axis];
+    if (count < 2) {
+      setPlaying(false);
+      return;
+    }
+    const wait = Math.max(0, 1000 / fps - (performance.now() - advancedAt.current));
+    const timer = window.setTimeout(() => {
+      advancedAt.current = performance.now();
+      setIndex((i) => ({ ...i, [axis]: (i[axis] + 1) % count }));
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [playing, shown, indexKey, path, info, fps]);
+
+  const step = useCallback(
+    (delta: number) => {
+      if (!info) return;
+      const axis = info.shape.t > 1 ? "t" : "z";
+      setIndex((i) => ({ ...i, [axis]: clamp(i[axis] + delta, 0, info.shape[axis] - 1) }));
+    },
+    [info],
+  );
+
+  // ── the view in the address bar ────────────────────────────────────────────
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined });
+      window.history.replaceState(null, "", link || window.location.pathname);
+    }, 200);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, indexKey, optionsKey, view, display, userApix]);
+
+  const copyLink = () => {
+    const link = window.location.origin + window.location.pathname + formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined });
+    void navigator.clipboard?.writeText(link).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  // ── keyboard ───────────────────────────────────────────────────────────────
+  const zoomBy = useCallback((f: number) => setView((v) => v && { ...v, zoom: clamp(v.zoom * f, MIN_ZOOM, MAX_ZOOM) }), []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const typing = el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable || (el.tagName === "INPUT" && (el as HTMLInputElement).type !== "range"));
+      if (typing) return;
+      const range = el?.tagName === "INPUT";
+      switch (e.key) {
+        case "ArrowLeft": if (range) return; step(-1); break;
+        case "ArrowRight": if (range) return; step(1); break;
+        case " ": e.preventDefault(); setPlaying((p) => !p); break;
+        case "a": case "A": changeDisplay({ auto: true }); break;
+        case "i": case "I": changeDisplay({ invert: !display.invert }); break;
+        case "r": case "R": setTool((t) => (t === "ruler" ? "pan" : "ruler")); break;
+        case "Escape": setTool("pan"); setRuler(null); break;
+        case "f": case "F": case "0": setView(null); break;
+        case "1": setView((v) => v && { ...v, zoom: 1 }); break;
+        case "+": case "=": zoomBy(1.25); break;
+        case "-": zoomBy(1 / 1.25); break;
+        default: return;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [step, changeDisplay, display.invert, zoomBy]);
+
+  const apix = info ? (info.calibration.x.angstrom ?? userApix) : null;
+  const rulerText = ruler ? rulerLabel(Math.hypot(ruler.x1 - ruler.x0, ruler.y1 - ruler.y0), apix) : null;
+  const onShown = useCallback((i: PlaneIndex) => setShown(`${path}|${i.t},${i.c},${i.z}`), [path]);
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <span className="logo">imageBio</span>
+        <div className="group">
+          <button className={tool === "pan" ? "on" : ""} onClick={() => setTool("pan")} title="Déplacer (Échap)" data-testid="tool-pan">Déplacer</button>
+          <button className={tool === "ruler" ? "on" : ""} onClick={() => setTool("ruler")} title="Règle (R)" data-testid="tool-ruler">Règle</button>
+        </div>
+        <div className="group">
+          <button onClick={() => setView(null)} title="Ajuster à la fenêtre (F)" data-testid="fit">Ajuster</button>
+          <button onClick={() => setView((v) => v && { ...v, zoom: 1 })} title="1 pixel image = 1 pixel écran (1)" data-testid="one-to-one">1:1</button>
+          <button onClick={() => zoomBy(1.25)} title="Zoom avant (+)" aria-label="Zoom avant">+</button>
+          <button onClick={() => zoomBy(1 / 1.25)} title="Zoom arrière (-)" aria-label="Zoom arrière">−</button>
+        </div>
+        <span className="spacer" />
+        {path && <button onClick={copyLink} data-testid="copy-link">{copied ? "Lien copié" : "Copier le lien"}</button>}
+        {me && me.auth_mode !== "none" && <span className="user">{me.user}</span>}
+      </header>
+
+      <aside className="left">
+        <FileBrowser current={path} onOpen={openFile} onError={onError} />
+      </aside>
+
+      <main className="center">
+        {error && (
+          <div className="error" role="alert" data-testid="error">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} aria-label="Fermer">×</button>
+          </div>
+        )}
+        {response && info ? (
+          <ViewerCanvas
+            key={`${response.path}|${etag}|${optionsKey}`}
+            path={response.path}
+            etag={etag}
+            info={info}
+            index={index}
+            options={options}
+            display={display}
+            lut={lut}
+            view={view}
+            onViewChange={setView}
+            tool={tool}
+            ruler={ruler}
+            onRulerChange={setRuler}
+            apix={apix}
+            onHover={setHover}
+            onShown={onShown}
+            onError={onError}
+            onLevel={setLevel}
+          />
+        ) : (
+          <div className="empty" data-testid="empty">
+            {path && !error ? "Ouverture…" : "Choisissez un fichier dans la liste de gauche."}
+          </div>
+        )}
+      </main>
+
+      <aside className="right">
+        {response && info && (
+          <>
+            <ContrastPanel stats={stats} display={display} rgb={info.rgb} customLut={customLut !== null} onChange={changeDisplay} onLutFile={loadLutFile} />
+            <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps} />
+            <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
+          </>
+        )}
+      </aside>
+
+      <StatusBar hover={hover} zoom={view?.zoom ?? null} level={level} ruler={rulerText} />
+    </div>
+  );
+}

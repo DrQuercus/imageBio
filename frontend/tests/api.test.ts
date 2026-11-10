@@ -1,0 +1,69 @@
+import { describe, expect, it } from "vitest";
+import { ApiError, buildQuery, decodePlane } from "../src/api/client";
+import { formatLink, parseLink } from "../src/state/url";
+
+const headers = (h: Record<string, string>) => ({ get: (name: string) => h[name] ?? null });
+
+describe("plane decoding", () => {
+  it("decodes every dtype from its headers", () => {
+    const u16 = new Uint16Array([1, 2, 3, 4, 5, 65535]);
+    const plane = decodePlane(u16.buffer, headers({ "X-Dtype": "uint16", "X-Shape": "2,3", "X-Bin": "1", "X-Region": "0,0,3,2" }));
+    expect(plane.width).toBe(3);
+    expect(plane.height).toBe(2);
+    expect(Array.from(plane.data)).toEqual([1, 2, 3, 4, 5, 65535]);
+    expect(plane.data).toBeInstanceOf(Uint16Array);
+    const f32 = new Float32Array([1.5, -2.25]);
+    const binned = decodePlane(f32.buffer, headers({ "X-Dtype": "float32", "X-Shape": "1,2", "X-Bin": "4", "X-Region": "8,16,8,4" }));
+    expect(binned.bin).toBe(4);
+    expect(binned.region).toEqual([8, 16, 8, 4]);
+    expect(Array.from(binned.data)).toEqual([1.5, -2.25]);
+    const i8 = decodePlane(new Int8Array([-1, 127]).buffer, headers({ "X-Dtype": "int8", "X-Shape": "1,2", "X-Bin": "1", "X-Region": "0,0,2,1" }));
+    expect(Array.from(i8.data)).toEqual([-1, 127]);
+  });
+
+  it("refuses a body that does not match its headers", () => {
+    const body = new Uint8Array(5).buffer;
+    const bad = [
+      { "X-Dtype": "uint16", "X-Shape": "2,3", "X-Bin": "1", "X-Region": "0,0,3,2" },
+      { "X-Dtype": "uint8", "X-Shape": "5", "X-Bin": "1", "X-Region": "0,0,5,1" },
+      { "X-Dtype": "complex64", "X-Shape": "1,5", "X-Bin": "1", "X-Region": "0,0,5,1" },
+      { "X-Shape": "1,5", "X-Bin": "1", "X-Region": "0,0,5,1" },
+    ];
+    for (const h of bad) expect(() => decodePlane(body, headers(h as Record<string, string>))).toThrow(ApiError);
+  });
+});
+
+describe("queries", () => {
+  it("omits undefined parameters and prefixes reader options", () => {
+    const q = buildQuery({ path: "cryo/a b.mrc", t: 3, x: undefined }, { group: 4, superres: 1 });
+    expect(q).toBe("path=cryo%2Fa+b.mrc&t=3&opt.group=4&opt.superres=1");
+  });
+});
+
+describe("links", () => {
+  it("round-trips a full view", () => {
+    const state = {
+      path: "cryo/session 1/movie.eer",
+      index: { t: 7, c: 0, z: 2 },
+      options: { group: 40, superres: 1 },
+      view: { zoom: 0.4375, cx: 2048.5, cy: 1000 },
+      display: { min: -12.5, max: 480, gamma: 1.4, lut: "fire", invert: true, auto: false },
+      apix: 0.83,
+    };
+    const link = formatLink(state);
+    expect(link.startsWith("#path=cryo%2Fsession+1%2Fmovie.eer")).toBe(true);
+    expect(parseLink(link)).toEqual(state);
+  });
+
+  it("keeps links short for default settings", () => {
+    const link = formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, display: { auto: true, gamma: 1, lut: "grays", invert: false, min: 0, max: 1 } });
+    expect(link).toBe("#path=a.mrc");
+    expect(formatLink({ index: { t: 0, c: 0, z: 0 }, options: {} })).toBe("");
+  });
+
+  it("ignores garbage", () => {
+    const state = parseLink("#path=x.mrc&t=-3&z=abc&zoom=0&cx=1&cy=2&min=5&max=1&gamma=-1&apix=nan&opt.=1");
+    expect(state).toEqual({ path: "x.mrc", index: { t: 0, c: 0, z: 0 }, options: {} });
+    expect(parseLink("")).toEqual({ index: { t: 0, c: 0, z: 0 }, options: {} });
+  });
+});

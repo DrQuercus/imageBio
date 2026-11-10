@@ -27,13 +27,15 @@ import re
 import sys
 import zlib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
 import zstandard
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imagebio import __version__
@@ -57,6 +59,13 @@ _INT: Final = re.compile(r"-?\d{1,18}")
 _FLOAT: Final = re.compile(r"-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
 _COMPRESS_PROBE: Final = 256 * 1024
 _CACHE_CONTROL: Final = "private, no-cache"
+#: Where "npm run build" (frontend/) puts the web application.
+STATIC_DIR: Final = Path(__file__).resolve().parent.parent / "static"
+#: The page only loads its own scripts and styles and only talks to this server.
+_APP_CSP: Final = (
+    "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
 
 
 def _error(status: int, code: str, message: str, headers: Mapping[str, str] | None = None) -> JSONResponse:
@@ -146,7 +155,10 @@ def _not_modified(request: Request, etag: str) -> bool:
     return any(tag.strip().removeprefix("W/") == wanted or tag.strip() == "*" for tag in header.split(","))
 
 
-def create_app(settings: Settings, registry: Registry | None = None) -> FastAPI:
+def create_app(
+    settings: Settings, registry: Registry | None = None, static_dir: Path | None = STATIC_DIR
+) -> FastAPI:
+    """The application. ``static_dir`` holds the built web interface (``None``: API only)."""
     reg = registry or default_registry()
     roots = RootSet(settings.roots)
     service = PlaneService(settings, reg)
@@ -316,5 +328,27 @@ def create_app(settings: Settings, registry: Registry | None = None) -> FastAPI:
         return Response(
             json.dumps(stats.to_json(), allow_nan=False), media_type="application/json", headers=headers
         )
+
+    # ── web interface ────────────────────────────────────────────────────────
+    index = static_dir / "index.html" if static_dir else None
+    if index is not None and index.is_file() and static_dir is not None:
+        if (static_dir / "assets").is_dir():
+            app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        def web_app() -> FileResponse:
+            return FileResponse(
+                index,
+                media_type="text/html",
+                headers={"Content-Security-Policy": _APP_CSP, "Cache-Control": "no-cache"},
+            )
+
+    else:
+
+        @app.get("/", include_in_schema=False)
+        def web_app_missing() -> JSONResponse:
+            return _error(
+                404, "ui_not_built", "the web interface is not built (run 'npm run build' in frontend/)"
+            )
 
     return app

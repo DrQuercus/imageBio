@@ -38,7 +38,7 @@ imagebio = "imagebio.api.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-imagebio = ["py.typed"]
+imagebio = ["py.typed", "static/*", "static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

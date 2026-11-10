@@ -17,3 +17,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Built frontend, produced by "npm run build" in frontend/
+backend/src/imagebio/static/
