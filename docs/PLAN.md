@@ -390,7 +390,7 @@ Critères d'acceptation :
 
 **Avancement de M4 (10 novembre 2026) : première tranche faite.** Les quatre critères d'acceptation passent ; les pointés et les galeries restent à faire. La décision de conception est dans l'[ADR 006](adr/006-traitements-cote-serveur.md).
 
-Fait (852 tests côté backend, 48 tests unitaires et 18 tests de bout en bout côté interface) :
+Fait (874 tests côté backend pour M1, M2 et M4, 48 tests unitaires et 18 tests de bout en bout côté interface) :
 - **Filtres en Å** (`proc/fourier.py`) : passe-bas, passe-haut et passe-bande gaussiens, gain ½ à la coupure. L'image est prolongée en miroir avant la transformée, ce qui corrige le mélange des bords de l'ancien CryoViewer (CV-18). Le passe-haut conserve la moyenne ; les pixels non carrés sont pris en compte ; les NaN et Inf sont remis en place après le filtre.
 - **Moyenne de frames** sur une plage, accumulée en `float64`.
 - **Spectre de puissance** : périodogramme moyenné sur des tuiles de 512 pixels, moyenne radiale. Dans l'interface : anneaux de résolution en Å, anneau de la glace à 3,7 Å, résolution sous le curseur, agrandissement du centre.
@@ -423,6 +423,13 @@ Reste à faire dans M4 :
 - **Un gain n'est conservé d'un fichier au suivant** que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
 - **Aucun essai sur de vraies données.** Les conventions (gain `.gain` multiplicatif, sans retournement) viennent de l'étude et de RELION ; elles sont à confirmer sur un film et un gain du Falcon du labo. C'est le premier essai à faire.
 - **L'ancien CryoViewer peut être éteint** : les deux fonctions qui le retenaient (passe-bas en Å, moyenne de frames) sont dans imageBio. À faire après un essai sur vos fichiers.
+- **Relecture indépendante du backend Cryo** (un agent neuf, sur `proc/fourier.py`, `cryo/gain.py`, la chaîne de traitement et les routes). Les nombres, les clés de cache, l'autorisation du chemin de gain et la tenue sous 16 threads ont été vérifiés et trouvés corrects. Cinq défauts ont été trouvés et corrigés, chacun avec son test de régression :
+  - une coupure plus grossière que le champ de vue faisait transformer neuf fois la surface de l'image (jusqu'à 72 fois la mémoire du plan) : le remplissage en miroir est maintenant limité à une demi-image de chaque côté ;
+  - la moyenne de frames contournait la limite de taille des plans lus en mémoire ;
+  - des valeurs extrêmes de coupure ou de taille de pixel donnaient une erreur 500 ou une image entièrement NaN : elles sont refusées (coupures de 0,001 Å à 1 mm) ;
+  - la moyenne radiale d'un spectre dépassant la plage du `float32` donnait une erreur 500 ;
+  - la vérification de l'orientation se trompait pour un gain d'échelle très éloignée de 1, et se disait sûre d'elle sur des images parfaitement plates.
+  Le frontend, les lecteurs et les modules de M1 et M2 n'ont toujours pas eu de relecture indépendante.
 
 ### M5 : cœur ImageJ, partie 1 (5-7 sessions)
 

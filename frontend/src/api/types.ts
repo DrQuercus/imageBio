@@ -150,5 +150,6 @@ export interface Spectrum {
 export interface SpectrumProfile {
   side: number;
   frequency: number[];
-  power: number[];
+  /** null where the power overflowed. */
+  power: (number | null)[];
 }

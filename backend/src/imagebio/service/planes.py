@@ -128,14 +128,17 @@ class PlaneService:
         self._stats_lock = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────────────────
+    def _check_plane_size(self, info: DatasetInfo, bytes_per_pixel: int = 0) -> None:
+        """Refuse a plane that would not fit in memory, as stored or at ``bytes_per_pixel``."""
+        nbytes = max(info.plane_nbytes, info.size_x * info.size_y * bytes_per_pixel)
+        if nbytes > self.max_plane_bytes:
+            raise InvalidRequestError(
+                f"plane too large to read ({info.size_x} × {info.size_y} pixels, {nbytes >> 20} MiB)"
+            )
+
     def _raw(self, dataset: Any, file_id: FileId, okey: str, t: int, c: int, z: int) -> Plane:
         dataset.check_index(t, c, z)
-        info: DatasetInfo = dataset.info
-        if info.plane_nbytes > self.max_plane_bytes:
-            raise InvalidRequestError(
-                f"plane too large to read ({info.size_x} × {info.size_y} pixels, "
-                f"{info.plane_nbytes >> 20} MiB)"
-            )
+        self._check_plane_size(dataset.info)
         return self._cache.get_or_load(("raw", file_id, okey, t, c, z), lambda: dataset.read_plane(t, c, z))
 
     def _mean_of_frames(
@@ -146,6 +149,7 @@ class PlaneService:
         info: DatasetInfo = dataset.info
         if not isinstance(t_end, int) or isinstance(t_end, bool) or not t <= t_end < info.size_t:
             raise InvalidRequestError(f"t_end={t_end!r} must be between t={t} and {info.size_t - 1}")
+        self._check_plane_size(info, bytes_per_pixel=8)  # the accumulator is float64
         acc = np.zeros((info.size_y, info.size_x), np.float64)
         for k in range(t, t_end + 1):
             frame = self._cache.get(("raw", file_id, okey, k, c, z))

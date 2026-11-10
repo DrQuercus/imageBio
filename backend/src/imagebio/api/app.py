@@ -406,8 +406,11 @@ def create_app(
         if _not_modified(request, etag):
             return Response(status_code=304, headers=headers)
         frequency, profile = radial_profile(power)
+        # a power beyond float32 is not a number JSON can carry: it becomes null
         body = {"side": int(power.shape[0]), "frequency": frequency.tolist(), "power": profile.tolist()}
-        return Response(json.dumps(body, allow_nan=False), media_type="application/json", headers=headers)
+        return Response(
+            json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
 
     @app.get("/api/cryo/gain/check")
     def cryo_gain_check(

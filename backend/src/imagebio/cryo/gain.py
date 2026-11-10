@@ -244,7 +244,7 @@ def check_orientation(image: Plane, gain: Gain, *, tile: int = _TILE) -> Orienta
     ``image`` should be a sum or mean of raw frames, with enough dose for the fixed pattern of
     the detector to stand out of the shot noise; ``gain`` a multiplicative reference
     (:func:`prepare_gain`), in the orientation it is stored in. Defective pixels are left out
-    of the comparison: they are set to the mean, in the image and for every orientation.
+    of the comparison: for every orientation they take the mean of the corrected image.
     """
     if image.ndim != 2:
         raise InvalidRequestError("check_orientation expects a 2-D image")
@@ -261,7 +261,12 @@ def check_orientation(image: Plane, gain: Gain, *, tile: int = _TILE) -> Orienta
             scores.append(None)  # a quarter turn of a rectangular detector
             continue
         corrected = data * fitted
-        corrected[(fitted == 0) | ~finite] = np.float32(level)
+        masked = (fitted == 0) | ~finite
+        if masked.any():
+            # at the level of the corrected image, whatever the scale of the gain: any other
+            # value would make outliers of the very pixels that are left out
+            kept = corrected[~masked]
+            corrected[masked] = kept.mean(dtype=np.float64) if kept.size else 0.0
         scores.append(flatness(corrected, tile))
     ranked = sorted((s, k) for k, s in enumerate(scores) if s is not None)
     if not ranked:
@@ -272,6 +277,11 @@ def check_orientation(image: Plane, gain: Gain, *, tile: int = _TILE) -> Orienta
         )
     best_score, best = ranked[0]
     runner_up = ranked[1][0] if len(ranked) > 1 else float("inf")
-    ratio = runner_up / best_score if best_score > 0 else float("inf")
+    if best_score > 0:
+        ratio = runner_up / best_score
+    elif runner_up > 0:  # perfectly flat, and alone in being so
+        ratio = float("inf")
+    else:  # a tie between perfectly flat images tells nothing
+        ratio = 1.0
     plain = np.where(finite, data, np.float32(level))
     return OrientationCheck(tuple(scores), best, ratio, ratio >= _CONFIDENT_RATIO, flatness(plain, tile))

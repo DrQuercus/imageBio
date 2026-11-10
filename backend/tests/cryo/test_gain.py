@@ -290,6 +290,27 @@ def test_defects_do_not_mislead_the_check() -> None:
     assert check.confident
 
 
+@pytest.mark.parametrize("scale", [1.0, 0.1, 0.01, 0.001, 50.0])
+def test_the_scale_of_the_gain_does_not_mislead_the_check(scale: float) -> None:
+    """Found in review: left-out pixels were set to the level of the raw image, which made
+    outliers of them once the gain was far from 1, and the wrong orientation won."""
+    for seed in range(4):
+        rng = np.random.default_rng(100 + seed)
+        raw, gain = detector(rng, (512, 512))
+        gain[rng.integers(0, 512, 300), rng.integers(0, 512, 300)] = 0
+        raw[gain == 0] = 60000  # hot pixels, known to the reference
+        check = check_orientation(raw, np.ascontiguousarray(gain.T) * np.float32(scale))
+        assert ORIENTATION_NAMES[check.best] == "transpose", (scale, seed)
+        assert check.confident
+
+
+def test_a_perfectly_flat_tie_is_not_a_confident_answer() -> None:
+    """Found in review: with every score at 0 the margin was infinite, hence 'confident'."""
+    check = check_orientation(np.ones((128, 128), np.float32), np.ones((128, 128), np.float32))
+    assert all(s == 0 for s in check.scores)
+    assert check.ratio == 1.0 and not check.confident and not check.improves
+
+
 def test_a_finer_reference_is_checked_on_a_coarser_image() -> None:
     rng = np.random.default_rng(23)
     raw, gain = detector(rng, (256, 256))

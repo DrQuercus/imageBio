@@ -8,7 +8,7 @@ the pixel size is required, and anisotropic pixels are handled.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Final
 
 import numpy as np
 import numpy.typing as npt
@@ -40,16 +40,27 @@ def next_fast_len(n: int) -> int:
     return best
 
 
+#: Accepted cut-offs and pixel sizes, in Å. Far wider than any microscope (0.001 Å to 1 mm),
+#: narrow enough for every product below to stay finite in float32.
+_RESOLUTION_RANGE: Final = (1e-3, 1e7)
+_PIXEL_RANGE: Final = (1e-4, 1e7)
+
+
+def _in_range(value: object, bounds: tuple[float, float]) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and bounds[0] <= value <= bounds[1]
+    )
+
+
 def _resolution(name: str, value: float | None) -> float | None:
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int | float)
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise InvalidRequestError(f"{name} must be a resolution in Å, greater than 0")
+    if not _in_range(value, _RESOLUTION_RANGE):
+        lo, hi = _RESOLUTION_RANGE
+        raise InvalidRequestError(f"{name} must be a resolution in Å, between {lo:g} and {hi:g}")
     return float(value)
 
 
@@ -76,8 +87,11 @@ def fourier_filter(
     lowpass, highpass = _resolution("lowpass", lowpass), _resolution("highpass", highpass)
     apix_y = apix_x if apix_y is None else apix_y
     for value in (apix_x, apix_y):
-        if not (isinstance(value, int | float) and math.isfinite(value) and value > 0):
-            raise InvalidRequestError("the pixel size must be known (Å per pixel) to filter by resolution")
+        if not _in_range(value, _PIXEL_RANGE):
+            lo, hi = _PIXEL_RANGE
+            raise InvalidRequestError(
+                f"the pixel size must be known to filter by resolution (Å per pixel, {lo:g} to {hi:g})"
+            )
     if a.ndim != 2:
         raise InvalidRequestError("fourier_filter expects a 2-D plane")
     if lowpass is not None and highpass is not None and lowpass >= highpass:
@@ -97,9 +111,11 @@ def fourier_filter(
     h, w = data.shape
     # Reach of the filter in real space: a Gaussian of half-gain resolution d has a standard
     # deviation of d * sqrt(ln 2) / (pi * sqrt 2) Å ~ 0.19 d. Four of them on each side.
+    # No more than half the image on each side: a cut-off as coarse as the field of view would
+    # otherwise transform nine times the image for a border that no longer changes anything.
     reach = max(lowpass or 0.0, highpass or 0.0) * 0.75
-    pad_y = min(h - 1, math.ceil(reach / apix_y)) if h > 1 else 0
-    pad_x = min(w - 1, math.ceil(reach / apix_x)) if w > 1 else 0
+    pad_y = min(h // 2, math.ceil(reach / apix_y))
+    pad_x = min(w // 2, math.ceil(reach / apix_x))
     big_h, big_w = next_fast_len(h + 2 * pad_y), next_fast_len(w + 2 * pad_x)
     top, left = (big_h - h) // 2, (big_w - w) // 2
     top, left = min(top, h - 1), min(left, w - 1)  # reflection cannot exceed the image itself
@@ -177,7 +193,8 @@ def power_spectrum(a: Plane, *, tile: int = 512, overlap: float = 0.5) -> tuple[
     full[:, :half] = acc
     mirrored = (-np.arange(tile)) % tile  # P(ky, kx) = P(-ky, -kx)
     full[:, half:] = acc[mirrored][:, tile // 2 - 1 : 0 : -1]
-    return np.fft.fftshift(full / (n * norm)).astype(np.float32), n
+    with np.errstate(over="ignore"):  # a power beyond float32 becomes inf, which callers handle
+        return np.fft.fftshift(full / (n * norm)).astype(np.float32), n
 
 
 def radial_profile(power: npt.NDArray[Any]) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:

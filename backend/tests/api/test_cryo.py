@@ -378,3 +378,51 @@ def test_the_check_needs_a_gain(client, detector):
     assert r.status_code == 400 and "gain" in r.json()["error"]["message"]
     r = client.get(GAIN_CHECK, params={**MOVIE, "gain": "cryo/good.gain", "t": 3})
     assert r.status_code == 400  # unknown parameter
+
+
+# ── found by the independent review of this code ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"lp": 20, "apix": "1e-320"},
+        {"lp": "1e300", "apix": "1e-300"},
+        {"hp": "1.7e308"},
+        {"lp": "2e19"},
+        {"hp": "1e20", "apix": "1e30"},
+    ],
+)
+def test_extreme_filter_values_are_a_client_error(client, params):
+    for url in (PLANE, STATS):
+        r = client.get(url, params={"path": "public/frames.mrc", **params})
+        assert r.status_code == 400, (url, r.text)
+        assert r.json()["error"]["code"] == "invalid_request"
+
+
+def test_a_frame_average_does_not_bypass_the_plane_size_limit(tree: Tree):
+    """The limit on the plane read into memory was only checked for single frames."""
+    with make_client(tree) as limited:
+        service = limited.app.state.service
+        service.max_plane_bytes = (
+            96 * 128 * 4 * 2 - 1
+        )  # a float32 frame fits, its float64 accumulator does not
+        assert limited.get(PLANE, params={"path": "public/frames.mrc"}).status_code == 200
+        for url in (PLANE, STATS, SPECTRUM):
+            r = limited.get(url, params={"path": "public/frames.mrc", "t": 0, "t_end": 3})
+            assert r.status_code == 400 and "too large" in r.json()["error"]["message"], url
+        r = limited.get(GAIN_CHECK, params={"path": "public/frames.mrc", "gain": "public/frames.mrc"})
+        assert r.status_code == 400 and "too large" in r.json()["error"]["message"]
+        service.max_plane_bytes = 96 * 128 * 4 - 1  # not even one frame
+        assert limited.get(PLANE, params={"path": "public/frames.mrc"}).status_code == 400
+
+
+def test_a_power_beyond_float32_does_not_break_the_profile(client, tree: Tree):
+    huge = np.random.default_rng(5).normal(0, 1e20, (64, 64)).astype(np.float32)
+    tifffile.imwrite(tree.base / "public/huge.tif", huge)
+    profile = client.get(SPECTRUM + "/profile", params={"path": "public/huge.tif", "tile": 32})
+    assert profile.status_code == 200, profile.text
+    body = profile.json()
+    assert body["side"] == 32 and len(body["power"]) == 17
+    assert any(p is None for p in body["power"])  # not a number JSON can carry
+    assert client.get(SPECTRUM, params={"path": "public/huge.tif", "tile": 32}).status_code == 200

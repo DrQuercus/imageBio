@@ -131,6 +131,71 @@ def test_parameter_validation(kw: dict[str, float]):
         fourier_filter(np.zeros((16, 16), np.float32), apix_x=1.0, **kw)
 
 
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"lowpass": 20, "apix_x": 1e-320},  # found in review: OverflowError, a 500 for the client
+        {"lowpass": 1e300, "apix_x": 1e-300},
+        {"highpass": 1.7e308, "apix_x": 0.5},
+        {"lowpass": 2e19, "apix_x": 1.0},  # found in review: every pixel came out NaN
+        {"highpass": 1e20, "apix_x": 1e30},
+        {"lowpass": 1e-4, "apix_x": 1.0},
+        {"lowpass": 20, "apix_x": 1.0, "apix_y": 1e9},
+    ],
+)
+def test_extreme_cutoffs_and_pixel_sizes_are_refused(kw: dict[str, float]):
+    with pytest.raises(InvalidRequestError):
+        fourier_filter(np.ones((24, 32), np.float32), **kw)
+
+
+def test_the_widest_accepted_values_give_finite_images():
+    rng = np.random.default_rng(12)
+    a = rng.normal(100, 10, (48, 64)).astype(np.float32)
+    for apix in (1e-4, 1.0, 1e7):
+        flat = fourier_filter(a, apix_x=apix, lowpass=1e7)
+        assert np.isfinite(flat).all()
+        kept = fourier_filter(a, apix_x=apix, highpass=1e7)
+        # the grey level stays: it is the mean of the mirror-padded image, close to the image's own
+        assert np.isfinite(kept).all() and kept.mean() == pytest.approx(a.mean(), abs=0.5)
+    nothing = fourier_filter(a, apix_x=1e-4, lowpass=1e7)  # a cut-off of 1 mm on a field of 6 pm
+    assert nothing.std() < 1e-3 and nothing.mean() == pytest.approx(a.mean(), abs=0.5)
+    np.testing.assert_allclose(fourier_filter(a, apix_x=1.0, lowpass=1e-3), a, atol=1e-3)  # everything passes
+
+
+def test_a_cutoff_coarser_than_the_field_of_view_does_not_inflate_the_transform(monkeypatch):
+    """Found in review: the padding grew to the whole image on each side, nine times the area
+    (72 times the plane in memory at 4096 x 4096), for a cut-off beyond the field of view."""
+    import imagebio.proc.fourier as fourier
+
+    shapes: list[tuple[int, ...]] = []
+    real_rfft2 = np.fft.rfft2
+
+    def spy(x, *args, **kwargs):
+        shapes.append(x.shape)
+        return real_rfft2(x, *args, **kwargs)
+
+    monkeypatch.setattr(fourier.np.fft, "rfft2", spy)
+    rng = np.random.default_rng(13)
+    a = rng.normal(100, 10, (200, 300)).astype(np.float32)
+    for kw in (
+        {"lowpass": 1e6},
+        {"highpass": 1e6},
+        {"lowpass": 400.0},
+        {"lowpass": 300.0, "highpass": 5000.0},
+    ):
+        out = fourier_filter(a, apix_x=1.0, **kw)
+        assert np.isfinite(out).all() and out.shape == a.shape
+    assert len(shapes) == 4
+    for h, w in shapes:
+        assert h <= next_fast_len(2 * 200) and w <= next_fast_len(
+            2 * 300
+        )  # at most half the image on each side
+    # an ordinary cut-off still pads by its own reach, not by half the image
+    shapes.clear()
+    fourier_filter(a, apix_x=1.0, lowpass=20.0)
+    assert shapes[0][0] <= next_fast_len(200 + 2 * 15) and shapes[0][1] <= next_fast_len(300 + 2 * 15)
+
+
 def test_unknown_pixel_size_is_refused():
     for apix in (0, -1, float("nan")):
         with pytest.raises(InvalidRequestError, match="pixel size"):
