@@ -32,6 +32,7 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
 - Checks before every commit, from `frontend/`: `npm run typecheck`, `npm test`, then `npm run build && npm run e2e` (Playwright against the real backend on generated files).
 - Contrast, gamma, inversion and colour tables are GPU-side: changing them must never trigger a request. Plane requests are "latest wins" (AbortController).
+- Requests for pixels are built from what is on screen (`onScreen`, `shownOptions` and the clamped `index` in `App.tsx`), never from the `path`, `options` or index being loaded: mixing the two asks the server for planes that do not exist. End-to-end tests can assert it with `trackRefused`.
 - The page's CSP forbids eval and inline scripts: no inline `style`/`script`, and in Playwright pass functions (not strings) to `waitForFunction`.
 - No `dangerouslySetInnerHTML`, no `innerHTML`: file names are untrusted text.
 
@@ -40,6 +41,8 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - A 16-agent workflow exhausted the user's 5-hour usage window during M1 and lost its in-flight agents. Write code directly; keep sub-agents to one or two focused reviews of high-risk modules, and commit after each module so nothing is lost.
 
 ## Conventions
+
+- Run the checks, read their result, then commit in a separate command. `check | tail -3 && git commit` commits even when the check fails: the pipe returns the status of `tail`.
 
 - Code, identifiers and code comments in English; `docs/PLAN.md` and user docs in French.
 - Test fixtures are **generated** (`fixtures/gen_fixtures.py`, seeded). Never commit large binary files.
