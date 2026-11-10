@@ -103,7 +103,7 @@ def write_pages(path: Path, pages: np.ndarray, **kw: Any) -> None:
 def test_reader_identity_and_sniff():
     assert isinstance(READER, Reader) and isinstance(READER, TiffReader)
     assert READER.name == "tiff"
-    assert set(READER.extensions) == {".tif", ".tiff", ".btf"}
+    assert set(READER.extensions) == {".tif", ".tiff", ".btf", ".gain"}
     for magic in (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"):
         assert READER.sniff(Path("x.tif"), magic + bytes(60))
     for other in (b"", b"II", b"II\x00*", b"\x89PNG\r\n\x1a\n", bytes(64), b"MAP " * 4):

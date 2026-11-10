@@ -77,12 +77,22 @@ class Events:
 
 
 def random_events(
-    rng: np.random.Generator, n_pixels: int, count: int, encoding: Encoding = V1, hot: Sequence[int] = ()
+    rng: np.random.Generator,
+    n_pixels: int,
+    count: int,
+    encoding: Encoding = V1,
+    hot: Sequence[int] = (),
+    sensitivity: np.ndarray | None = None,
 ) -> Events:
-    """``count`` random events plus one on each ``hot`` pixel."""
+    """``count`` random events plus one on each ``hot`` pixel. ``sensitivity`` (one weight per
+    pixel) makes some pixels catch more electrons than others, as a real detector does."""
     cold = np.setdiff1d(np.arange(n_pixels), np.asarray(hot, dtype=np.int64))
+    weights = None
+    if sensitivity is not None:
+        weights = np.asarray(sensitivity, dtype=np.float64).ravel()[cold]
+        weights = weights / weights.sum()
     pixels = np.sort(
-        np.concatenate([rng.choice(cold, count, replace=False), np.asarray(hot, dtype=np.int64)])
+        np.concatenate([rng.choice(cold, count, replace=False, p=weights), np.asarray(hot, dtype=np.int64)])
     )
     return Events(
         pixels.astype(np.int64),
@@ -420,6 +430,7 @@ def write_eer(
     ifd_first: bool = False,
     tail: bytes = b"",
     streams: Mapping[int, bytes] | None = None,
+    sensitivity: np.ndarray | None = None,
 ) -> EerFile:
     """Write a synthetic EER movie.
 
@@ -428,11 +439,14 @@ def write_eer(
     at all. ``strips`` splits each fraction's stream over several TIFF strips, ``integrated`` adds
     the uncompressed sum image some files carry as their first page, ``tail`` is appended to
     every stream inside its strip (padding or junk) and ``streams`` replaces the encoded stream
-    of the given fractions (to plant an invalid one).
+    of the given fractions (to plant an invalid one). ``sensitivity`` (``shape`` weights) gives
+    the detector a fixed pattern, the one a gain reference corrects.
     """
     ny, nx = shape
     rng = np.random.default_rng(seed)
-    fractions = tuple(random_events(rng, ny * nx, events, encoding, hot) for _ in range(n_fractions))
+    fractions = tuple(
+        random_events(rng, ny * nx, events, encoding, hot, sensitivity) for _ in range(n_fractions)
+    )
     items = default_acquisition(n_fractions, shape, events + len(hot))
     items.update(acquisition or {})
     items = {name: value for name, value in items.items() if value is not None}

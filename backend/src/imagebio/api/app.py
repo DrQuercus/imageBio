@@ -32,7 +32,7 @@ from typing import Any, Final
 
 import numpy as np
 import zstandard
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -43,11 +43,12 @@ from imagebio.api.security import SecurityMiddleware, current_user
 from imagebio.core.cache import options_key
 from imagebio.core.config import Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError
-from imagebio.core.model import FileId
+from imagebio.core.model import FileId, json_safe
+from imagebio.cryo.gain import N_ORIENTATIONS
 from imagebio.fs.roots import MAX_PATH_LENGTH, ResolvedPath, RootSet, User
 from imagebio.io.registry import Registry, default_registry
 from imagebio.proc.fourier import radial_profile
-from imagebio.service.planes import MAX_BIN, PlaneService, Processing
+from imagebio.service.planes import MAX_BIN, GainSpec, PlaneService, Processing
 
 __all__ = ["create_app"]
 
@@ -60,10 +61,12 @@ _INT: Final = re.compile(r"-?\d{1,18}")
 _FLOAT: Final = re.compile(r"-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
 _COMPRESS_PROBE: Final = 256 * 1024
 _CACHE_CONTROL: Final = "private, no-cache"
-_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix"})
+_GAIN_PARAMS: Final = frozenset({"gain", "gain_orient", "gain_inv"})
+_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix"}) | _GAIN_PARAMS
 _STATS_PARAMS: Final = frozenset({"path", "t", "c", "z"}) | _PROCESSING_PARAMS
 _PLANE_PARAMS: Final = _STATS_PARAMS | {"bin", "x", "y", "w", "h"}
-_SPECTRUM_PARAMS: Final = frozenset({"path", "t", "c", "z", "t_end", "tile"})
+_SPECTRUM_PARAMS: Final = frozenset({"path", "t", "c", "z", "t_end", "tile"}) | _GAIN_PARAMS
+_GAIN_CHECK_PARAMS: Final = frozenset({"path"}) | _GAIN_PARAMS
 #: Where "npm run build" (frontend/) puts the web application.
 STATIC_DIR: Final = Path(__file__).resolve().parent.parent / "static"
 #: The page only loads its own scripts and styles and only talks to this server.
@@ -211,6 +214,26 @@ def create_app(
             raise InvalidRequestError(f"not a file: {resolved.logical}")
         return resolved
 
+    def gain_of(
+        request: Request,
+        gain: str | None = Query(None, min_length=1, max_length=MAX_PATH_LENGTH),
+        gain_orient: int = Query(0, ge=0, lt=N_ORIENTATIONS),
+        gain_inv: bool = Query(False),
+    ) -> GainSpec | None:
+        """The gain reference of a request: a logical path, authorised like any other file."""
+        if gain is None:
+            return None
+        return GainSpec.of(file_of(request, gain).real, gain_orient, gain_inv)
+
+    def processing_of(
+        t_end: int | None = Query(None, ge=0),
+        lp: float | None = Query(None, gt=0),
+        hp: float | None = Query(None, gt=0),
+        apix: float | None = Query(None, gt=0),
+        gain: GainSpec | None = Depends(gain_of),
+    ) -> Processing:
+        return Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix, gain=gain)
+
     # ── endpoints ────────────────────────────────────────────────────────────
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -296,10 +319,7 @@ def create_app(
         y: int | None = Query(None, ge=0),
         w: int | None = Query(None, ge=1),
         h: int | None = Query(None, ge=1),
-        t_end: int | None = Query(None, ge=0),
-        lp: float | None = Query(None, gt=0),
-        hp: float | None = Query(None, gt=0),
-        apix: float | None = Query(None, gt=0),
+        proc: Processing = Depends(processing_of),
     ) -> Response:
         options = _check_query(request, _PLANE_PARAMS)
         resolved = file_of(request, path)
@@ -307,7 +327,6 @@ def create_app(
         if any(given) and not all(given):
             raise InvalidRequestError("a region needs x, y, w and h together")
         region = (x, y, w, h) if all(given) else None
-        proc = Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix)
         tag = ("plane", options_key(options), t, c, z, bin, region, proc.key())
         etag = _etag(FileId.of(resolved.real), *tag)
         base_headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL, "Vary": "Accept-Encoding"}
@@ -330,14 +349,10 @@ def create_app(
         t: int = Query(0, ge=0),
         c: int = Query(0, ge=0),
         z: int = Query(0, ge=0),
-        t_end: int | None = Query(None, ge=0),
-        lp: float | None = Query(None, gt=0),
-        hp: float | None = Query(None, gt=0),
-        apix: float | None = Query(None, gt=0),
+        proc: Processing = Depends(processing_of),
     ) -> Response:
         options = _check_query(request, _STATS_PARAMS)
         resolved = file_of(request, path)
-        proc = Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix)
         stats, file_id = service.stats(resolved.real, t, c, z, options, proc)
         etag = _etag(file_id, "stats", options_key(options), t, c, z, proc.key())
         headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
@@ -348,12 +363,12 @@ def create_app(
         )
 
     def spectrum_of(
-        request: Request, path: str, t: int, c: int, z: int, t_end: int | None, tile: int
+        request: Request, path: str, t: int, c: int, z: int, proc: Processing, tile: int
     ) -> tuple[Any, str]:
         options = _check_query(request, _SPECTRUM_PARAMS)
         resolved = file_of(request, path)
-        power, file_id = service.spectrum(resolved.real, t, c, z, t_end=t_end, tile=tile, options=options)
-        return power, _etag(file_id, "spectrum", options_key(options), t, c, z, t_end, tile)
+        power, file_id = service.spectrum(resolved.real, t, c, z, tile=tile, options=options, proc=proc)
+        return power, _etag(file_id, "spectrum", options_key(options), t, c, z, proc.key(), tile)
 
     @app.get("/api/datasets/spectrum")
     def dataset_spectrum(
@@ -364,10 +379,11 @@ def create_app(
         z: int = Query(0, ge=0),
         t_end: int | None = Query(None, ge=0),
         tile: int = Query(512, ge=16, le=2048),
+        gain: GainSpec | None = Depends(gain_of),
     ) -> Response:
         """Power spectrum of a plane: a square float32 image, zero frequency at the centre.
         A period of d Å lies at (side x Å-per-pixel / d) pixels from the centre."""
-        power, etag = spectrum_of(request, path, t, c, z, t_end, tile)
+        power, etag = spectrum_of(request, path, t, c, z, Processing(t_end=t_end, gain=gain), tile)
         headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL, "Vary": "Accept-Encoding"}
         if _not_modified(request, etag):
             return Response(status_code=304, headers=headers)
@@ -382,15 +398,43 @@ def create_app(
         z: int = Query(0, ge=0),
         t_end: int | None = Query(None, ge=0),
         tile: int = Query(512, ge=16, le=2048),
+        gain: GainSpec | None = Depends(gain_of),
     ) -> Response:
         """Rotational average of the power spectrum: frequency (cycles per pixel) and power."""
-        power, etag = spectrum_of(request, path, t, c, z, t_end, tile)
+        power, etag = spectrum_of(request, path, t, c, z, Processing(t_end=t_end, gain=gain), tile)
         headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
         if _not_modified(request, etag):
             return Response(status_code=304, headers=headers)
         frequency, profile = radial_profile(power)
         body = {"side": int(power.shape[0]), "frequency": frequency.tolist(), "power": profile.tolist()}
         return Response(json.dumps(body, allow_nan=False), media_type="application/json", headers=headers)
+
+    @app.get("/api/cryo/gain/check")
+    def cryo_gain_check(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        gain: GainSpec | None = Depends(gain_of),
+    ) -> Response:
+        """Which of the eight orientations of a gain reference flattens a movie best.
+        ``current`` echoes ``gain_orient``; the check itself does not depend on it."""
+        options = _check_query(request, _GAIN_CHECK_PARAMS)
+        resolved = file_of(request, path)
+        if gain is None:
+            raise InvalidRequestError("a gain reference is required: gain=<path>")
+        result = service.gain_check(resolved.real, gain, options)
+        etag = _etag(result.file_id, "gain_check", options_key(options), gain.key())
+        headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        body = {
+            **result.check.to_json(current=gain.orientation),
+            "frames": result.frames,
+            "defects": result.defects,
+            "gain_shape": {"y": result.gain_shape[0], "x": result.gain_shape[1]},
+        }
+        return Response(
+            json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
 
     # ── web interface ────────────────────────────────────────────────────────
     index = static_dir / "index.html" if static_dir else None

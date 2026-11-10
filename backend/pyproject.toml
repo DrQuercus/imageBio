@@ -60,6 +60,9 @@ ignore = [
     "RUF001", "RUF002", "RUF003",  # Å, µ and × are intended
 ]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends"]  # FastAPI dependencies are declared as defaults
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B011", "E501"]  # tables of test cases read better on one line
 

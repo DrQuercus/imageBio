@@ -23,24 +23,50 @@ from imagebio.core.cache import ByteLRU, DatasetPool, options_key
 from imagebio.core.config import Settings
 from imagebio.core.errors import InvalidRequestError
 from imagebio.core.model import Calibration, DatasetInfo, FileId, Plane
+from imagebio.cryo.gain import OrientationCheck, apply_gain, check_orientation, fit_gain, orient, prepare_gain
 from imagebio.io.registry import Registry, default_registry
 from imagebio.proc.binning import bin_mean, binned_shape, crop
 from imagebio.proc.fourier import fourier_filter, power_spectrum
 from imagebio.proc.stats import PlaneStats, plane_stats
 
-__all__ = ["MAX_BIN", "PlaneResult", "PlaneService", "Processing"]
+__all__ = ["MAX_BIN", "GainCheck", "GainSpec", "PlaneResult", "PlaneService", "Processing"]
 
 MAX_BIN: Final = 64
 _STATS_CACHE_ITEMS: Final = 4096
+_GAIN_CHECK_FRAMES: Final = 20  # planes averaged to check a gain orientation
+_GAIN_CHECK_CACHE_ITEMS: Final = 256
 
 Region = tuple[int, int, int, int]  # x, y, w, h in full-resolution pixels
 
 
 @dataclass(frozen=True, slots=True)
-class Processing:
-    """What is done to a plane before it is cropped and binned.
+class GainSpec:
+    """A gain reference to apply. ``path`` is a real path, already authorised by the caller;
+    ``file_id`` is its identity, so that a reference replaced on disk is read again.
 
-    ``t_end``: the plane becomes the mean of frames ``t..t_end`` (inclusive). ``lowpass`` and
+    ``orientation``: one of the eight of :mod:`imagebio.cryo.gain`. ``invert``: the file is a
+    flat-field counts image, not the multiplicative gain itself.
+    """
+
+    path: Path
+    file_id: FileId
+    orientation: int = 0
+    invert: bool = False
+
+    @classmethod
+    def of(cls, path: Path, orientation: int = 0, invert: bool = False) -> GainSpec:
+        return cls(path, FileId.of(path), orientation, invert)
+
+    def key(self) -> tuple[Any, ...]:
+        return (self.file_id.path, self.file_id.size, self.file_id.mtime_ns, self.orientation, self.invert)
+
+
+@dataclass(frozen=True, slots=True)
+class Processing:
+    """What is done to a plane before it is cropped and binned, in this order.
+
+    ``t_end``: the plane becomes the mean of frames ``t..t_end`` (inclusive). ``gain``: it is
+    multiplied by a gain reference and its defective pixels are filled. ``lowpass`` and
     ``highpass``: resolution filters in Å. ``apix``: Å per pixel given by the user, for files
     that do not store their pixel size (it takes precedence over the file's value).
     """
@@ -49,17 +75,35 @@ class Processing:
     lowpass: float | None = None
     highpass: float | None = None
     apix: float | None = None
+    gain: GainSpec | None = None
 
     @property
     def identity(self) -> bool:
-        return self.t_end is None and self.lowpass is None and self.highpass is None
+        return self.t_end is None and self.lowpass is None and self.highpass is None and self.gain is None
+
+    @property
+    def unfiltered(self) -> Processing:
+        """The same frames and gain, without the resolution filters."""
+        return Processing(t_end=self.t_end, gain=self.gain)
 
     def key(self) -> tuple[Any, ...]:
         filtered = self.lowpass is not None or self.highpass is not None
-        return (self.t_end, self.lowpass, self.highpass, self.apix if filtered else None)
+        gain = self.gain.key() if self.gain is not None else None
+        return (self.t_end, self.lowpass, self.highpass, self.apix if filtered else None, gain)
 
 
 NO_PROCESSING: Final = Processing()
+
+
+@dataclass(frozen=True, slots=True)
+class GainCheck:
+    """A gain orientation check and what it was made on."""
+
+    check: OrientationCheck
+    frames: int  # planes of the movie that were averaged
+    defects: int  # defective pixels of the reference
+    gain_shape: tuple[int, int]
+    file_id: FileId
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +124,7 @@ class PlaneService:
         #: Largest raw plane read into memory (a K3 super-resolution frame is 0.4 GiB as float32).
         self.max_plane_bytes = 4 * 2**30
         self._stats: OrderedDict[Hashable, PlaneStats] = OrderedDict()
+        self._gain_checks: OrderedDict[Hashable, GainCheck] = OrderedDict()
         self._stats_lock = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -108,6 +153,28 @@ class PlaneService:
         acc /= t_end - t + 1
         return acc.astype(np.float32)
 
+    def _gain_reference(self, spec: GainSpec) -> Plane:
+        """The multiplicative gain of ``spec`` as stored (not oriented), defects at 0."""
+
+        def load() -> Plane:
+            with self._pool.lease(spec.path, None, file_id=spec.file_id) as dataset:
+                info: DatasetInfo = dataset.info
+                if info.rgb or info.plane_nbytes > self.max_plane_bytes:
+                    raise InvalidRequestError(f"{spec.path.name} cannot be used as a gain reference")
+                # a reference is one image; of a stack, the first plane is taken
+                return prepare_gain(dataset.read_plane(0, 0, 0), invert=spec.invert)
+
+        return self._cache.get_or_load(("gain", spec.file_id, spec.invert), load)
+
+    def _gain(self, spec: GainSpec, shape: tuple[int, int]) -> Plane:
+        """The gain of ``spec``, oriented and on the grid of a plane of ``shape``."""
+        return self._cache.get_or_load(
+            ("gain", spec.key(), shape),
+            lambda: fit_gain(
+                np.ascontiguousarray(orient(self._gain_reference(spec), spec.orientation)), shape
+            ),
+        )
+
     def _source(
         self, dataset: Any, file_id: FileId, okey: str, t: int, c: int, z: int, proc: Processing
     ) -> Plane:
@@ -121,6 +188,8 @@ class PlaneService:
                 plane = self._raw(dataset, file_id, okey, t, c, z)
             else:
                 plane = self._mean_of_frames(dataset, file_id, okey, t, proc.t_end, c, z)
+            if proc.gain is not None:
+                plane = apply_gain(plane, self._gain(proc.gain, (plane.shape[0], plane.shape[1])))
             if proc.lowpass is None and proc.highpass is None:
                 return plane
             cal = dataset.info.calibration
@@ -220,22 +289,51 @@ class PlaneService:
         c: int = 0,
         z: int = 0,
         *,
-        t_end: int | None = None,
         tile: int = 512,
         options: Mapping[str, Any] | None = None,
+        proc: Processing = NO_PROCESSING,
     ) -> tuple[Plane, FileId]:
-        """Power spectrum (averaged periodogram) of plane ``(t, c, z)``, or of the mean of
-        frames ``t..t_end``. Square, zero frequency at the centre."""
+        """Power spectrum (averaged periodogram) of plane ``(t, c, z)`` after the frame average
+        and the gain of ``proc``; its resolution filters are ignored, they would only draw
+        their own envelope. Square, zero frequency at the centre."""
         file_id = FileId.of(path)
         okey = options_key(options)
+        source = proc.unfiltered
         with self._pool.lease(path, options, file_id=file_id) as dataset:
             dataset.check_index(t, c, z)
-            source = Processing(t_end=t_end)
             power = self._cache.get_or_load(
-                ("spectrum", file_id, okey, t, c, z, t_end, tile),
+                ("spectrum", file_id, okey, t, c, z, source.key(), tile),
                 lambda: power_spectrum(self._source(dataset, file_id, okey, t, c, z, source), tile=tile)[0],
             )
         return power, file_id
+
+    def gain_check(self, path: Path, gain: GainSpec, options: Mapping[str, Any] | None = None) -> GainCheck:
+        """Which orientation of ``gain`` flattens the movie ``path`` best, judged on the mean
+        of its first frames (channel 0, slice 0). ``gain.orientation`` plays no part."""
+        file_id = FileId.of(path)
+        okey = options_key(options)
+        key = (file_id, okey, gain.file_id, gain.invert)
+        with self._stats_lock:
+            cached = self._gain_checks.get(key)
+            if cached is not None:
+                self._gain_checks.move_to_end(key)
+                return cached
+        reference = self._gain_reference(gain)
+        with self._pool.lease(path, options, file_id=file_id) as dataset:
+            frames = min(dataset.info.size_t, _GAIN_CHECK_FRAMES)
+            if frames > 1:
+                image = self._mean_of_frames(dataset, file_id, okey, 0, frames - 1, 0, 0)
+            else:
+                image = self._raw(dataset, file_id, okey, 0, 0, 0)
+            check = check_orientation(image, reference)
+        result = GainCheck(
+            check, frames, int((reference == 0).sum()), (reference.shape[0], reference.shape[1]), file_id
+        )
+        with self._stats_lock:
+            self._gain_checks[key] = result
+            while len(self._gain_checks) > _GAIN_CHECK_CACHE_ITEMS:
+                self._gain_checks.popitem(last=False)
+        return result
 
     def cache_stats(self) -> dict[str, dict[str, int]]:
         return {"planes": self._cache.stats(), "datasets": self._pool.stats()}

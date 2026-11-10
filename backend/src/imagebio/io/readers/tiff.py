@@ -941,7 +941,8 @@ class TiffReader(Reader):
     to open (default 0; ``info.metadata["series"]`` lists them)."""
 
     name: ClassVar[str] = "tiff"
-    extensions: ClassVar[tuple[str, ...]] = (".tif", ".tiff", ".btf")  # .ome.tif(f) end with these
+    # .ome.tif(f) end with these; .gain is the gain reference EPU writes for EER movies
+    extensions: ClassVar[tuple[str, ...]] = (".tif", ".tiff", ".btf", ".gain")
 
     def sniff(self, path: Path, head: bytes) -> bool:
         return head[:4] in _MAGIC
