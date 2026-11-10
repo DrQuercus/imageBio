@@ -317,6 +317,36 @@ Critères d'acceptation :
 - Un lien partagé reproduit la même vue.
 - **L'ancien CryoViewer est éteint.**
 
+**Avancement de M2 (10 novembre 2026) : fait, sauf le retrait de l'ancien CryoViewer.** Le code est dans `frontend/` ([README](../frontend/README.md)).
+
+Fait (27 tests unitaires, 10 tests de bout en bout sur le vrai backend) :
+- Canevas WebGL2 : valeurs brutes en textures flottantes ; fenêtre, gamma, inversion et palette dans le shader. Les NaN ont leur propre couleur.
+- Deux niveaux de détail au lieu d'un découpage en tuiles : vue d'ensemble binnée, puis région visible à la résolution utile. La taille des textures dépend de l'écran, pas de l'image.
+- Ajustement à la fenêtre, zoom centré sur le curseur, vraie valeur sous le curseur.
+- Histogramme en échelle log sur la plage robuste ; palettes Grays, Fire, Ice, Viridis, HiLo et import de `.lut`.
+- Curseurs T, Z et C ; lecteur qui attend l'affichage de chaque plan.
+- Règle et barre d'échelle en espace écran ; taille de pixel avec provenance, saisie manuelle si elle est inconnue.
+- Navigateur de fichiers sur les chemins logiques ; raccourcis clavier.
+- Lien partageable : toute la vue est dans l'adresse.
+- Le backend sert l'interface construite : `imagebio serve --local DOSSIER` donne l'application complète.
+
+Critères d'acceptation :
+
+| Critère | Résultat |
+|---|---|
+| La valeur lue sous le curseur est celle du fichier | Oui, à pleine résolution ; en vue binnée, la valeur est la moyenne du bloc et c'est indiqué |
+| Bouger le curseur de contraste ne déclenche aucune requête de plan | Oui (ni de statistiques) |
+| Lecture de frames : au plus une requête en vol | Oui, y compris en maintenant la flèche |
+| Les images avec NaN et pixel chaud s'affichent | Oui |
+| Un lien partagé reproduit la même vue | Oui, vérifié pixel par pixel dans un second onglet |
+| L'ancien CryoViewer est éteint | **Non.** Il reste nécessaire pour le filtre passe-bas en Å et la moyenne de frames, prévus au jalon M4 |
+
+Écarts et limites :
+- Images RGB : affichage composite avec une fenêtre commune aux trois canaux. Les hyperstacks montrent un canal à la fois ; le composite multi-canal est prévu en M5.
+- Les options de lecture (regroupement EER) passent par l'adresse (`opt.group=40`) ; il n'y a pas encore de contrôle dans l'interface (M4).
+- Testé sous Chromium, à densité d'écran 1 et 2. Pas encore essayé sous Firefox ni Safari.
+- Une image très allongée (plus de 16 000 pixels sur un côté après binning) peut dépasser la taille de texture de certaines cartes graphiques ; un message le signale.
+
 ### M3 : Live v2 sur le backend Python, qui remplace le serveur Node (4-5 sessions)
 
 **Livrables :**
@@ -520,9 +550,9 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Premier message suggéré pour la prochaine session (M2) :**
+**Premier message suggéré pour la prochaine session (M3 ou M4) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4/M2, avec l'avancement de M1), `backend/README.md` et les ADR. Réalise le jalon M2 : le frontend React + TypeScript dans `frontend/`, avec le canevas WebGL2 branché sur l'API des plans (`/api/datasets/plane`), le navigateur de fichiers, le contraste et les palettes sur le GPU, la vraie valeur du pixel sous le curseur, la règle et les liens profonds. Tous les critères d'acceptation de M2 doivent passer (Playwright). Commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 et M2), `backend/README.md`, `frontend/README.md` et les ADR. Réalise le jalon M3 (Live v2 : scrutateur indexé dans SQLite, test de complétude, parseurs EPU XML et mdoc, une surveillance par utilisateur, grille de vignettes portée dans le frontend) — ou M4 (mode Cryo : passe-bas en Å, spectre de puissance, moyenne de frames, gain EER) si c'est la priorité. Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 

@@ -24,6 +24,14 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Public error messages never contain a server path. Clients only use logical paths (`<root>/<relative>`); authorisation happens on every request, before any cache lookup.
 - Tests compare against a reference (mrcfile, tifffile, Pillow, a naive loop), never against imagebio itself.
 
+## Frontend (`frontend/`, React + TypeScript + WebGL2)
+
+- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
+- Checks before every commit, from `frontend/`: `npm run typecheck`, `npm test`, then `npm run build && npm run e2e` (Playwright against the real backend on generated files).
+- Contrast, gamma, inversion and colour tables are GPU-side: changing them must never trigger a request. Plane requests are "latest wins" (AbortController).
+- The page's CSP forbids eval and inline scripts: no inline `style`/`script`, and in Playwright pass functions (not strings) to `waitForFunction`.
+- No `dangerouslySetInnerHTML`, no `innerHTML`: file names are untrusted text.
+
 ## Working within the usage limit
 
 - A 16-agent workflow exhausted the user's 5-hour usage window during M1 and lost its in-flight agents. Write code directly; keep sub-agents to one or two focused reviews of high-risk modules, and commit after each module so nothing is lost.
