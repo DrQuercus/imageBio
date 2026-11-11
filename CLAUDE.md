@@ -29,6 +29,8 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Live mode (ADR 007, `live/`): the scanner takes time as an argument (`cycle(now)`) and never reads the clock; tests drive it with `live/simulator.py`, which knows when each file really got its last byte. "At rest" is judged against the newest date found in the tree (the file server's clock), not this server's. Never mark a file complete on a stable size alone: integrity check too. Every change to an exposure bumps its `seq`.
 - Routes that change something (POST, PUT, DELETE) are refused when another site sends them (`SecurityMiddleware`); a watch belongs to its user and its directory is re-authorised on every request.
 - Alert destinations (`live/alerts.py`) come from the server configuration only: a user picks a channel by name, never gives an address, and never gets one back. A changed index schema bumps `SCHEMA_VERSION` with a migration in `live/index.py`.
+- An alert condition only changes state through `step()` (pure), and delivery is tracked per channel: never resend to a channel that already took the notice. A new condition needs its entry in `HOLD_S` and, if its value can hover around a threshold, a margin in `evaluate(..., told)`.
+- One scanner per watched directory at a time (`_retired` in `live/service.py`). Nothing a scanner or a notifier does may hold the index write lock for long: walk and send outside the transaction.
 
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)
 

@@ -372,26 +372,26 @@ Critères d'acceptation :
 - Les alertes partent en moins de 2 cycles de scrutation.
 - **Le serveur Node est éteint.**
 
-**Avancement de M3 (11 novembre 2026) : cœur et alertes faits, métriques d'image à faire.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend un essai sur une vraie session. La conception est dans l'[ADR 007](adr/007-live.md).
+**Avancement de M3 (11 novembre 2026) : cœur et alertes faits et relus, métriques d'image à faire.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend un essai sur une vraie session. La conception est dans l'[ADR 007](adr/007-live.md).
 
-Fait (166 tests côté backend pour le Live, 18 tests unitaires et 5 tests de bout en bout côté interface) :
+Fait (196 tests côté backend pour le Live, 18 tests unitaires et 5 tests de bout en bout côté interface) :
 - **Scrutateur indexé dans SQLite** (`live/scanner.py`, `live/index.py`) : un dossier n'est relu que si sa date a changé ; seuls les fichiers pas encore complets sont suivis un par un ; passage complet toutes les 10 minutes ; un passage est une transaction.
 - **Test de complétude** (`live/completeness.py`) : taille stable sur deux passages espacés de 10 s, contrôle d'intégrité du format, et `.xml` d'EPU présent pour une acquisition EPU.
 - **Parseurs** EPU XML (`cryo/epu.py`) et mdoc SerialEM/Tomo5 (`cryo/mdoc.py`) : taille de pixel, dose, défocus visé, horodatage, position de platine, référence de gain EER.
 - **Expositions** : l'image intégrée, son film, son aperçu et ses métadonnées forment une seule tuile ; les vues d'ensemble d'EPU (carrés, trous, atlas) sont classées à part.
-- **Une surveillance par utilisateur**, conservée dans l'index ; un scrutateur par dossier, partagé par ceux qui le suivent. Reprise au redémarrage.
+- **Une surveillance par utilisateur**, conservée dans l'index ; un scrutateur par dossier, partagé par ceux qui le suivent. Reprise au redémarrage. Une surveillance arrêtée garde son index et peut être oubliée ; chacun garde ses 32 dernières surveillances arrêtées, et l'index d'un dossier que plus personne ne suit est effacé.
 - **Vignettes** binnées par moyenne de blocs, étirées entre percentiles robustes, gardées en mémoire et dans l'index.
 - **API** `/api/live/…` : surveillances, résumé (compteurs, débit des arrivées, dernière image, disque, état du scrutateur), changements depuis un numéro de séquence, acquisitions par minute, vignettes.
 - **Interface** : mode Live à côté de la visionneuse, choix du dossier, cartes d'état, graphe des acquisitions, **grille virtualisée** ; une exposition en cours d'écriture est montrée comme telle, sans vignette ; un clic ouvre l'image dans la visionneuse.
 - **Microscope simulé** (`live/simulator.py`, `imagebio simulate DOSSIER`) : session de type EPU avec films écrits image par image, pauses au milieu des fichiers, XML en dernier.
-- **Alertes** (`live/alerts.py`) : par surveillance, plus d'image depuis N minutes, espace libre sous un pourcentage, débit en chute, et scrutateur en échec. Envoi vers ntfy, un webhook ou un relais de messagerie. Les canaux sont déclarés par l'administrateur ; l'utilisateur les choisit par leur nom et ne saisit jamais d'adresse. Un message quand la condition commence, un quand elle cesse, rien entre les deux ; un envoi raté est retenté aux passages suivants, cinq fois au plus. Panneau dans l'interface, avec un bouton d'essai.
+- **Alertes** (`live/alerts.py`) : par surveillance, plus d'image depuis N minutes, espace libre sous un pourcentage, débit en chute, et scrutateur en échec. Envoi vers ntfy, un webhook ou un relais de messagerie. Les canaux sont déclarés par l'administrateur ; l'utilisateur les choisit par leur nom et ne saisit jamais d'adresse. Un message quand la condition commence, un quand elle cesse, rien entre les deux. L'envoi est suivi canal par canal : un canal en panne est retenté seul, cinq fois au plus, et le message de fin va aux canaux qui ont reçu celui du début. Une valeur qui oscille autour de son seuil ne déclenche pas un message à chaque passage : il faut une marge et deux minutes pour quitter une condition. Les alertes d'une surveillance cessent une semaine après la dernière visite de son utilisateur. Panneau dans l'interface, avec un bouton d'essai.
 
 Critères d'acceptation :
 
 | Critère | Résultat |
 |---|---|
 | Session de type EPU à 600 images/h avec écritures partielles et pauses : aucun fichier partiel marqué complet | Oui. 30 minutes simulées, 300 expositions, 30 % des films en pause de 15 à 45 s en cours d'écriture, puis arrêt brutal du microscope : aucun fichier partiel n'est jamais complet dans l'index, et tout fichier fini l'est 10 à 27 s après son dernier octet |
-| 50 000 fichiers indexés sans scruter chaque fichier | Oui. 50 100 fichiers d'une session terminée : un listing par dossier et un `stat` par dossier ; seuls les fichiers du dossier encore récent sont regardés un par un. 0,9 s sur disque local, puis 10 ms par passage |
+| 50 000 fichiers indexés sans scruter chaque fichier | Oui. 50 100 fichiers d'une session terminée depuis deux jours : un listing par dossier et un `stat` par dossier ; seuls les fichiers du dossier encore récent sont regardés un par un. 0,9 s sur disque local, puis 10 ms par passage. Depuis la relecture, les dossiers modifiés depuis moins d'un jour coûtent un `stat` par fichier à la première indexation, une seule fois : c'est le prix pour ne jamais prendre un fichier en cours d'écriture pour un fichier ancien |
 | Après un arrêt brutal du serveur, rien n'est perdu | Oui : l'index est tel qu'avant, y compris si l'arrêt survient au milieu d'un passage ; ce qui s'est passé pendant l'arrêt est retrouvé, sans doublon |
 | Deux utilisateurs sur deux sessions ne se gênent pas | Oui : chacun ne voit que ses surveillances ; arrêter la sienne ne touche pas celle de l'autre, même sur le même dossier |
 | Les alertes partent en moins de 2 cycles de scrutation | Oui : les règles sont jugées juste après chaque passage. Avec le microscope et l'horloge simulés, le message part au plus 10 s après le franchissement du seuil, et le message « résolu » au plus 10 s après la première image acceptée |
@@ -404,13 +404,26 @@ Reste à faire dans M3 :
 Écarts par rapport au plan :
 - **Pas de WebSocket** : l'interface demande toutes les trois secondes ce qui a changé depuis le dernier numéro de séquence qu'elle connaît. Ce sont les mêmes deltas, sans connexion longue à faire passer par le reverse proxy (ADR 007).
 - **Le simulateur est dans le paquet** (`imagebio simulate`), pas dans `tools/microscope_sim.py` : il sert aussi de démonstration.
-- **Première indexation d'une session ancienne** : les dossiers au repos sont indexés sans regarder leurs fichiers ; leurs expositions sont marquées « non vérifié » dans la grille. Un fichier resté tronqué n'y est découvert qu'à l'ouverture.
+- **Première indexation d'une session ancienne** : les dossiers inchangés depuis plus d'un jour sont indexés sans regarder leurs fichiers ; leurs expositions sont marquées « non vérifié » dans la grille. Un fichier resté tronqué n'y est découvert qu'à l'ouverture.
 - **Le repos se mesure sur l'horloge du serveur de fichiers** (la date la plus récente de l'arborescence), pas sur celle de ce serveur : elles peuvent différer.
 - **Vignette d'un film seul** (EER sans image intégrée) : moyenne de ses quatre premières frames, calculée à la demande. Pas de somme complète en tâche de fond.
 - **Non essayé sur une vraie session.** Les XML d'EPU, les mdoc et l'arborescence viennent de la documentation ; un essai sur un dossier de session réel (même terminé) est le premier à faire. Le comportement sur NFS ou SMB (cache d'attributs, dates des dossiers) n'a pas été mesuré : tout a tourné sur disque local.
 - **Alertes non essayées contre de vrais services.** L'envoi vers ntfy suit sa forme JSON documentée et a été vérifié contre un récepteur local, pas contre ntfy.sh ; l'e-mail contre un faux relais. Le bouton « Tester » du panneau est fait pour cette vérification, une fois le canal configuré. Pas d'alerte « le Live lui-même est arrêté » : elle demande un témoin extérieur au serveur.
 - **Le message d'alerte part chez un tiers** quand le canal est un service public (ntfy.sh) : il contient le chemin logique de la session et le nombre d'images. C'est l'administrateur qui choisit les canaux.
-- **Pas de relecture indépendante** de ce jalon : c'est la première chose à faire avant de s'y fier, en priorité sur `live/scanner.py` et `api/live.py`.
+- **Débit en chute** : la règle ne s'applique qu'au-dessus de 60 images dans l'heure. En dessous, cinq minutes contiennent trop peu d'images pour distinguer une chute du hasard ; la règle « plus d'image depuis N minutes » est celle des sessions lentes.
+- **Relecture indépendante du Live** (un agent neuf, sur le scrutateur, l'index, le service, les alertes et les routes). Le test de complétude au fil de l'eau, les contrôles d'intégrité, le cloisonnement entre utilisateurs, l'absence d'adresse ou de chemin serveur dans les réponses, les requêtes SQL, les numéros de séquence et la migration de l'index ont été vérifiés et trouvés corrects. Treize défauts ont été trouvés et corrigés, chacun avec un test de régression qui échoue sur l'ancien code :
+  - **Grave : un lien symbolique mis à la place d'un dossier déjà indexé était suivi**, ce qui faisait indexer, et donc lire par vignette, un dossier hors de la racine. Chaque dossier est maintenant revérifié à chaque listing.
+  - Première indexation : un fichier en cours d'écriture dans un dossier calme, ou à côté d'un fichier daté dans le futur, pouvait être marqué complet sans contrôle. Seuls les dossiers inchangés depuis un jour sont indexés sans `stat`, et les dates futures sont ignorées.
+  - Un passage en échec remettait le scrutateur en mode « première indexation » ; une erreur de lecture passagère pendant un passage complet effaçait un sous-arbre de l'index.
+  - Un passage était une seule longue transaction : pendant l'indexation d'une très grande session, les autres écritures attendaient trente secondes puis échouaient en erreur 500. Le parcours se fait hors transaction, l'indexation est validée par tranches, et une requête qui trouve l'index occupé reçoit un 503 avec `Retry-After`.
+  - Alertes : avec un canal en panne, les autres recevaient le message à chacune des cinq tentatives et jamais le message de fin ; un débit ou un disque proche du seuil envoyait des messages à chaque passage ; une heure après l'arrêt du microscope, « le débit est revenu » partait à tort ; une surveillance relancée annonçait aussitôt des heures de silence ; les règles continuaient indéfiniment pour un utilisateur parti ou privé d'accès ; la limite du bouton d'essai se contournait avec plusieurs surveillances.
+  - Arrêter puis relancer une surveillance pendant un passage laissait deux scrutateurs sur le même dossier.
+  - Le contrôle d'origine des requêtes qui modifient ne comparait que le nom d'hôte : un autre programme de la même machine, sur un autre port, passait. Il compare maintenant l'hôte, le port et, quand il est connu, le schéma.
+  - Un identifiant au-delà de 64 bits donnait une erreur 500.
+  - Caches de vignettes : celui de l'index dépassait plusieurs fois sa limite, et celui en mémoire comptait deux fois une vignette demandée deux fois en même temps.
+  - Rien ne sortait jamais de l'index : surveillances arrêtées et dossiers s'y accumulaient ; le dossier le plus récent était relu à chaque passage pour toujours.
+
+  Le frontend du Live n'a pas eu de relecture indépendante, ni les modules de M1 et M2.
 
 ### M4 : mode Cryo (3-5 sessions)
 
@@ -635,7 +648,7 @@ imageBio/
 
 **Premier message suggéré pour la prochaine session (fin de M3 et de M4, ou M5) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. Termine le jalon M3 : métriques d'image du Live (comptes moyens, anneau de glace, dérive), puis une relecture indépendante de `live/scanner.py`, `live/service.py` et `api/live.py`. Ou, si c'est la priorité : la suite de M4 (pointés STAR, `.cs`, `.box`, galeries de particules), ou M5 (cœur ImageJ). Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. Termine le jalon M3 : métriques d'image du Live (comptes moyens, anneau de glace, dérive). Ou, si c'est la priorité : la suite de M4 (pointés STAR, `.cs`, `.box`, galeries de particules), ou M5 (cœur ImageJ). Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 

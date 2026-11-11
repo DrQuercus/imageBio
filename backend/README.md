@@ -57,6 +57,8 @@ path = "/srv/glacios"
 groups = ["cryoem"]                        # vide ou absent : tous les utilisateurs authentifiés
 ```
 
+Le proxy doit dire à l'application comment elle s'appelle dehors, sans quoi les requêtes qui modifient (surveillances, alertes) sont refusées comme venant d'un autre site : soit il transmet l'en-tête `Host` tel quel, soit il envoie `X-Forwarded-Host`, soit le nom public figure dans `allowed_hosts`. S'il envoie `X-Forwarded-Proto`, le schéma est vérifié aussi. Avec nginx : `proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;`.
+
 Pour voir ce qu'un lecteur comprend d'un fichier :
 
 ```bash
@@ -102,7 +104,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `GET /api/live/watches` | Les surveillances de l'utilisateur |
 | `POST /api/live/watches?path=` | Surveiller un dossier ; le refaire rend la même surveillance |
 | `GET /api/live/watches/{id}` | Résumé : compteurs, débit des arrivées, dernière image, disque, état du scrutateur |
-| `DELETE /api/live/watches/{id}` | Arrêter sa surveillance (l'index est conservé) |
+| `DELETE /api/live/watches/{id}` | Arrêter sa surveillance (l'index est conservé). Avec `?forget=true`, l'oublier : elle quitte la liste, et l'index du dossier est effacé quand plus personne ne le suit |
 | `GET /api/live/watches/{id}/items?since=&limit=&category=` | Expositions qui ont changé depuis le numéro de séquence `since` |
 | `GET /api/live/watches/{id}/history?bucket=` | Acquisitions par tranche de temps |
 | `GET /api/live/thumb?path=&size=` | Vignette JPEG d'un fichier, binnée par moyenne |
@@ -115,10 +117,11 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Complétude.** Un fichier est complet quand sa taille et sa date n'ont pas changé sur deux passages espacés de `min_stable`, qu'il passe le contrôle d'intégrité de son format, et, pour une acquisition EPU, que son `.xml` est là. Une image dont l'écriture fait une pause reste « en cours ».
 - **Expositions.** L'image intégrée, son film (`_Fractions`, `_EER`), son aperçu et ses métadonnées (`.xml` d'EPU, `.mdoc` de SerialEM) forment une exposition. Les métadonnées lues (taille de pixel, dose, défocus visé, horodatage) sont dans `meta`.
 - **Suivi.** Chaque changement d'une exposition reçoit un numéro de séquence ; un client redemande `items?since=<dernier numéro>` et ne reçoit que ce qui a changé, suppressions comprises.
-- **Session ancienne.** À la première indexation, les dossiers au repos depuis plus de 15 minutes sont indexés sans regarder leurs fichiers ; leurs expositions ont `verified: false`.
-- **Par utilisateur.** Une surveillance appartient à celui qui l'a créée ; le dossier est autorisé de nouveau à chaque requête. Huit surveillances actives au plus par utilisateur.
+- **Session ancienne.** À la première indexation, les dossiers inchangés depuis plus d'un jour sont indexés sans regarder leurs fichiers ; leurs expositions ont `verified: false`. Dans les dossiers plus récents, chaque fichier est regardé une fois.
+- **Par utilisateur.** Une surveillance appartient à celui qui l'a créée ; le dossier est autorisé de nouveau à chaque requête. Huit surveillances actives au plus par utilisateur, et les 32 dernières surveillances arrêtées ; les plus anciennes sont oubliées.
+- **Index occupé.** Une requête qui doit écrire pendant que l'index est tenu par une autre écriture attend, puis reçoit `503` (`live_index_busy`) avec `Retry-After` : elle peut être renvoyée telle quelle.
 - **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
-- **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
+- **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse ; un canal en panne est retenté seul, cinq fois au plus, sans que les autres reçoivent le message de nouveau. Pour quitter une condition, il faut une marge (disque : un dixième du seuil, au moins un demi-point) et deux minutes sans elle ; une chute de débit doit durer deux minutes avant d'être annoncée, et ne se juge qu'au-dessus de 60 images dans l'heure. Les règles s'arrêtent une semaine après la dernière visite de la surveillance par son utilisateur. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
 
 ## Traitements du mode Cryo
 
