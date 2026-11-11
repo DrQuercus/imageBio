@@ -45,6 +45,7 @@ Sur chaque tuile : le défocus estimé, jusqu'où vont les anneaux, la glace, et
 - **Glace** : par défaut, relative aux images les plus claires de la session. Pour une épaisseur en nm, donnez les coups moyens d'un trou vide (I₀) et le libre parcours moyen du microscope (300 à 400 nm).
 - **Seuils d'acceptation** : résolution d'ajustement, glace, anneau, dérive, plage de défocus. Les images hors seuils sont marquées « rejetée » ; rien n'est supprimé ni déplacé.
 - **Carte des acquisitions** : les positions de platine, colorées selon les seuils. Elle montre quelle zone de la grille donne de bonnes images.
+- **Traitement** (si l'administrateur a déclaré des programmes sur le serveur) : cochez la case pour que les films qui arrivent soient alignés et leur CTF ajusté. L'info-bulle de chaque tuile donne alors les deux défocus, l'astigmatisme et le mouvement ; le tri et les seuils s'en servent. Seules les images arrivées pendant le suivi sont traitées, la plus récente d'abord, et les utilisateurs passent à tour de rôle.
 - **Alertes** : choisissez un canal (téléphone, courriel : ceux que l'administrateur a déclarés) et des conditions : aucune image depuis N minutes, espace libre sous N %, débit en baisse. Le bouton d'essai envoie un message de test.
 
 « Arrêter » garde l'index de la session ; « Oublier » l'efface.

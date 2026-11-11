@@ -2,7 +2,7 @@
 
 Network-deployed scientific image application (web): a viewer, a Cryo mode and a Live mode (real-time monitoring of a cryo-EM collection). The ImageJ-style editor of the first plan was dropped (ADR 009): no ROI manager or measurements; "Ouvrir dans Fiji" exports a calibrated ImageJ TIFF instead.
 
-- **Read first:** `docs/PLAN.md` (target architecture, milestones M0-M8, acceptance criteria), then `docs/audit/AUDIT.md` (verified bugs in the existing code, with line numbers) and `docs/research/` (formats, EER, EPU/SerialEM metadata, live tools).
+- **Read first:** `docs/PLAN.md` (target architecture, milestones M0-M8, acceptance criteria; M5 and M6 withdrawn, all the others written, nothing tried on real data yet), then `docs/audit/AUDIT.md` (verified bugs in the existing code, with line numbers) and `docs/research/` (formats, EER, EPU/SerialEM metadata, live tools).
 - **Existing code:** `legacy/cryoviewer/` (Python) and `legacy/cryoviewer-live/` (Node/React; `npm ci && npm run build`, `node_modules/` and `dist/` are not versioned). Only M0 fixes go in there; the new code lives in `backend/` and `frontend/`.
 - **Stack:** Python backend (FastAPI), React + TypeScript frontend (WebGL2 canvas). The core stays MIT: GPL code (Bio-Formats, should it come back) only in a separate worker process.
 
@@ -35,6 +35,7 @@ Network-deployed scientific image application (web): a viewer, a Cryo mode and a
 - Only the scanner numbers changes (`seq`): what is measured on pixels (`live/metrics.py`) is handed to it with `add_metrics` and enters the index at its next cycle. A spectral ratio is only reported when the field holds enough points (512 px): on small images it is noise.
 - One scanner per watched directory at a time (`_retired` in `live/service.py`). Nothing a scanner or a notifier does may hold the index write lock for long: walk and send outside the transaction.
 
+- External programs (ADR 011, `tools/`): an argument list declared by the administrator, run by `tools/runner.py` and nothing else (no `subprocess` call anywhere else, never a shell, never a command string). A value that goes into an argument or an answer comes from the server, never from a client, and is refused when it holds a control character. A user is told a status, never the program's output or a path. Results go to the scanner (`add_processing`). MotionCor3 and CTFFIND have never been run for real: tests use `tests/fixtures/programs.py`; do not claim more.
 - Operations (ADR 010, `docs/exploitation.md`): secrets come from the environment, never from the configuration file, which is backed up (`IMAGEBIO_PROXY_SECRET`, `IMAGEBIO_METRICS_TOKEN`, `password_env`). In proxy mode nothing is believed without the proxy secret when one is set. `/metrics` holds no path and no user name. A restore never destroys the index in place (it is set aside) and never runs under a server (`hold_state_dir`).
 - `deploy/` is tested: `backend/tests/core/test_deploy.py` keeps its examples in step with the program, and the CI job "Deployment" builds the image and runs `deploy/compose/smoke-test.sh` (Docker is not available in the cloud sessions: read the job's log). A change to a header, a variable or a route the proxy touches goes with a change there. The single sign-on stack has never run: do not claim it works.
 

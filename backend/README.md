@@ -61,6 +61,8 @@ to = ["cryoem@lab.example"]
 host = "smtp.lab.example"
 from = "imagebio@lab.example"
 
+# [processing]                             # programmes lancés sur les images qui arrivent : voir « Programmes externes »
+
 [[roots]]
 name = "glacios"                           # premier élément des chemins vus par les clients
 path = "/srv/glacios"
@@ -132,6 +134,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `PUT /api/live/watches/{id}/alerts?channels=&no_image=&disk_free=&rate_drop=` | Remplacer les règles : canaux (noms séparés par des virgules), minutes sans image, pourcentage d'espace libre, pourcentage du débit horaire |
 | `POST /api/live/watches/{id}/alerts/test` | Envoyer un message d'essai aux canaux de la surveillance |
 | `PUT /api/live/watches/{id}/ice?i0=&mfp=` | Étalonner la glace : coups moyens d'un trou vide et libre parcours moyen en nm. Ce qui est omis est oublié |
+| `PUT /api/live/watches/{id}/processing?on=` | Demander, ou ne plus demander, les programmes déclarés sur le serveur pour ce qui arrive dans la session. `processing` du résumé dit s'il y en a (`available`, `steps`), si la session les demande (`on`) et où ils en sont (`done`, `waiting`) |
 | `PUT /api/live/watches/{id}/quality?fit=&ice=&ring=&drift=&defocus_min=&defocus_max=` | Seuils d'acceptation de la session, rendus dans `quality` du résumé. Ce qui est omis est oublié |
 
 - **Scrutation.** Un dossier n'est relu que si sa date de modification a changé ; seuls les fichiers pas encore complets sont regardés un par un. Une session de 50 000 fichiers coûte un `stat` par dossier à chaque passage.
@@ -148,6 +151,16 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Métadonnées tardives.** Une session trouvée déjà écrite est indexée sans ouvrir ses fichiers ; le XML d'EPU d'une image est alors lu quand elle est mesurée (dose, défocus visé, position de platine).
 - **Seuils d'acceptation.** Ils sont gardés avec la surveillance ; le verdict est rendu par l'interface, sur les mesures que chaque exposition porte déjà. Une mesure absente ne compte pas contre une image.
 - **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse ; un canal en panne est retenté seul, cinq fois au plus, sans que les autres reçoivent le message de nouveau. Pour quitter une condition, il faut une marge (disque : un dixième du seuil, au moins un demi-point) et deux minutes sans elle ; une chute de débit doit durer deux minutes avant d'être annoncée, et ne se juge qu'au-dessus de 60 images dans l'heure. Les règles s'arrêtent une semaine après la dernière visite de la surveillance par son utilisateur. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
+
+## Programmes externes
+
+Facultatif ([ADR 011](../docs/adr/011-programmes-externes.md)). L'administrateur déclare un alignement de film (`[processing.motion]`) et un ajustement du CTF (`[processing.ctf]`) ; un exemple commenté pour MotionCor3 et CTFFIND est dans [`deploy/processing.example.toml`](../deploy/processing.example.toml). **Jamais essayé avec les vrais programmes** : les tests les remplacent par des programmes écrits pour l'occasion (`tests/fixtures/programs.py`).
+
+- **Déclaration.** `argv` est une liste d'arguments, le programme en tête par son chemin absolu ; jamais de shell. Jokers : `{movie}`, `{image}`, `{out}`, `{apix}`, `{kv}`, `{cs}`, `{amp}`, `{dose}`, `{frames}`. `stdin` : les réponses tapées au programme, une par ligne. `result` : le fichier lu ensuite, dans `{out}/` (un `*` dans son nom est permis) ; `parser` : `ctffind`, `motion-star` ou `motion-log`. `formats` donne une autre liste d'arguments par extension de film. `timeout` en secondes ; `slots` programmes à la fois.
+- **Déroulement.** Pour chaque image arrivée pendant le suivi d'une session qui le demande : alignement du film s'il y en a un, puis CTF sur la somme écrite (`image`), sinon sur l'image intégrée par le microscope. Chaque exécution a son dossier, supprimé ensuite. Avec un alignement, une image attend son film deux minutes au plus, et est traitée de nouveau si le film arrive après.
+- **Résultats.** `processing` de chaque exposition : `motion` (`total`, `early`, `max_step`, `frames`, `unit`), `ctf` (`defocus`, `defocus_u`, `defocus_v`, `astigmatism`, `angle`, `cc`, `fit`, et `tilt`, `thickness` avec CTFFIND 5), `seconds`. Une étape sans résultat contient `{"error": "<motif>"}` : un état, jamais la sortie du programme ni un chemin.
+- **Isolement.** Échéance, groupe de processus tué en entier (aussi à l'arrêt du serveur), environnement sans les secrets du serveur, valeurs à caractère de contrôle refusées, résultat lu seulement dans le dossier de l'exécution.
+- **Tour de rôle.** Les utilisateurs passent chacun leur tour, puis les sessions de chacun ; dans une session, la plus récente d'abord.
 
 ## Exploitation
 
@@ -222,6 +235,9 @@ src/imagebio/
   fs/roots.py        chemins logiques et confinement dans les racines
   service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques
   service/export.py  export en TIFF ImageJ calibré
+  tools/             programmes externes : runner.py (lancement sans shell, échéance, groupe de processus),
+                     templates.py (jokers), parsers.py (résultats de CTFFIND et d'un alignement),
+                     pipeline.py (alignement puis CTF sur une exposition)
   api/               app.py (FastAPI), live.py (routes du Live), security.py (identité, Host, secret
                      du proxy, requêtes venues d'un autre site), metrics.py (/metrics), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test

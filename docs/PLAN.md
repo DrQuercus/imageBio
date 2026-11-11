@@ -6,7 +6,7 @@
 
 ## 0. En bref
 
-> **Mise à jour du 11 novembre 2026.** Le périmètre a été recentré sur le cryo et le suivi en direct : le cœur ImageJ (M5, M6) et le worker ImageJ sont retirés, il reste un export vers Fiji ([ADR 009](adr/009-perimetre-cryo-et-live.md)). Les points 1 à 3 ci-dessous décrivent le projet d'origine ; la feuille de route du §4 est à jour.
+> **Mise à jour du 11 novembre 2026.** Le périmètre a été recentré sur le cryo et le suivi en direct : le cœur ImageJ (M5, M6) et le worker ImageJ sont retirés, il reste un export vers Fiji ([ADR 009](adr/009-perimetre-cryo-et-live.md)). Les points 1 à 3 ci-dessous décrivent le projet d'origine ; la feuille de route du §4 est à jour. **Tous les jalons retenus (M0 à M4, M7, M8) sont écrits et testés sur des données générées ; rien n'a encore tourné sur de vraies données.** La suite est un essai, décrit à la fin du §7.
 
 1. **L'idée est bonne et la forme est la bonne.** On fait une application web servie depuis un serveur du labo, à côté des données (NAS et GPU). Les utilisateurs l'ouvrent dans un navigateur, sans rien installer. Elle propose trois modes : **Visionneuse/éditeur** (façon ImageJ), **Cryo** et **Live**.
 2. **« Ultime » et « clone d'ImageJ » sont les deux pièges.** ImageJ représente plus de 25 ans de travail. Le projet est réaliste si « ImageJ » veut dire : les ~20 fonctions utilisées tous les jours, très bien faites, plus un pont vers le vrai Fiji (et un worker ImageJ côté serveur) pour tout le reste.
@@ -480,7 +480,7 @@ Temps mesurés sur une image 4096 × 4096 (un cœur) : passe-bas 0,7 s, spectre 
 - **Liste de défauts des fichiers `.gain`** (tag 65100) : elle est maintenant comptée et signalée dans le panneau, au lieu d'être ignorée en silence. Elle n'est pas appliquée (voir plus bas).
 
 Reste à faire dans M4 :
-- **Somme pondérée par la dose** : elle n'a de sens que sur des frames alignées. Elle viendra avec MotionCor3 (M7), qui la calcule.
+- **Somme pondérée par la dose** : elle n'a de sens que sur des frames alignées. MotionCor3 la calcule, mais le serveur ne la garde pas : la somme alignée sert à l'ajustement du CTF puis disparaît avec le dossier de l'exécution ([ADR 011](adr/011-programmes-externes.md)).
 - **Appliquer la liste de défauts** d'un fichier `.gain` : son format n'est pas documenté, et un utilisateur de Falcon 4i rapporte une liste vide. Il faut un vrai fichier pour écrire le lecteur.
 
 Écarts et limites :
@@ -548,6 +548,23 @@ Le worker ImageJ et Bio-Formats de la première version de ce jalon est retiré 
 - Le défocus d'images synthétiques de CTF connu est retrouvé à 2 % près ; une image sans anneaux ne reçoit pas de défocus.
 - Le plantage ou le blocage d'un programme externe est isolé : l'application reste disponible.
 - Un utilisateur ne peut pas accaparer le calcul (quota par utilisateur).
+
+**Avancement de M7 (11 novembre 2026) : fait, les trois critères passent. Les programmes externes n'ont jamais tourné pour de vrai.** Décisions : [ADR 011](adr/011-programmes-externes.md).
+
+Fait :
+- **Estimation du CTF intégrée** (`proc/ctf.py`) : ajustement à une dimension du spectre moyenné, sans astigmatisme. À la demande dans le spectre de puissance, et pour chaque image du Live.
+- **Seuils d'acceptation**, part d'images acceptées, filtres ; **carte des acquisitions** colorée selon le verdict.
+- **Programmes externes** (`imagebio/tools/`) : alignement du film puis ajustement du CTF sur la somme, déclarés par l'administrateur en listes d'arguments, lancés sans shell avec une échéance, sur les images qui arrivent dans une session dont l'utilisateur le demande. Résultats sur les tuiles (les deux défocus, l'astigmatisme, la résolution de l'ajustement, le mouvement), utilisés par le tri et les seuils à la place de l'estimation rapide.
+
+Critères d'acceptation :
+- **Défocus retrouvé à 2 % : passé**, sur sept images synthétiques de CTF connu (quatre tailles de pixel, 200 et 300 kV, 0,6 à 4,5 µm) ; aucune valeur annoncée sur du bruit.
+- **Plantage ou blocage isolé : passé.** Avec un programme qui plante, un qui se bloque et un qui répond, le serveur continue de répondre pendant le blocage, chaque image reçoit son résultat ou son motif, le programme bloqué est tué avec ses enfants, et l'arrêt du serveur tue celui qui tourne.
+- **Pas d'accaparement : passé.** Les utilisateurs passent à tour de rôle : avec douze images en attente chez l'un et deux chez l'autre, le second est servi une fois sur deux jusqu'à ce qu'il n'ait plus rien.
+
+Limites :
+- **Ni MotionCor3 ni CTFFIND n'ont été lancés** : pas de binaire, pas de carte graphique. Les options de `deploy/processing.example.toml` et les formats lus viennent de la documentation ; ils sont à vérifier sur votre installation avant de s'y fier.
+- **La somme pondérée par la dose n'est pas conservée** : la somme alignée sert au CTF puis disparaît. C'était le dernier reste de M4.
+- L'estimation intégrée et les mesures de dérive n'ont été validées que sur des images synthétiques.
 
 ### M8 : exploitation et déploiement pilote (2-3 sessions)
 
@@ -691,9 +708,15 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Premier message suggéré pour la prochaine session (fin de M3 et de M4, ou M5) :**
+**Où en est le projet (11 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés). Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
 
-> Lis `docs/PLAN.md` (sections 3, 4 et 8, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. M3 et M4 sont faits : corrige ce que l'essai sur de vraies données a montré (session EPU, film et gain du Falcon, fichiers de pointés), puis attaque M7 (MotionCor3 et CTFFIND5 remontés dans le Live) si la décision 6 du §8 est de laisser ImageJ de côté, sinon M5. Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
+1. **Essai sur une vraie session** : dossier EPU sur le NAS (NFS ou SMB), un film du Falcon avec sa référence de gain, des fichiers de pointés, un canal d'alerte réel. C'est ce qui permet d'éteindre l'ancien serveur Node.
+2. **Installation sur le serveur du labo** avec la [fiche d'exploitation](exploitation.md), choix entre comptes locaux et authentification unique, puis le pilote de deux semaines.
+3. **Si vous voulez MotionCor3 et CTFFIND dans le Live** : les lancer à la main une fois, puis adapter `deploy/processing.example.toml`.
+
+**Premier message suggéré pour la prochaine session (après l'essai) :**
+
+> Lis `docs/PLAN.md` (§4 avec l'avancement de chaque jalon, et « Où en est le projet » au §7), `docs/exploitation.md`, les README et les ADR. J'ai essayé imageBio sur de vraies données ; voici ce que j'ai vu : [liste : ce qui ne s'ouvre pas, ce qui est faux, ce qui est lent, les messages d'erreur]. Corrige chaque point avec un test de régression, en commençant par ce qui empêche de s'en servir. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 

@@ -10,5 +10,6 @@ Mode d'emploi : [`docs/exploitation.md`](../docs/exploitation.md).
 | `compose/env.example`, `compose/imagebio.toml` | réglages à copier et adapter |
 | `compose/smoke-test.sh` | construit et lance la pile sur une machine vierge, puis la vérifie de l'extérieur (lancé par l'intégration continue) |
 | `systemd/` | installation sans Docker : unité durcie, sauvegarde quotidienne, Caddyfile, configuration |
+| `processing.example.toml` | déclaration de MotionCor3 et CTFFIND, à adapter : jamais essayée avec les vrais programmes |
 
 La pile avec comptes locaux est testée à chaque modification. La pile SSO et le Caddyfile de `systemd/` ne l'ont jamais été : voir la fin de la fiche d'exploitation.
