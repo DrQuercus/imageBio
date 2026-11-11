@@ -22,7 +22,13 @@ from typing import Final
 
 __all__ = ["SCHEMA_VERSION", "Index"]
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
+
+#: Statements that bring an index from version N to N + 1 (tables are created by the schema
+#: itself: only what "CREATE TABLE IF NOT EXISTS" cannot do is here).
+_MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
+    1: ("ALTER TABLE watches ADD COLUMN alerts TEXT", "ALTER TABLE watches ADD COLUMN alerts_at REAL"),
+}
 
 _SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -46,7 +52,19 @@ CREATE TABLE IF NOT EXISTS watches (
     active     INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL,
     stopped_at REAL,
+    alerts     TEXT,                     -- JSON rules (live/alerts.py), NULL: none
+    alerts_at  REAL,                     -- when they were set: silence is counted from then
     UNIQUE (user, logical)
+);
+
+CREATE TABLE IF NOT EXISTS alert_states (
+    watch_id  INTEGER NOT NULL REFERENCES watches(id),
+    condition TEXT NOT NULL,             -- no_image | disk | rate_drop | scanner
+    since     REAL NOT NULL,             -- when the condition started to hold
+    notified  INTEGER NOT NULL DEFAULT 0,  -- 1: its notice was delivered to every channel
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    error     TEXT,                      -- public message of the last failed delivery
+    PRIMARY KEY (watch_id, condition)
 );
 
 CREATE TABLE IF NOT EXISTS dirs (
@@ -124,16 +142,25 @@ class Index:
         self._memory: sqlite3.Connection | None = None
         self._all: list[sqlite3.Connection] = []
         self._guard = threading.Lock()
-        # executescript manages its own transaction; every statement of the schema is idempotent
-        self.connection().executescript(_SCHEMA)
-        with self.write() as db:
-            db.execute(
-                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
-            )
-        row = self.connection().execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-        if int(row[0]) != SCHEMA_VERSION:
+        db = self.connection()
+        known = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").fetchone()
+        row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() if known else None
+        version = int(row[0]) if row else None  # None: a new index
+        if version is not None and version > SCHEMA_VERSION:
             raise RuntimeError(
-                f"the live index has schema version {row[0]}, this program expects {SCHEMA_VERSION}"
+                f"the live index has schema version {version}, this program expects {SCHEMA_VERSION}"
+            )
+        if version is not None:
+            for step in range(version, SCHEMA_VERSION):  # an index written by an earlier version
+                with self.write() as tx:
+                    for statement in _MIGRATIONS[step]:
+                        tx.execute(statement)
+                    tx.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(step + 1),))
+        # executescript manages its own transaction; every statement of the schema is idempotent
+        db.executescript(_SCHEMA)
+        with self.write() as tx:
+            tx.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
             )
 
     def _open(self) -> sqlite3.Connection:

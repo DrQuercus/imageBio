@@ -28,6 +28,16 @@ from imagebio.core.config import Settings
 from imagebio.core.errors import InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
 from imagebio.io.registry import Registry
+from imagebio.live.alerts import (
+    CONDITIONS,
+    AlertDeliveryError,
+    AlertRules,
+    Notice,
+    Notifier,
+    Reading,
+    evaluate,
+    notice_for,
+)
 from imagebio.live.index import Index
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
@@ -44,6 +54,8 @@ MAX_ACTIVE_WATCHES: Final = 8  # per user
 MAX_ITEMS: Final = 5000
 _THUMB_MEMORY_BYTES: Final = 64 * 2**20
 _RENDER_SLOTS: Final = 4  # thumbnails computed at once: each reads a full image
+_MAX_DELIVERY_ATTEMPTS: Final = 5  # a notice that cannot be delivered is tried at this many cycles
+_TEST_INTERVAL_S: Final = 10.0  # between two test notices of one watch
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +107,7 @@ class LiveService:
         *,
         scan_settings: ScanSettings | None = None,
         clock: Callable[[], float] = time.time,
+        notifier: Notifier | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -112,6 +125,11 @@ class LiveService:
         self._thumb_writes = 0
         self._render = threading.BoundedSemaphore(_RENDER_SLOTS)
         self._closed = False
+        #: Delivers alert notices, and tells how full a volume is; tests replace both.
+        self.notifier = notifier or Notifier(settings.smtp)
+        self.disk_usage: Callable[[Path], Any] = shutil.disk_usage
+        self._channels = {c.name: c for c in settings.alert_channels}
+        self._tested: dict[int, float] = {}
 
     # ── index and scanners ───────────────────────────────────────────────────
     @property
@@ -179,9 +197,11 @@ class LiveService:
         wait = 0.0
         while not stop.wait(wait):
             try:
-                report = scanner.cycle(self.clock())
+                now = self.clock()
+                report = scanner.cycle(now)
                 self._pending[root_id] = report.pending
                 took = report.duration_ms / 1000
+                self.check_alerts(root_id, now)
             except Exception:  # cycle() reports its own errors; this is a bug or the index gone
                 log.exception("live scanner of root %s failed", root_id)
                 took = 0.0
@@ -197,8 +217,10 @@ class LiveService:
                 scanner = self._manual[root_id] = Scanner(
                     self.index, root_id, path, self._registry, self._scan_settings
                 )
-            reports[root_id] = scanner.cycle(self.clock() if now is None else now)
+            when = self.clock() if now is None else now
+            reports[root_id] = scanner.cycle(when)
             self._pending[root_id] = reports[root_id].pending
+            self.check_alerts(root_id, when)
         return reports
 
     # ── watches ──────────────────────────────────────────────────────────────
@@ -259,6 +281,7 @@ class LiveService:
             )
             if cursor.rowcount == 0:
                 raise NotFoundError("no such watch")
+            db.execute("DELETE FROM alert_states WHERE watch_id = ?", (watch_id,))  # nothing left to resolve
         self._sync_scanners()
         with self._lock:
             for root_id in set(self._manual) - set(self._active_roots()):
@@ -280,34 +303,13 @@ class LiveService:
             (watch.root_id,),
         ):
             counts.setdefault(row["category"], {})[row["state"]] = row["n"]
-        marks = ",".join("?" * len(_ACQUIRED))
-        acquired = f"root_id = ? AND category IN ({marks}) AND state = 'complete'"
+        acquired = self._acquired_sql()
         last = db.execute(
             f"SELECT name, time, completed_at FROM exposures WHERE {acquired} AND time IS NOT NULL "  # noqa: S608
             "ORDER BY time DESC LIMIT 1",
             (watch.root_id, *_ACQUIRED),
         ).fetchone()
-
-        def arrived_since(seconds: float) -> int:
-            # Only what appeared while the directory was being watched: the images of a session
-            # opened after the fact were found, they did not arrive. Counted on this server's
-            # clock (the time the scanner accepted them), which the microscope's need not match.
-            return int(
-                db.execute(
-                    f"SELECT COUNT(*) FROM exposures WHERE {acquired} AND arrived = 1 AND completed_at > ?",  # noqa: S608
-                    (watch.root_id, *_ACQUIRED, now - seconds),
-                ).fetchone()[0]
-            )
-
-        try:
-            usage = shutil.disk_usage(watch.root_path)
-            disk: dict[str, Any] | None = {
-                "total": usage.total,
-                "free": usage.free,
-                "percent": round(100 * (1 - usage.free / usage.total), 1) if usage.total else None,
-            }
-        except OSError:
-            disk = None
+        disk = self._disk(watch.root_path)
         scanning = watch.root_id in self._threads or watch.root_id in self._manual
         return {
             "watch": watch.to_json(),
@@ -324,9 +326,42 @@ class LiveService:
             "counts": counts,
             "acquired": sum(counts.get(c, {}).get("complete", 0) for c in _ACQUIRED),
             "incoming": sum(counts.get(c, {}).get("incoming", 0) for c in _ACQUIRED),
-            "rate": {"last_5_min": arrived_since(300) * 12, "last_hour": arrived_since(3600)},
+            "rate": {
+                "last_5_min": self._arrived_since(db, watch.root_id, now, 300) * 12,
+                "last_hour": self._arrived_since(db, watch.root_id, now, 3600),
+            },
+            "alerts": [row["condition"] for row in self._alert_rows(db, watch.id)],
             "last": dict(last) if last is not None else None,
             "disk": disk,
+        }
+
+    @staticmethod
+    def _acquired_sql() -> str:
+        marks = ",".join("?" * len(_ACQUIRED))
+        return f"root_id = ? AND category IN ({marks}) AND state = 'complete'"
+
+    def _arrived_since(self, db: sqlite3.Connection, root_id: int, now: float, seconds: float) -> int:
+        """Images that arrived in the last ``seconds``. Only what appeared while the directory
+        was being watched: the images of a session opened after the fact were found, they did
+        not arrive. Counted on this server's clock (when the scanner accepted them), which the
+        microscope's need not match."""
+        return int(
+            db.execute(
+                f"SELECT COUNT(*) FROM exposures WHERE {self._acquired_sql()} AND arrived = 1 "  # noqa: S608
+                "AND completed_at > ?",
+                (root_id, *_ACQUIRED, now - seconds),
+            ).fetchone()[0]
+        )
+
+    def _disk(self, path: Path) -> dict[str, Any] | None:
+        try:
+            usage = self.disk_usage(path)
+        except OSError:
+            return None
+        return {
+            "total": usage.total,
+            "free": usage.free,
+            "percent": round(100 * (1 - usage.free / usage.total), 1) if usage.total else None,
         }
 
     def items(
@@ -392,6 +427,172 @@ class LiveService:
         counts = [[row["slot"] * bucket, row["n"]] for row in rows]
         counts.reverse()
         return {"bucket": bucket, "counts": counts}
+
+    # ── alerts ───────────────────────────────────────────────────────────────
+    def alert_channels(self) -> list[dict[str, str]]:
+        """The channels alerts can be sent to: names and kinds, never addresses."""
+        return [{"name": c.name, "kind": c.kind} for c in self._channels.values()]
+
+    @staticmethod
+    def _alert_rows(db: sqlite3.Connection, watch_id: int) -> list[sqlite3.Row]:
+        rows = db.execute(
+            "SELECT condition, since, notified, attempts, error FROM alert_states WHERE watch_id = ?",
+            (watch_id,),
+        ).fetchall()
+        return sorted(rows, key=lambda row: CONDITIONS.index(row["condition"]))
+
+    def alerts(self, watch: WatchInfo) -> dict[str, Any]:
+        """The rules of a watch and the conditions that hold at the moment."""
+        db = self.index.connection()
+        row = db.execute("SELECT alerts, alerts_at FROM watches WHERE id = ?", (watch.id,)).fetchone()
+        return {
+            "rules": AlertRules.from_json(row["alerts"]).to_json(),
+            "set_at": row["alerts_at"],
+            "channels": self.alert_channels(),
+            "firing": [
+                {
+                    "condition": state["condition"],
+                    "since": state["since"],
+                    "notified": bool(state["notified"]),
+                    "error": state["error"],
+                }
+                for state in self._alert_rows(db, watch.id)
+            ],
+        }
+
+    def set_alerts(self, watch: WatchInfo, rules: AlertRules) -> dict[str, Any]:
+        """Replace the rules of a watch. Silence is counted from now; what was firing is
+        forgotten (the new rules may not even look at it)."""
+        unknown = [name for name in rules.channels if name not in self._channels]
+        if unknown:
+            raise InvalidRequestError(f"unknown alert channel {unknown[0]!r}")
+        with self.index.write() as db:
+            db.execute(
+                "UPDATE watches SET alerts = ?, alerts_at = ? WHERE id = ?",
+                (json.dumps(rules.to_json()) if rules != AlertRules() else None, self.clock(), watch.id),
+            )
+            db.execute("DELETE FROM alert_states WHERE watch_id = ?", (watch.id,))
+        return self.alerts(watch)
+
+    def test_alerts(self, watch: WatchInfo) -> list[dict[str, Any]]:
+        """Send a test notice to each channel of the watch; says which ones took it."""
+        rules = AlertRules.from_json(
+            self.index.connection()
+            .execute("SELECT alerts FROM watches WHERE id = ?", (watch.id,))
+            .fetchone()[0]
+        )
+        if not rules.channels:
+            raise InvalidRequestError("choose at least one alert channel first")
+        now = self.clock()
+        with self._lock:
+            if now - self._tested.get(watch.id, -_TEST_INTERVAL_S) < _TEST_INTERVAL_S:
+                raise InvalidRequestError("a test was sent a moment ago: wait a few seconds")
+            self._tested[watch.id] = now
+        notice = Notice(
+            "test",
+            True,
+            "imageBio : essai des alertes",
+            f"{watch.logical} — ceci est un essai : les alertes de cette session arriveront ici.",
+            watch.logical,
+            now,
+        )
+        results = []
+        for name in rules.channels:
+            error = self._send(name, notice)
+            results.append({"channel": name, "delivered": error is None, "error": error})
+        return results
+
+    def _send(self, channel: str, notice: Notice) -> str | None:
+        """Deliver to one channel; the public reason when it fails."""
+        configured = self._channels.get(channel)
+        if configured is None:
+            return f"channel {channel!r} is no longer configured"
+        try:
+            self.notifier.send(configured, notice)
+        except AlertDeliveryError as e:
+            return e.public_message
+        except Exception as e:  # a notifier must not take the scanner down
+            log.exception("alert delivery failed on channel %s", channel)
+            return f"channel {channel!r}: {type(e).__name__}"
+        return None
+
+    def _reading(
+        self, db: sqlite3.Connection, root_id: int, path: Path, armed_at: float, now: float
+    ) -> Reading:
+        root = db.execute("SELECT error FROM roots WHERE id = ?", (root_id,)).fetchone()
+        last = db.execute(
+            f"SELECT MAX(completed_at), COUNT(*) FROM exposures WHERE {self._acquired_sql()} AND arrived = 1",  # noqa: S608
+            (root_id, *_ACQUIRED),
+        ).fetchone()
+        total = db.execute(
+            f"SELECT COUNT(*) FROM exposures WHERE {self._acquired_sql()}",  # noqa: S608
+            (root_id, *_ACQUIRED),
+        ).fetchone()[0]
+        disk = self._disk(path)
+        free_pct = None
+        if disk is not None and disk["total"]:
+            free_pct = 100 * disk["free"] / disk["total"]
+        return Reading(
+            now=now,
+            armed_at=armed_at,
+            last_arrival=last[0],
+            acquired=total,
+            rate_5min=self._arrived_since(db, root_id, now, 300) * 12,
+            rate_hour=self._arrived_since(db, root_id, now, 3600),
+            disk_free_pct=free_pct,
+            disk_free_bytes=disk["free"] if disk is not None else None,
+            scanner_error=root["error"] if root is not None else None,
+        )
+
+    def check_alerts(self, root_id: int, now: float) -> list[Notice]:
+        """Judge the rules of every active watch on a directory, as of ``now``; send a notice
+        for each condition that started or stopped, and return what was delivered. Called after
+        each scan cycle."""
+        db = self.index.connection()
+        watches = db.execute(
+            "SELECT w.id, w.logical, w.alerts, w.alerts_at, r.path "
+            "FROM watches w JOIN roots r ON r.id = w.root_id "
+            "WHERE w.root_id = ? AND w.active = 1 AND w.alerts IS NOT NULL",
+            (root_id,),
+        ).fetchall()
+        delivered: list[Notice] = []
+        for watch in watches:
+            rules = AlertRules.from_json(watch["alerts"])
+            if not rules.armed:
+                continue
+            reading = self._reading(db, root_id, Path(watch["path"]), watch["alerts_at"] or now, now)
+            holds = evaluate(rules, reading)
+            states = {row["condition"]: row for row in self._alert_rows(db, watch["id"])}
+            for condition in CONDITIONS:
+                sentence, state = holds[condition], states.get(condition)
+                if sentence is not None and (state is None or not state["notified"]):
+                    # it starts, or its notice has not gone through yet
+                    if state is not None and state["attempts"] >= _MAX_DELIVERY_ATTEMPTS:
+                        continue
+                    notice = notice_for(condition, True, sentence, watch["logical"], reading)
+                    errors = [e for e in (self._send(name, notice) for name in rules.channels) if e]
+                    with self.index.write() as tx:
+                        tx.execute(
+                            "INSERT INTO alert_states "
+                            "(watch_id, condition, since, notified, attempts, error) "
+                            "VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT (watch_id, condition) DO UPDATE SET "
+                            "notified = excluded.notified, attempts = attempts + 1, error = excluded.error",
+                            (watch["id"], condition, now, 0 if errors else 1, errors[0] if errors else None),
+                        )
+                    if not errors:
+                        delivered.append(notice)
+                elif sentence is None and state is not None:
+                    # it stopped: say so, if its start had been said
+                    with self.index.write() as tx:
+                        tx.execute(
+                            "DELETE FROM alert_states WHERE watch_id = ? AND condition = ?",
+                            (watch["id"], condition),
+                        )
+                    if state["notified"]:
+                        notice = notice_for(condition, False, None, watch["logical"], reading)
+                        if not [e for e in (self._send(name, notice) for name in rules.channels) if e]:
+                            delivered.append(notice)
+        return delivered
 
     # ── thumbnails ───────────────────────────────────────────────────────────
     def thumbnail(self, real: Path, px: int) -> tuple[bytes, FileId]:

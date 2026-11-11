@@ -45,6 +45,35 @@ def test_serve_builds_settings_and_starts_uvicorn(tmp_path: Path, monkeypatch: p
     assert cli.main(["serve", "--config", str(cfg), "--port", "8100"]) == 0 and calls[2]["port"] == 8100
 
 
+def test_serve_local_can_name_alert_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: calls.append({"app": app, **kw}))
+    (tmp_path / "data").mkdir()
+    args = [
+        "serve",
+        "--local",
+        str(tmp_path / "data"),
+        "--ntfy",
+        "https://ntfy.sh/my-topic",
+        "--webhook",
+        "https://x.example/hook",
+    ]
+    assert cli.main(args) == 0
+    channels = calls[0]["app"].state.settings.alert_channels
+    assert [(c.name, c.kind, c.url) for c in channels] == [
+        ("ntfy", "ntfy", "https://ntfy.sh/my-topic"),
+        ("webhook", "webhook", "https://x.example/hook"),
+    ]
+    assert "my-topic" not in capsys.readouterr().out  # an address is a secret: not echoed
+    assert cli.main(["serve", "--local", str(tmp_path / "data"), "--ntfy", "ftp://x/y"]) == 2
+    assert "http(s) address" in capsys.readouterr().err
+    cfg = tmp_path / "imagebio.toml"
+    cfg.write_text(f'[[roots]]\nname = "lab"\npath = "{tmp_path / "data"}"\n')
+    assert cli.main(["serve", "--config", str(cfg), "--ntfy", "https://ntfy.sh/my-topic"]) == 2
+    assert "declare [[alerts.channels]]" in capsys.readouterr().err
+    assert len(calls) == 1
+
+
 def test_serve_configuration_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
     monkeypatch.setattr("uvicorn.run", lambda *a, **kw: pytest.fail("the server must not start"))
     assert cli.main(["serve", "--local", str(tmp_path / "nope")]) == 2

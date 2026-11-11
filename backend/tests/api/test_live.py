@@ -14,6 +14,8 @@ from PIL import Image
 
 from fixtures.api import ALICE, BOB, Tree, build_tree, make_client
 from fixtures.live import BASE
+from imagebio.core.config import AlertChannel, SmtpConfig
+from imagebio.live.alerts import AlertDeliveryError, Notice
 from imagebio.live.simulator import MicroscopeSim, SimSettings, mrc_bytes
 
 WATCHES = "/api/live/watches"
@@ -24,19 +26,35 @@ CAROL = {"X-Forwarded-User": "carol", "X-Forwarded-Groups": "cryoem"}
 class World:
     """A server that scans only when told to, a clock that moves only when told to."""
 
-    def __init__(self, tree: Tree, state: Path) -> None:
+    def __init__(self, tree: Tree, state: Path, **settings: object) -> None:
         self.tree = tree
         self.state = state
+        self.settings = settings
         self.now = BASE
+        self.sent: list[tuple[str, Notice]] = []  # (channel, notice) delivered by the server
+        self.failures = 0  # deliveries that will fail before one succeeds
         self.client = self._client()
 
     def _client(self):
         client = make_client(
-            self.tree, auth_mode="proxy", trust_network=True, state_dir=self.state, live_scan=False
+            self.tree,
+            auth_mode="proxy",
+            trust_network=True,
+            state_dir=self.state,
+            live_scan=False,
+            **self.settings,
         )
         client.__enter__()
-        client.app.state.live.clock = lambda: self.now
+        live = client.app.state.live
+        live.clock = lambda: self.now
+        live.notifier = self  # notices come here instead of going out
         return client
+
+    def send(self, channel: AlertChannel, notice: Notice) -> None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise AlertDeliveryError(f"channel {channel.name!r}: ConnectionRefusedError")
+        self.sent.append((channel.name, notice))
 
     @property
     def live(self):
@@ -551,3 +569,280 @@ def test_background_scanning_starts_and_stops_with_the_watches(tmp_path: Path) -
     for t in threads:  # leaving the server stops the scanners
         t.join(timeout=10)
         assert not t.is_alive()
+
+
+# ── alerts ────────────────────────────────────────────────────────────────────
+
+CHANNELS = (
+    AlertChannel("phone", "ntfy", "https://ntfy.example/a-secret-topic"),
+    AlertChannel("hook", "webhook", "https://hooks.example/T0P/SECRET"),
+    AlertChannel("team", "email", to=("cryoem@lab.example",)),
+)
+
+
+@pytest.fixture
+def alerting(tmp_path: Path):
+    """A world whose server has three alert channels; what it sends lands in ``world.sent``."""
+    tree = build_tree(tmp_path / "data")
+    for directory in ("cryo/alice_session", "public/shared"):
+        (tree.base / directory).mkdir()
+        os.utime(tree.base / directory, (BASE, BASE))
+    w = World(tree, tmp_path / "state", alert_channels=CHANNELS, smtp=SmtpConfig("smtp.lab.example"))
+    yield w
+    w.client.__exit__(None, None, None)
+
+
+def set_alerts(world: World, watch: int, who: dict[str, str], **params: object):
+    return world.client.put(f"{WATCHES}/{watch}/alerts", params=params, headers=who)
+
+
+def last_arrival(world: World) -> float:
+    row = (
+        world.live.index.connection()
+        .execute("SELECT MAX(completed_at) FROM exposures WHERE arrived = 1")
+        .fetchone()
+    )
+    return float(row[0])
+
+
+def run_until(world: World, sims: list[MicroscopeSim], seconds: int, wanted: int) -> float:
+    """Advance until ``wanted`` notices were sent; returns the time of the cycle that sent the last."""
+    for _ in range(seconds):
+        world.run(sims, 1)
+        if len(world.sent) >= wanted:
+            return world.now - 1  # the cycle ran at the second just simulated
+    raise AssertionError(f"{len(world.sent)} notice(s) after {seconds} s, {wanted} expected")
+
+
+def test_an_alert_leaves_within_two_scan_cycles_of_its_threshold(alerting: World) -> None:
+    """Acceptance (M3): alerts leave in less than two scan cycles."""
+    sim = sim_in(alerting, "cryo/alice_session", 21, pause_probability=0.0)
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    assert set_alerts(alerting, watch, ALICE, channels="phone", no_image=2).status_code == 200
+    alerting.run([sim], 60)
+    sim.stop()
+    alerting.run([sim], 30)  # the last images finish and are accepted
+    assert alerting.sent == []  # images are arriving: nothing to say
+    threshold = last_arrival(alerting) + 120
+
+    sent_at = run_until(alerting, [sim], 300, 1)
+    assert threshold <= sent_at <= threshold + 2 * 5  # not before, and within two cycles of five seconds
+    channel, notice = alerting.sent[0]
+    assert channel == "phone" and notice.condition == "no_image" and notice.firing
+    assert notice.title == "imageBio : plus d'image"
+    assert notice.body.startswith("cryo/alice_session — Aucune image depuis 2 min (dernière image à ")
+    assert notice.body.endswith(f"{len(sim.exposures)} images dans la session.")
+    assert str(alerting.tree.base) not in notice.body
+    assert alerting.summary(watch, ALICE)["alerts"] == ["no_image"]
+
+    alerting.run([sim], 600)  # ten more minutes of silence: said once, not at every cycle
+    assert len(alerting.sent) == 1
+
+    # the microscope starts again: one notice says so, within two cycles of the first image accepted
+    again = sim_in(alerting, "cryo/alice_session", 22, pause_probability=0.0)
+    before = last_arrival(alerting)
+    resolved_at = run_until(alerting, [again], 120, 2)
+    assert last_arrival(alerting) > before
+    assert resolved_at <= last_arrival(alerting) + 2 * 5
+    channel, notice = alerting.sent[1]
+    assert channel == "phone" and notice.condition == "no_image" and not notice.firing
+    assert notice.title == "imageBio : les images arrivent de nouveau"
+    assert alerting.summary(watch, ALICE)["alerts"] == []
+
+
+def test_disk_and_rate_alerts(alerting: World) -> None:
+    sim = sim_in(alerting, "cryo/alice_session", 23, pause_probability=0.0)
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    free = {"bytes": 500e9}
+    alerting.live.disk_usage = lambda path: type(
+        "Usage", (), {"total": 1000e9, "free": free["bytes"], "used": 0}
+    )()
+    set_alerts(alerting, watch, ALICE, channels="phone,hook", disk_free=5, rate_drop=50)
+    alerting.run([sim], 300)
+    assert alerting.sent == []
+    assert alerting.summary(watch, ALICE)["disk"] == {"total": 1000e9, "free": 500e9, "percent": 50.0}
+
+    free["bytes"] = 32e9  # 3.2 % left
+    alerting.run([sim], 10)
+    assert [(c, n.condition, n.firing) for c, n in alerting.sent] == [
+        ("phone", "disk", True),
+        ("hook", "disk", True),
+    ]
+    assert "Il reste 3.2 % d'espace libre (32 Go)." in alerting.sent[0][1].body
+    free["bytes"] = 400e9
+    alerting.run([sim], 10)
+    assert [(c, n.firing) for c, n in alerting.sent[2:]] == [("phone", False), ("hook", False)]
+    assert alerting.sent[2][1].title == "imageBio : de la place est revenue sur le disque"
+
+    # the microscope stops: five minutes later the rate over five minutes is far under the hour's
+    del alerting.sent[:]
+    sim.stop()
+    alerting.run([sim], 400)
+    assert [(c, n.condition, n.firing) for c, n in alerting.sent] == [
+        ("phone", "rate_drop", True),
+        ("hook", "rate_drop", True),
+    ]
+    assert "images/h sur 5 minutes, contre" in alerting.sent[0][1].body
+
+
+def test_a_notice_that_cannot_be_delivered_is_tried_again_then_given_up(alerting: World) -> None:
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    set_alerts(alerting, watch, ALICE, channels="phone", no_image=1)
+    alerting.failures = 2
+    alerting.run([], 65)  # the threshold is crossed at 60 s; cycles at 60 and 65 fail to deliver
+    assert alerting.sent == []
+    state = alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json()["firing"]
+    assert state == [
+        {
+            "condition": "no_image",
+            "since": BASE + 60,
+            "notified": False,
+            "error": "channel 'phone': ConnectionRefusedError",
+        }
+    ]
+    alerting.run([], 10)  # the third attempt goes through
+    assert len(alerting.sent) == 1
+    state = alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json()["firing"]
+    assert state[0]["notified"] is True and state[0]["error"] is None
+    alerting.run([], 60)
+    assert len(alerting.sent) == 1
+
+    # a channel that never answers is not hammered for ever
+    other = alerting.watch("public/shared", ALICE)
+    set_alerts(alerting, other, ALICE, channels="hook", no_image=1)
+    alerting.failures = 10**6
+    alerting.run([], 600)
+    attempts = (
+        alerting.live.index.connection()
+        .execute("SELECT attempts FROM alert_states WHERE watch_id = ?", (other,))
+        .fetchone()[0]
+    )
+    assert attempts == 5 and alerting.failures == 10**6 - 5
+
+
+def test_rules_are_per_watch_and_survive_a_restart(alerting: World) -> None:
+    alice = alerting.watch("public/shared", ALICE)
+    bob = alerting.watch("public/shared", BOB)
+    set_alerts(alerting, alice, ALICE, channels="phone", no_image=1)
+    set_alerts(alerting, bob, BOB, channels="team", no_image=3)
+    alerting.run([], 70)
+    assert [(c, n.condition) for c, n in alerting.sent] == [("phone", "no_image")]  # Alice's rule only
+    alerting.restart()
+    alerting.run([], 60)
+    assert len(alerting.sent) == 1  # said before the restart: not said again
+    alerting.run([], 60)
+    assert [(c, n.condition) for c, n in alerting.sent] == [("phone", "no_image"), ("team", "no_image")]
+
+    # a stopped watch says nothing more, and has nothing left to resolve
+    alerting.client.delete(f"{WATCHES}/{alice}", headers=ALICE)
+    assert alerting.client.get(f"{WATCHES}/{alice}/alerts", headers=ALICE).json()["firing"] == []
+    session = alerting.tree.base / "public/shared"
+    (session / "new.mrc").write_bytes(mrc_bytes(np.zeros((8, 8), np.float32), 1.0))
+    for path in (session / "new.mrc", session):
+        os.utime(path, (alerting.now, alerting.now))
+    alerting.run([], 30)
+    assert [(c, n.firing) for c, n in alerting.sent[2:]] == [
+        ("team", False)
+    ]  # resolved for Bob, silence for Alice
+
+
+def test_the_scanner_failing_is_an_alert_of_its_own(alerting: World) -> None:
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    set_alerts(alerting, watch, ALICE, channels="phone")  # no threshold: only the monitor itself
+    alerting.run([], 10)
+    assert alerting.sent == []
+    with alerting.live.index.write() as db:
+        db.execute("UPDATE roots SET error = 'internal error (OSError)'")
+    assert [n.condition for n in alerting.live.check_alerts(1, alerting.now)] == ["scanner"]
+    assert alerting.sent[0][1].title == "imageBio : la surveillance échoue"
+    assert "internal error (OSError)" in alerting.sent[0][1].body
+    alerting.run([], 5)  # a cycle that works clears the error
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("scanner", True), ("scanner", False)]
+
+
+def test_alert_rules_through_the_api(alerting: World) -> None:
+    channels = alerting.client.get("/api/live/alerts/channels", headers=ALICE)
+    assert channels.json() == {
+        "channels": [
+            {"name": "phone", "kind": "ntfy"},
+            {"name": "hook", "kind": "webhook"},
+            {"name": "team", "kind": "email"},
+        ]
+    }
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    empty = alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json()
+    assert empty["rules"] == {
+        "channels": [],
+        "no_image_min": None,
+        "disk_free_pct": None,
+        "rate_drop_pct": None,
+    }
+    assert empty["firing"] == [] and empty["set_at"] is None
+
+    r = set_alerts(alerting, watch, ALICE, channels="phone, team", no_image=10, disk_free=5, rate_drop=40)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rules"] == {
+        "channels": ["phone", "team"],
+        "no_image_min": 10.0,
+        "disk_free_pct": 5.0,
+        "rate_drop_pct": 40.0,
+    }
+    assert body["set_at"] == alerting.now
+    assert alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json() == body
+    for text in (channels.text, r.text):  # names only: an address is a secret
+        assert "ntfy.example" not in text and "SECRET" not in text and "lab.example" not in text
+
+    for params in (
+        {"channels": "nowhere"},
+        {"channels": "phone", "no_image": 0},
+        {"channels": "phone", "no_image": 100000},
+        {"channels": "phone", "disk_free": 80},
+        {"channels": "phone", "rate_drop": 100},
+        {"channels": "phone", "no_image": "soon"},
+        {"channels": "phone", "url": "https://evil.example"},  # users do not give addresses
+    ):
+        bad = set_alerts(alerting, watch, ALICE, **params)
+        assert bad.status_code == 400 and bad.json()["error"]["code"] == "invalid_request", params
+    assert alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json() == body  # unchanged
+
+    # somebody else's watch does not exist; another site cannot change the rules
+    assert set_alerts(alerting, watch, BOB, channels="phone").status_code == 404
+    assert alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=BOB).status_code == 404
+    evil = alerting.client.put(
+        f"{WATCHES}/{watch}/alerts",
+        params={"channels": ""},
+        headers={**ALICE, "Origin": "https://evil.example"},
+    )
+    assert evil.status_code == 403 and evil.json()["error"]["code"] == "cross_site_request"
+
+    assert set_alerts(alerting, watch, ALICE).json()["rules"]["channels"] == []  # nothing: alerts off
+
+
+def test_a_test_notice_tells_which_channels_work(alerting: World) -> None:
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    url = f"{WATCHES}/{watch}/alerts/test"
+    none = alerting.client.post(url, headers=ALICE)
+    assert none.status_code == 400 and "choose at least one" in none.json()["error"]["message"]
+    set_alerts(alerting, watch, ALICE, channels="phone,hook")
+    alerting.failures = 1
+    r = alerting.client.post(url, headers=ALICE)
+    assert r.status_code == 200
+    assert r.json() == {
+        "results": [
+            {"channel": "phone", "delivered": False, "error": "channel 'phone': ConnectionRefusedError"},
+            {"channel": "hook", "delivered": True, "error": None},
+        ]
+    }
+    assert [(c, n.condition, n.title) for c, n in alerting.sent] == [
+        ("hook", "test", "imageBio : essai des alertes")
+    ]
+    assert "cryo/alice_session" in alerting.sent[0][1].body
+    again = alerting.client.post(url, headers=ALICE)
+    assert (
+        again.status_code == 400 and "wait" in again.json()["error"]["message"]
+    )  # not a way to flood a phone
+    alerting.now += 11
+    assert alerting.client.post(url, headers=ALICE).status_code == 200
+    assert alerting.client.post(url, headers=BOB).status_code == 404
+    assert alerting.client.post(url, headers={**ALICE, "Sec-Fetch-Site": "cross-site"}).status_code == 403

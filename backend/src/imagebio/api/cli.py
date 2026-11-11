@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from imagebio import __version__
-from imagebio.core.config import ConfigError, Settings
+from imagebio.core.config import AlertChannel, ConfigError, Settings
 from imagebio.core.errors import ImageBioError
 
 
@@ -29,6 +29,12 @@ def _parser() -> argparse.ArgumentParser:
     )  # fmt: skip
     serve.add_argument(
         "--port", type=int, help="port to listen on (default: 8000, or the one of the configuration)"
+    )
+    serve.add_argument(
+        "--ntfy", metavar="URL", help="with --local: an ntfy topic the Live mode may send alerts to"
+    )
+    serve.add_argument(
+        "--webhook", metavar="URL", help="with --local: a webhook the Live mode may send alerts to"
     )
 
     info = sub.add_parser("info", help="print what a reader sees in a file (debugging)")
@@ -50,6 +56,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def _settings(args: argparse.Namespace) -> Settings:
     if args.config:
+        if args.ntfy or args.webhook:
+            raise ConfigError(
+                "--ntfy and --webhook go with --local; with --config, declare [[alerts.channels]]"
+            )
         settings = Settings.load(args.config)
         if args.port is not None:
             from dataclasses import replace
@@ -59,7 +69,15 @@ def _settings(args: argparse.Namespace) -> Settings:
     for directory in args.local:
         if not Path(directory).expanduser().is_dir():
             raise ConfigError(f"not a directory: {directory}")
-    return Settings.local(args.local, **({"port": args.port} if args.port is not None else {}))
+    channels = [
+        AlertChannel(kind, kind, url)  # type: ignore[arg-type]
+        for kind, url in (("ntfy", args.ntfy), ("webhook", args.webhook))
+        if url
+    ]
+    overrides: dict[str, object] = {"alert_channels": tuple(channels)}
+    if args.port is not None:
+        overrides["port"] = args.port
+    return Settings.local(args.local, **overrides)
 
 
 def _simulate(args: argparse.Namespace) -> int:

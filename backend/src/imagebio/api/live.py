@@ -19,6 +19,7 @@ from imagebio.core.config import Settings
 from imagebio.core.errors import InvalidRequestError, NotFoundError
 from imagebio.core.model import json_safe
 from imagebio.fs.roots import MAX_PATH_LENGTH, RootSet
+from imagebio.live.alerts import AlertRules
 from imagebio.live.service import CATEGORIES, MAX_ITEMS, LiveService, WatchInfo
 from imagebio.live.thumbs import MAX_PX, MIN_PX
 
@@ -112,6 +113,40 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         """Acquisitions per time bucket, by acquisition time."""
         _only(request, frozenset({"bucket"}))
         return _json(live.history(own_watch(request, watch_id), bucket))
+
+    @app.get("/api/live/alerts/channels")
+    def live_alert_channels(request: Request) -> Response:
+        """Where alerts can be sent: names and kinds. The addresses stay on the server."""
+        _only(request, frozenset())
+        current_user(request, settings)
+        return _json({"channels": live.alert_channels()})
+
+    @app.get("/api/live/watches/{watch_id}/alerts")
+    def live_watch_alerts(request: Request, watch_id: int) -> Response:
+        _only(request, frozenset())
+        return _json(live.alerts(own_watch(request, watch_id)))
+
+    @app.put("/api/live/watches/{watch_id}/alerts")
+    def live_watch_alerts_set(
+        request: Request,
+        watch_id: int,
+        channels: str = Query("", max_length=1024),
+        no_image: float | None = Query(None),
+        disk_free: float | None = Query(None),
+        rate_drop: float | None = Query(None),
+    ) -> Response:
+        """Replace the alert rules of a watch. ``channels``: comma-separated names; ``no_image``
+        in minutes, ``disk_free`` and ``rate_drop`` in percent. What is left out is not watched."""
+        _only(request, frozenset({"channels", "no_image", "disk_free", "rate_drop"}))
+        names = tuple(c.strip() for c in channels.split(",") if c.strip())
+        rules = AlertRules(names, no_image, disk_free, rate_drop)
+        return _json(live.set_alerts(own_watch(request, watch_id), rules))
+
+    @app.post("/api/live/watches/{watch_id}/alerts/test")
+    def live_watch_alerts_test(request: Request, watch_id: int) -> Response:
+        """Send a test notice to the channels of the watch."""
+        _only(request, frozenset())
+        return _json({"results": live.test_alerts(own_watch(request, watch_id))})
 
     @app.get("/api/live/thumb")
     def live_thumbnail(
