@@ -49,10 +49,8 @@ def cycles(scanner, start: float, stop: float, step: float = 5.0):
 # ── acceptance: 50 000 files without looking at each one ──────────────────────
 
 
-def test_fifty_thousand_files_are_indexed_from_directory_listings(watch: Watch) -> None:
-    """Acceptance (M3): 50 000 files are indexed without scanning each file individually."""
-    old = BASE - 3 * 3600  # a session that ended three hours ago
-    squares, per_square = 50, 334  # 334 exposures of 3 files in each of 50 squares
+def fill_session(watch: Watch, when: float, squares: int = 50, per_square: int = 334) -> int:
+    """An EPU tree of empty files, every directory last changed at ``when``; returns the number of files."""
     for s in range(squares):
         data = watch.root / f"Images-Disc1/GridSquare_{s}/Data"
         data.mkdir(parents=True)
@@ -62,39 +60,47 @@ def test_fifty_thousand_files_are_indexed_from_directory_listings(watch: Watch) 
                 / f"FoilHole_{s}_Data_{n}_{n}_20270115_{n // 3600 % 24:02d}{n // 60 % 60:02d}{n % 60:02d}"
             )
             for suffix in (".mrc", ".xml", "_Fractions.mrc"):
-                open(f"{base}{suffix}", "wb").close()
+                path = f"{base}{suffix}"
+                open(path, "wb").close()
+                os.utime(path, (when, when))
         for directory in (data, data.parent):
-            os.utime(directory, (old, old))
-    os.utime(watch.root / "Images-Disc1", (old, old))
-    # one square is still being written: its files get the full treatment
+            os.utime(directory, (when, when))
+    os.utime(watch.root / "Images-Disc1", (when, when))
+    return squares * per_square * 3
+
+
+def test_fifty_thousand_files_are_indexed_from_directory_listings(watch: Watch) -> None:
+    """Acceptance (M3): 50 000 files are indexed without scanning each file individually.
+    A session that ended two days ago, and one square still being written."""
+    total = fill_session(watch, BASE - 2 * 86400)
+    assert total == 50_100
     put(
         watch.root,
         "Images-Disc1/GridSquare_live/Data/FoilHole_9_Data_1_1_20270115_075955.mrc",
         IMAGE,
         BASE - 5,
     )
-    total = squares * per_square * 3
-    assert total == 50_100
 
     scanner = watch.scanner()
     report = scanner.cycle(BASE)
     assert report.error is None and report.new_files == total + 1
-    n_dirs = 1 + 1 + 2 * squares + 2  # root, Images-Disc1, a square and its Data, the live square
+    n_dirs = 1 + 1 + 2 * 50 + 2  # root, Images-Disc1, a square and its Data, the live square
     assert watch.fs.listings == n_dirs
     # one stat per directory, two for the only recent file (found, then followed): not one per file
     assert watch.fs.stats == n_dirs + 2
     exposures = watch.exposures()
-    assert len(exposures) == squares * per_square + 1
+    assert len(exposures) == 50 * 334 + 1
     settled = [e for e in exposures.values() if e["state"] == "complete"]
-    assert len(settled) == squares * per_square
-    assert all(
-        e["state"] == "complete" and e["primary_role"] == "image" and e["size"] is None for e in settled
-    )
+    assert len(settled) == 50 * 334
+    assert all(e["verified"] == 0 and e["primary_role"] == "image" and e["size"] is None for e in settled)
     assert all(
         e["time_source"] == "name" and e["time"] is not None for e in settled
     )  # ordered without a stat
     live = exposures["FoilHole_9_Data_1_1_20270115_075955"]
     assert live["state"] == "incoming" and live["size"] == len(IMAGE)
+    assert len({e["seq"] for e in exposures.values()}) == len(
+        exposures
+    )  # committed in batches, numbered once
 
     # a quiet cycle looks at the directories, the recent file, and nothing else
     watch.fs.reset()
@@ -116,6 +122,46 @@ def test_fifty_thousand_files_are_indexed_from_directory_listings(watch: Watch) 
     assert report.new_files == 1
     assert watch.fs.stats == n_dirs + 2 + 1  # directories, two files being followed, the stat of the new one
     assert watch.fs.listings <= 4
+
+    # and nothing stays "just changed" for ever: half a minute later, no directory is listed at all
+    cycles(scanner, BASE + 15, BASE + 55)
+    watch.fs.reset()
+    cycles(scanner, BASE + 60, BASE + 120)
+    assert watch.fs.listings == 0 and watch.fs.stats == 13 * (n_dirs + 2)
+
+
+def test_a_session_of_today_costs_one_look_per_file_once(watch: Watch) -> None:
+    """Directories that changed within the day may hold a file still being written, which their
+    own date does not tell: each file is looked at once. Those at rest are then left alone."""
+    end = BASE - 3 * 3600  # the session ended three hours ago: one exposure every 6 s for 50 minutes
+    data = watch.root / "Images-Disc1/GridSquare_1/Data"
+    data.mkdir(parents=True)
+    for n in range(500):
+        when = end - 6 * (499 - n)
+        for suffix in (".mrc", ".xml"):
+            path = data / f"FoilHole_1_Data_{n}_{n}_20270115_04{n // 60:02d}{n % 60:02d}{suffix}"
+            path.write_bytes(IMAGE if suffix == ".mrc" else b"<MicroscopeImage/>")
+            os.utime(path, (when, when))
+    for directory in (data, data.parent, data.parent.parent):
+        os.utime(directory, (end, end))
+    recent = sum(1 for n in range(500) if 6 * (499 - n) <= 900)  # the last quarter of an hour
+    assert recent == 151
+
+    scanner = watch.scanner()
+    report = scanner.cycle(BASE)
+    assert report.new_files == 1000
+    assert watch.fs.stats == 4 + 1000 + 2 * recent  # directories, each file once, the recent ones followed
+    exposures = watch.exposures()
+    assert sum(1 for e in exposures.values() if e["state"] == "complete") == 500 - recent
+    assert all(e["size"] == len(IMAGE) for e in exposures.values())  # looked at: their size is known
+    cycles(scanner, BASE + 5, BASE + 15)  # the recent ones pass the completeness test
+    exposures = watch.exposures()
+    assert all(e["state"] == "complete" for e in exposures.values())
+    assert sum(1 for e in exposures.values() if e["verified"]) == recent
+    cycles(scanner, BASE + 20, BASE + 320)  # until what was just completed is no longer looked at again
+    watch.fs.reset()
+    cycles(scanner, BASE + 325, BASE + 370)
+    assert watch.fs.stats == 10 * 4 and watch.fs.listings == 0  # and then only the directories
 
 
 # ── acceptance: nothing is lost after a crash ─────────────────────────────────
@@ -405,3 +451,230 @@ def test_every_change_gets_a_new_number(watch: Watch) -> None:
             last = int(str(row["seq"]))
         assert known == watch.exposures()  # following the changes is enough to know everything
     assert len(known) > 30 and all(e["state"] == "complete" for e in known.values())
+
+
+# ── found by the independent review of the Live mode ──────────────────────────
+
+
+def test_a_link_that_replaces_an_indexed_directory_is_not_followed(watch: Watch, tmp_path: Path) -> None:
+    """High. ``stat`` of a path ending with a separator follows a link: a directory swapped for
+    a link to somewhere else was listed, and the names and headers of what lies there indexed."""
+    outside = tmp_path / "outside" / "deep"
+    outside.mkdir(parents=True)
+    (outside / "secret.mrc").write_bytes(IMAGE)
+    (outside.parent / "top_secret.mrc").write_bytes(IMAGE)
+    put(watch.root, "x/deep/inside.mrc", IMAGE, BASE)
+    put(watch.root, "y/other.mrc", IMAGE, BASE)
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 10)
+    assert set(watch.exposures()) == {"inside", "other"}
+
+    import shutil
+
+    for swap in ("x", "y"):  # a directory with a sub-directory, and a leaf
+        shutil.rmtree(watch.root / swap)
+        os.symlink(outside.parent, watch.root / swap)
+    os.utime(watch.root, (BASE + 60, BASE + 60))
+    cycles(scanner, BASE + 60, BASE + 75)
+    listed = {n: e["state"] for n, e in watch.exposures().items()}
+    assert listed == {"inside": "deleted", "other": "deleted"}  # gone, and nothing from outside
+    assert not {"secret", "top_secret"} & set(watch.exposures(listed=False))
+    cycles(scanner, BASE + 700, BASE + 715)  # the full rescan does not follow it either
+    assert "secret" not in watch.exposures() and "top_secret" not in watch.exposures()
+
+    # a new scanner on the same index, and a link that was there from the start
+    again = watch.scanner()
+    cycles(again, BASE + 720, BASE + 735)
+    assert set(watch.exposures()) == {"inside", "other"}
+    assert all(e["state"] == "deleted" for e in watch.exposures().values())
+
+
+def test_a_file_swapped_for_a_link_is_not_opened(watch: Watch, tmp_path: Path) -> None:
+    secret = tmp_path / "secret.mrc"
+    secret.write_bytes(IMAGE)
+    put(watch.root, "a.mrc", IMAGE[:1100], BASE)  # partial: it stays followed
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 15)
+    os.remove(watch.root / "a.mrc")
+    os.symlink(secret, watch.root / "a.mrc")  # same name, now a link to a complete file elsewhere
+    cycles(scanner, BASE + 20, BASE + 60)  # the directory's date did not change: no new listing
+    assert watch.files("complete") == {}
+    os.utime(watch.root, (BASE + 70, BASE + 70))
+    cycles(scanner, BASE + 70, BASE + 90)
+    assert watch.exposures()["a"]["state"] == "deleted"
+
+
+def test_a_file_growing_in_a_quiet_directory_is_not_taken_as_complete_at_first_sight(watch: Watch) -> None:
+    """Medium. The date of a directory tells when an entry was last added, not whether a file
+    in it is being written: a tilt series appended to for an hour sat in a "quiet" directory."""
+    put(watch.root, "stack/ts_001.mrc", IMAGE[:1100], BASE - 1200)  # created 20 minutes ago…
+    put(watch.root, "elsewhere/recent.mrc", IMAGE, BASE - 2)
+    os.utime(watch.root / "stack/ts_001.mrc", (BASE - 1, BASE - 1))  # …and written to a second ago
+    scanner = watch.scanner()
+    scanner.cycle(BASE)
+    assert watch.files("pending").keys() == {"stack/ts_001.mrc", "elsewhere/recent.mrc"}
+    for k in range(1, 5):  # it grows for twenty more seconds
+        put(watch.root, "stack/ts_001.mrc", IMAGE[: 1100 + k], BASE + 5 * k)
+        scanner.cycle(BASE + 5 * k)
+        assert "stack/ts_001.mrc" in watch.files("pending")
+    put(watch.root, "stack/ts_001.mrc", IMAGE, BASE + 25)
+    cycles(scanner, BASE + 25, BASE + 40)
+    assert watch.exposures()["ts_001"]["state"] == "complete" and watch.exposures()["ts_001"]["verified"] == 1
+
+
+@pytest.mark.parametrize("ahead", [1200, 20 * 3600])
+def test_a_date_in_the_future_does_not_make_everything_else_look_old(watch: Watch, ahead: int) -> None:
+    """Medium. One entry dated ahead of the clock was taken as "the time on the file server":
+    a file written a second ago then looked twenty minutes old, hence complete."""
+    put(watch.root, "misdated.mrc", IMAGE, BASE + ahead)
+    put(watch.root, "new.mrc", IMAGE[:1100], BASE - 1)  # half written
+    os.utime(watch.root, (BASE + ahead, BASE + ahead))
+    scanner = watch.scanner()
+    scanner.cycle(BASE)
+    assert "new.mrc" in watch.files("pending")
+    cycles(scanner, BASE + 5, BASE + 30)
+    assert watch.files("complete").keys() == {"misdated.mrc"}  # complete itself, by the test
+
+
+def test_a_failed_cycle_does_not_make_the_scanner_start_from_scratch(
+    watch: Watch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Medium. After one failing cycle the scanner took what arrived next for something that
+    had been there all along (not counted as arriving), and forgot what it had just completed."""
+    put(watch.root, "a.mrc", IMAGE, BASE)
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 10)
+    assert watch.exposures()["a"]["state"] == "complete"
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(scanner, "_refresh", boom)
+    put(watch.root, "b.mrc", IMAGE, BASE + 15)
+    assert scanner.cycle(BASE + 15).error is not None
+    monkeypatch.undo()
+    cycles(scanner, BASE + 20, BASE + 35)
+    b = watch.exposures()["b"]
+    assert b["state"] == "complete" and b["arrived"] == 1  # it did arrive while watching
+    # and "a", completed 25 seconds before, is still looked at: it changes, the index follows
+    put(watch.root, "a.mrc", IMAGE + b"more", BASE + 40)
+    scanner.cycle(BASE + 40)
+    assert watch.exposures()["a"]["state"] == "incoming"
+
+
+def test_a_file_completed_just_before_a_restart_is_still_looked_at_again(watch: Watch) -> None:
+    put(watch.root, "a.tif", b"", BASE)
+    tifffile.imwrite(watch.root / "a.tif", np.zeros((2, 16, 16), np.uint16))
+    os.utime(watch.root / "a.tif", (BASE, BASE))
+    cycles(watch.scanner(), BASE, BASE + 10)
+    assert watch.exposures()["a"]["state"] == "complete"
+    tifffile.imwrite(watch.root / "a.tif", np.zeros((9, 16, 16), np.uint16))  # it was not finished
+    os.utime(watch.root / "a.tif", (BASE + 20, BASE + 20))
+    reborn = watch.scanner()  # the server restarted in between
+    cycles(reborn, BASE + 25, BASE + 45)
+    final = watch.exposures()["a"]
+    assert final["state"] == "complete" and final["size"] == os.path.getsize(watch.root / "a.tif")
+    assert json.loads(str(final["meta"]))["image"]["frames"] == 9
+
+
+def test_a_storage_hiccup_during_the_full_rescan_deletes_nothing(watch: Watch) -> None:
+    """Medium. One input/output error on a listing at the ten-minute rescan removed the whole
+    sub-tree from the index; it came back ten minutes later as a burst of new arrivals."""
+    for n in range(5):
+        put(watch.root, f"Images/Data/img_{n}.mrc", IMAGE, BASE)
+    put(watch.root, "Images/Data/deep/x.mrc", IMAGE, BASE)
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 10)
+    before = watch.exposures()
+    assert len(before) == 6 and all(e["state"] == "complete" for e in before.values())
+
+    real = watch.fs.scandir
+
+    def flaky(path: str):
+        if path.rstrip("/").endswith("Data"):
+            raise OSError(5, "Input/output error")
+        return real(path)
+
+    watch.fs.scandir = flaky  # type: ignore[method-assign]
+    report = scanner.cycle(BASE + 700)  # the full rescan
+    assert report.full and report.error is None and report.removed == 0
+    assert watch.exposures() == before
+    watch.fs.scandir = real  # type: ignore[method-assign]
+    cycles(scanner, BASE + 705, BASE + 1400)
+    assert watch.exposures() == before  # same completion times: nothing "arrived" again
+
+    # really gone is still gone
+    import shutil
+
+    shutil.rmtree(watch.root / "Images/Data")
+    os.utime(watch.root / "Images", (BASE + 1500, BASE + 1500))
+    scanner.cycle(BASE + 1500)
+    assert all(e["state"] == "deleted" for e in watch.exposures().values())
+
+
+def test_the_index_is_not_locked_while_the_tree_is_listed(watch: Watch) -> None:
+    """Medium. A cycle held the write lock from its first directory listing to its end: on a
+    large tree every other writer (starting a watch, saving alert rules) waited, then failed."""
+    put(watch.root, "a.mrc", IMAGE, BASE)
+    scanner = watch.scanner()
+    seen: list[bool] = []
+    real = watch.fs.scandir
+
+    def spy(path: str):
+        seen.append(watch.index.connection().in_transaction)
+        return real(path)
+
+    watch.fs.scandir = spy  # type: ignore[method-assign]
+    scanner.cycle(BASE)
+    assert seen == [False]  # the full listing happens before the transaction
+
+
+def test_a_busy_index_skips_a_cycle_and_nothing_else(watch: Watch, monkeypatch: pytest.MonkeyPatch) -> None:
+    put(watch.root, "a.mrc", IMAGE, BASE)
+    scanner = watch.scanner()
+    cycles(scanner, BASE, BASE + 10)
+    put(watch.root, "b.mrc", IMAGE, BASE + 15)
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def locked():
+        raise sqlite3.OperationalError("database is locked")
+        yield
+
+    monkeypatch.setattr(watch.index, "write", locked)
+    report = scanner.cycle(BASE + 15)
+    assert report.error == "the live index is busy"
+    monkeypatch.undo()
+    cycles(scanner, BASE + 20, BASE + 35)
+    b = watch.exposures()["b"]
+    assert b["state"] == "complete" and b["arrived"] == 1
+    assert watch.rows("SELECT error FROM roots")[0]["error"] is None
+
+
+def test_the_first_scan_of_a_large_tree_is_committed_in_batches(
+    watch: Watch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import imagebio.live.scanner as module
+
+    monkeypatch.setattr(module, "_CHECKPOINT_FILES", 40)
+    old = BASE - 3 * 86400
+    for d in range(10):
+        for n in range(10):
+            put(watch.root, f"d{d}/img_{d}_{n}.mrc", IMAGE, old)
+        os.utime(watch.root / f"d{d}", (old, old))
+    os.utime(watch.root, (old, old))
+    commits: list[int] = []
+    real = module.Scanner._checkpoint
+
+    def counting(self, db, report):
+        real(self, db, report)
+        commits.append(len(watch.rows("SELECT id FROM exposures WHERE seq > 0")))
+
+    monkeypatch.setattr(module.Scanner, "_checkpoint", counting)
+    report = watch.scanner().cycle(BASE)
+    assert report.error is None and report.new_files == 100
+    assert commits == [40, 80]  # numbered and committed as it goes
+    exposures = watch.exposures()
+    assert len(exposures) == 100 and len({e["seq"] for e in exposures.values()}) == 100
+    assert watch.rows("SELECT seq FROM roots")[0]["seq"] == 100

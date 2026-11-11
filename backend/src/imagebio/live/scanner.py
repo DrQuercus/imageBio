@@ -52,6 +52,10 @@ _ROLE_ORDER: Final = {"xml": 0, "mdoc": 0, "preview": 1}  # metadata first: imag
 _RECHECK_S: Final = 60.0  # a file that failed its check and did not change is checked again after this
 _STUCK_S: Final = 300.0  # unchanged and failing for this long: looked at every _RECHECK_S only
 _DAY_NS: Final = 86_400 * 1_000_000_000
+#: A date this far ahead of this server's clock is not taken as "the time on the file server".
+_AHEAD_NS: Final = 120 * 1_000_000_000
+#: First scan of a large tree: the index is committed every time this many files were added.
+_CHECKPOINT_FILES: Final = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,13 +98,18 @@ class Fs:
                 Entry(e.name, e.is_dir(follow_symlinks=False), e.is_file(follow_symlinks=False)) for e in it
             ]
 
+    def realpath(self, path: str) -> str:
+        return os.path.realpath(path)
+
 
 @dataclass(slots=True)
 class _Dir:
     id: int
     rel: str
-    mtime_ns: int
+    mtime_ns: int  # as stored in the index: -1 while the directory is to be listed again
     names: set[str] | None = None  # tracked file names; None: not loaded from the index yet
+    seen_mtime_ns: int | None = None  # as last listed by this scanner; None: not listed yet
+    hot_until: float = 0.0  # listed again at every cycle until then (this server's clock)
 
 
 @dataclass(slots=True)
@@ -186,10 +195,12 @@ class Scanner:
     ) -> None:
         self._index = index
         self._root_id = root_id
-        self._root = os.fspath(root)
         self._registry = registry
         self.settings = settings or ScanSettings()
         self._fs = fs or Fs()
+        # every path below is built from this real path: a path that is not its own real path
+        # goes through a symbolic link, and is not followed
+        self._root = self._fs.realpath(os.fspath(root))
         self._load()
 
     # ── memory, rebuilt from the index ───────────────────────────────────────
@@ -231,6 +242,31 @@ class Scanner:
                 f["mtime_ns"],
             )
         self._recent: dict[int, _Recent] = {}
+        self._recent_loaded = False  # filled at the next cycle, which knows what time it is
+
+    def _load_recent(self, db: sqlite3.Connection, now: float) -> None:
+        """Files completed a short while ago are looked at again, also after a restart or a
+        failed cycle: one that changed since must not keep its old size for good."""
+        rows = db.execute(
+            "SELECT f.id, d.rel, f.name, f.role, f.exposure_id, e.category, f.size, f.mtime_ns, "
+            "f.completed_at "
+            "FROM files f JOIN dirs d ON d.id = f.dir_id JOIN exposures e ON e.id = f.exposure_id "
+            "WHERE d.root_id = ? AND f.state = 'complete' AND f.verified = 1 "
+            "AND f.completed_at > ?",
+            (self._root_id, now - self.settings.verify_s),
+        )
+        for f in rows:
+            self._recent[f["id"]] = _Recent(
+                f["rel"],
+                f["name"],
+                f["role"],
+                f["exposure_id"],
+                f["category"],
+                f["size"],
+                f["mtime_ns"],
+                f["completed_at"],
+            )
+        self._recent_loaded = True
 
     def _remember_dir(self, d: _Dir) -> None:
         self._dirs[d.rel] = d
@@ -242,7 +278,19 @@ class Scanner:
         return self._seq
 
     def _path(self, rel: str, name: str = "") -> str:
-        return os.path.join(self._root, *rel.split("/"), name) if rel else os.path.join(self._root, name)
+        """The path of a directory or of a file in it. No trailing separator: ``stat`` would
+        then follow a symbolic link standing where a directory was."""
+        parts = [part for part in rel.split("/") if part]
+        if name:
+            parts.append(name)
+        return os.path.join(self._root, *parts) if parts else self._root
+
+    def _is_inside(self, path: str) -> bool:
+        """Whether ``path`` reaches what it names without going through a symbolic link."""
+        try:
+            return self._fs.realpath(path) == path
+        except OSError:
+            return False
 
     @property
     def pending_count(self) -> int:
@@ -257,9 +305,15 @@ class Scanner:
         report.full = (
             self._cold or self._full_at is None or now - self._full_at >= self.settings.full_rescan_s
         )
+        began = False
         try:
+            # the whole tree is listed before the index is locked: other writers do not wait for it
+            walked = self._walk() if report.full else None
             with self._index.write() as db:
-                self._scan(db, now, report)
+                began = True
+                if not self._recent_loaded:
+                    self._load_recent(db, now)
+                self._scan(db, now, report, walked)
                 self._poll(db, now, report)
                 self._verify(db, now, report)
                 self._refresh(db, report.changed)
@@ -270,17 +324,14 @@ class Scanner:
                     "seq = ? WHERE id = ?",
                     (now, now if report.full else None, report.duration_ms, self._seq, self._root_id),
                 )
-        except Exception as e:  # the transaction rolled back: memory must follow
-            log.exception("live scan cycle failed for root %s", self._root_id)
-            report.error = (
-                e.public_message if isinstance(e, ImageBioError) else f"internal error ({type(e).__name__})"
-            )
-            self._load()
-            with self._index.write() as db:
-                db.execute(
-                    "UPDATE roots SET cycle_at = ?, error = ? WHERE id = ?",
-                    (now, report.error, self._root_id),
-                )
+        except sqlite3.OperationalError as e:
+            if not began:  # the index is busy with another writer: nothing was done, try next time
+                report.error = "the live index is busy"
+                return report
+            self._recover(now, report, e)
+            return report
+        except Exception as e:
+            self._recover(now, report, e)
             return report
         if report.full:
             self._full_at = now
@@ -288,27 +339,53 @@ class Scanner:
         report.pending = len(self._pending)
         return report
 
+    def _recover(self, now: float, report: CycleReport, error: Exception) -> None:
+        """A cycle failed and its transaction rolled back: memory follows the index again.
+        The scanner goes on as it was: one failure does not make what arrives next look like
+        something that was there all along."""
+        log.error("live scan cycle failed for root %s", self._root_id, exc_info=error)
+        report.error = (
+            error.public_message
+            if isinstance(error, ImageBioError)
+            else f"internal error ({type(error).__name__})"
+        )
+        was_cold = self._cold
+        self._load()
+        self._cold = was_cold
+        with contextlib.suppress(sqlite3.Error), self._index.write() as db:
+            db.execute(
+                "UPDATE roots SET cycle_at = ?, error = ? WHERE id = ?", (now, report.error, self._root_id)
+            )
+
     # ── directories ──────────────────────────────────────────────────────────
-    def _list(self, rel: str) -> tuple[int, list[Entry]] | None:
-        """``(mtime_ns, entries)`` of a directory, or None when it is gone or unreadable.
-        The date is taken before the listing: what is added meanwhile changes it again."""
+    def _list(self, rel: str) -> tuple[int, list[Entry]] | bool:
+        """``(mtime_ns, entries)`` of a directory; False when it is gone (or is no longer a
+        directory of this tree: a symbolic link took its place); True when it could not be
+        read this time. The date is taken before the listing: what is added meanwhile changes
+        it again."""
         path = self._path(rel)
         try:
             st = self._fs.stat(path)
-            if not stat_module.S_ISDIR(st.st_mode):
-                return None
+            if not stat_module.S_ISDIR(st.st_mode) or not self._is_inside(path):
+                return False
             return st.st_mtime_ns, self._fs.scandir(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
         except OSError:
-            return None
+            return True  # a hiccup of the storage: what is known of it stays
 
-    def _walk(self) -> list[tuple[str, int, list[Entry]]]:
-        """Every directory of the tree, breadth first, with its date and listing."""
+    def _walk(self) -> tuple[list[tuple[str, int, list[Entry]]], set[str]]:
+        """Every directory of the tree, breadth first, with its date and listing; and those
+        that could not be read this time."""
         out: list[tuple[str, int, list[Entry]]] = []
+        unreadable: set[str] = set()
         queue: deque[tuple[str, int]] = deque([("", 0)])
         while queue:
             rel, depth = queue.popleft()
             listed = self._list(rel)
-            if listed is None:
+            if isinstance(listed, bool):
+                if listed:
+                    unreadable.add(rel)
                 continue
             out.append((rel, *listed))
             if depth >= self.settings.max_depth:
@@ -316,24 +393,49 @@ class Scanner:
             for e in listed[1]:
                 if e.is_dir and _storable(e.name) and len(out) + len(queue) < self.settings.max_dirs:
                     queue.append((_join(rel, e.name), depth + 1))
-        return out
+        return out, unreadable
 
-    def _scan(self, db: sqlite3.Connection, now: float, report: CycleReport) -> None:
-        if report.full:
-            listing = self._walk()
+    def _checkpoint(self, db: sqlite3.Connection, report: CycleReport) -> None:
+        """Commit what was indexed so far and go on in a new transaction: the first scan of a
+        very large tree must not keep every other writer waiting until its end."""
+        self._refresh(db, report.changed)
+        report.changed.clear()
+        db.execute("UPDATE roots SET seq = ? WHERE id = ?", (self._seq, self._root_id))
+        db.execute("COMMIT")
+        db.execute("BEGIN IMMEDIATE")
+
+    def _scan(
+        self,
+        db: sqlite3.Connection,
+        now: float,
+        report: CycleReport,
+        walked: tuple[list[tuple[str, int, list[Entry]]], set[str]] | None,
+    ) -> None:
+        if walked is not None:
+            listing, unreadable = walked
             self._note_dates((mtime for _, mtime, _ in listing), now)
             seen: set[str] = set()
+            committed = 0
             for rel, mtime_ns, entries in listing:
                 seen.add(rel)
-                settled = self._cold and self._at_rest(mtime_ns, now)
+                settled = self._cold and self._long_at_rest(mtime_ns, now)
                 self._apply(db, rel, mtime_ns, entries, now, settled, report)
+                if self._cold and report.new_files - committed >= _CHECKPOINT_FILES:
+                    committed = report.new_files
+                    self._checkpoint(db, report)
             for rel in sorted(set(self._dirs) - seen):
+                # what could not be read this time is not gone, and neither is what lies below
+                if any(rel == u or rel.startswith(u + "/") or not u for u in unreadable):
+                    continue
                 self._drop_dir(db, rel, report)
             return
+        snapshot = set(self._dirs)
         queue: deque[str] = deque(self._dirs)
         while queue:
             rel = queue.popleft()
             known = self._dirs.get(rel)
+            if known is None and rel in snapshot:
+                continue  # dropped a moment ago with its parent: not to be looked at through it
             path = self._path(rel)
             try:
                 st = self._fs.stat(path)
@@ -349,6 +451,10 @@ class Scanner:
                 continue
             self._note_dates((st.st_mtime_ns,), now)
             if known is not None and st.st_mtime_ns == known.mtime_ns:
+                continue
+            if not self._is_inside(path):  # one of its parents became a symbolic link
+                if known is not None:
+                    self._drop_dir(db, rel, report)
                 continue
             try:
                 entries = self._fs.scandir(path)
@@ -366,9 +472,11 @@ class Scanner:
 
     def _note_dates(self, dates: Iterable[int], now: float) -> None:
         """Advance what is known of the file server's clock: the most recent date seen in the
-        tree. A date far in this server's future is a mistake of whoever wrote it, not the
-        time: it must not make everything else look old."""
-        limit = int(now * _NS) + _DAY_NS
+        tree. A date ahead of this server's clock is not taken: were it a mistake of whoever
+        wrote it, everything else would look old, a file being written included. If the file
+        server's clock really is ahead, ignoring its recent dates only makes more files go
+        through the completeness test."""
+        limit = int(now * _NS) + _AHEAD_NS
         self._server_ns = max([self._server_ns, *(m for m in dates if m <= limit)])
 
     def _at_rest(self, mtime_ns: int, now: float) -> bool:
@@ -381,6 +489,13 @@ class Scanner:
         """
         settle_ns = int(self.settings.settle_s * _NS)
         return self._server_ns - mtime_ns > settle_ns or int(now * _NS) - mtime_ns > _DAY_NS
+
+    def _long_at_rest(self, mtime_ns: int, now: float) -> bool:
+        """Whether a *directory* last changed more than a day ago: its files are then indexed
+        without being looked at. A day, not ``settle_s``: the date of a directory only tells
+        when an entry was last added or removed, and a file in it may be written for long
+        after that (a tilt series appended to for an hour)."""
+        return self._server_ns - mtime_ns > _DAY_NS or int(now * _NS) - mtime_ns > _DAY_NS
 
     def _apply(
         self,
@@ -428,9 +543,15 @@ class Scanner:
         if gone:
             self._remove_files(db, d, gone, report)
         d.names = (d.names | added) - gone
-        # a directory that changed recently is listed again next cycle whatever its date says
-        hot = self._server_ns - mtime_ns < int(self.settings.hot_s * _NS)
-        stored = -1 if hot else mtime_ns
+        # A directory that just changed is listed again at the next cycles whatever its date
+        # says: a file added within the same second would not change it. "Just" is counted on
+        # this server's clock from the moment the change was seen, so that it ends.
+        first_look = d.seen_mtime_ns is None  # then only a recent date makes it "just changed"
+        fresh = not self._at_rest(mtime_ns, now) if first_look else mtime_ns != d.seen_mtime_ns
+        d.seen_mtime_ns = mtime_ns
+        if fresh:
+            d.hot_until = now + self.settings.hot_s
+        stored = -1 if now < d.hot_until else mtime_ns
         if stored != d.mtime_ns:
             d.mtime_ns = stored
             db.execute("UPDATE dirs SET mtime_ns = ? WHERE id = ?", (stored, d.id))
@@ -531,7 +652,9 @@ class Scanner:
         if not settled:
             for name in new:
                 with contextlib.suppress(OSError):  # gone already: the next listing will tell
-                    looked[name] = self._fs.stat(self._path(d.rel, name))
+                    found = self._fs.stat(self._path(d.rel, name))
+                    if stat_module.S_ISREG(found.st_mode):
+                        looked[name] = found
             if self._cold:  # the files tell the time of their server better than their directory
                 self._note_dates((st.st_mtime_ns for st in looked.values()), now)
         for name, member in new.items():
@@ -621,6 +744,8 @@ class Scanner:
                 continue  # the listing of its directory will record the removal
             except OSError:
                 continue
+            if not stat_module.S_ISREG(st.st_mode):
+                continue  # no longer a file (a link took its place): its listing will tell
             if p.polls == 0 or (st.st_size, st.st_mtime_ns) != (p.size, p.mtime_ns):
                 grew = st.st_size != p.size
                 p.size, p.mtime_ns = st.st_size, st.st_mtime_ns
@@ -643,8 +768,11 @@ class Scanner:
             if p.integrity is None:
                 if report.checks >= self.settings.max_checks:
                     continue  # next cycle
+                path = self._path(p.dir_rel, p.name)
+                if not self._is_inside(path):
+                    continue  # a link somewhere on the way: it is not opened
                 report.checks += 1
-                p.integrity = check_integrity(Path(self._path(p.dir_rel, p.name)), p.role, self._registry)
+                p.integrity = check_integrity(Path(path), p.role, self._registry)
                 p.checked_at = now
                 if not p.integrity.ok:
                     cursor = db.execute(
@@ -744,7 +872,7 @@ class Scanner:
                 st = self._fs.stat(self._path(r.dir_rel, r.name))
             except OSError:
                 continue
-            if (st.st_size, st.st_mtime_ns) == (r.size, r.mtime_ns):
+            if not stat_module.S_ISREG(st.st_mode) or (st.st_size, st.st_mtime_ns) == (r.size, r.mtime_ns):
                 continue
             del self._recent[file_id]
             self._pending[file_id] = _Pending(

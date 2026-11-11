@@ -193,9 +193,11 @@ class Index:
         try:
             yield db
         except BaseException:
-            db.execute("ROLLBACK")
+            if db.in_transaction:  # the block may have committed and failed to begin again
+                db.execute("ROLLBACK")
             raise
-        db.execute("COMMIT")
+        if db.in_transaction:
+            db.execute("COMMIT")
 
     def close(self) -> None:
         """Close every connection. Only when no thread uses the index any more."""
