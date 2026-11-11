@@ -106,6 +106,34 @@ test("a copied link reproduces the same view", async ({ page, context }) => {
   for (const [i, [x, y]] of points.entries()) expect(await colourAt(other, x, y)).toEqual(original[i]);
 });
 
+test("a link that arrives while the page is about to rewrite its address is not lost", async ({ page }) => {
+  // Regression. The page writes its view into the address 200 ms after any change. A link that
+  // the browser delivered in between (pasted in the address bar, Back, or opened by a test)
+  // while the page was busy was overwritten by that pending write before the page had read
+  // it: the image on screen stayed, and the link was gone.
+  await openFile(page, "demo/gradient.mrc");
+  await page.getByTestId("invert").click(); // a change of view: the address will be rewritten
+  await expect(page.getByTestId("invert")).toHaveClass(/on/);
+  await page.waitForTimeout(50);
+  // the page is busy (as it is while it decodes a large plane) until that write is overdue ...
+  const busy = page.evaluate(() => {
+    const until = performance.now() + 400;
+    while (performance.now() < until);
+  });
+  await page.waitForTimeout(20);
+  // ... and the new address arrives meanwhile
+  await page.goto(`/#path=${encodeURIComponent("demo/hyper.tif")}&t=1&z=2`);
+  await busy;
+  await ready(page, "demo/hyper.tif");
+  await expect(page.getByTestId("fiji-plane")).toHaveAttribute("href", /[?&]t=1&c=0&z=2/);
+  await page.waitForTimeout(400); // the address the page writes next is the one of the new image
+  expect(page.url()).toContain("path=demo%2Fhyper.tif");
+  expect(page.url()).toContain("t=1");
+  // and the address is still kept up to date with what the user does afterwards
+  await page.getByTestId("invert").click();
+  await expect.poll(() => page.url()).toContain("inv=1");
+});
+
 test("a hostile file name is shown as text and opens like any file", async ({ page }) => {
   await page.goto("/");
   const name = "<img src=x onerror=alert(1)>.mrc";

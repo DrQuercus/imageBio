@@ -27,6 +27,9 @@ interface Loaded {
 
 export function App({ onLive }: { onLive: () => void }) {
   const initial = useMemo<LinkState>(() => parseLink(window.location.hash), []);
+  // the address as the page last read or wrote it, and the write that is waiting to be made
+  const addressSeen = useRef(window.location.hash);
+  const addressTimer = useRef<number | undefined>(undefined);
   const [me, setMe] = useState<Me | null>(null);
   const [path, setPath] = useState<string | null>(initial.path ?? null);
   const [options, setOptions] = useState<ReaderOptions>(initial.options);
@@ -138,6 +141,9 @@ export function App({ onLive }: { onLive: () => void }) {
   // a link pasted in the address bar of an open tab
   useEffect(() => {
     const onHash = () => {
+      // the address is now one the page has read; what it meant to write there is out of date
+      window.clearTimeout(addressTimer.current);
+      addressSeen.current = window.location.hash;
       const link = parseLink(window.location.hash);
       if (!link.path) return;
       fitOnLoad.current = !link.view;
@@ -273,9 +279,15 @@ export function App({ onLive }: { onLive: () => void }) {
   // ── the view in the address bar ────────────────────────────────────────────
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      // An address the page neither wrote nor read yet is somebody else's: a link pasted in
+      // the address bar, Back, the Live button. The browser changes it at once and tells the
+      // page a moment later; writing the view there in between would lose that link for good.
+      if (window.location.hash !== addressSeen.current) return;
       const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo, gallery });
       window.history.replaceState(null, "", link || window.location.pathname);
+      addressSeen.current = window.location.hash;
     }, 200);
+    addressTimer.current = timer;
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, indexKey, optionsKey, view, display, userApix, cryo, gallery]);
