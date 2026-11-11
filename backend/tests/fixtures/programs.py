@@ -26,7 +26,7 @@ def record(kind, **what):
     path = os.environ.get("FAKE_PROGRAMS_RECORD")
     if path:
         with open(path, "a") as f:
-            f.write(json.dumps({"kind": kind, **what}) + "\\n")
+            f.write(json.dumps({"kind": kind, "pid": os.getpid(), **what}) + "\\n")
 
 def misbehave(name):
     if "hang" in name:

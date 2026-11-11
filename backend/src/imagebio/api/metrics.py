@@ -76,6 +76,20 @@ def render_metrics(caches: Mapping[str, Mapping[str, int]], live: Mapping[str, A
     for name, text, key in per_root:
         samples = [({"root": str(r["id"])}, r[key]) for r in roots if r.get(key) is not None]
         out += _metric(f"imagebio_live_{name}", "gauge", text, samples)
+    programs = live.get("programs")
+    if programs is not None:
+        out += _metric(
+            "imagebio_live_program_runs_total",
+            "counter",
+            "Exposures the external programs ran on, by outcome.",
+            [({"outcome": outcome}, programs[outcome]) for outcome in ("failed", "ok")],
+        )
+        out += _metric(
+            "imagebio_live_program_runs_in_progress",
+            "gauge",
+            "Exposures being run, or run and not yet recorded.",
+            [({}, programs["running"])],
+        )
     out += _metric(
         "imagebio_live_index_bytes", "gauge", "Size of the Live index.", [({}, live["index_bytes"])]
     )

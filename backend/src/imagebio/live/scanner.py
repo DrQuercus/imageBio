@@ -194,10 +194,13 @@ class Scanner:
         fs: Fs | None = None,
         *,
         remeasure_with_movie: bool = False,
+        reprocess_with_movie: bool = False,
     ) -> None:
         #: What was measured on an exposure is forgotten when its movie completes afterwards:
         #: for a service that also measures the movie (its drift).
         self._remeasure_with_movie = remeasure_with_movie
+        #: The same for what the external programs gave, when one of them works on the movie.
+        self._reprocess_with_movie = reprocess_with_movie
         self._index = index
         self._root_id = root_id
         self._registry = registry
@@ -210,6 +213,8 @@ class Scanner:
         self._measured: list[
             tuple[int, str, int | None, int | None, dict[str, Any], dict[str, Any] | None]
         ] = []
+        #: Results of the external programs waiting for the next cycle, the same way.
+        self._processed: list[tuple[int, str, int | None, int | None, dict[str, Any]]] = []
         self._load()
 
     # ── memory, rebuilt from the index ───────────────────────────────────────
@@ -329,6 +334,32 @@ class Scanner:
         """The exposures whose measurements wait for the next cycle."""
         return frozenset(m[0] for m in self._measured)
 
+    def add_processing(
+        self, exposure_id: int, primary: str, size: int | None, mtime_ns: int | None, result: dict[str, Any]
+    ) -> None:
+        """Hand over what the external programs gave for an exposure whose file ``primary`` was
+        as said (``size``, ``mtime_ns``) when they were started. Like a measurement, it enters
+        the index at the next cycle, with a new sequence number, unless the file changed."""
+        self._processed.append((exposure_id, primary, size, mtime_ns, result))
+
+    def _apply_processing(self, db: sqlite3.Connection) -> None:
+        for exposure_id, primary, size, mtime_ns, result in self._processed:
+            done = db.execute(
+                "UPDATE exposures SET processing = ?, seq = ? WHERE id = ? AND root_id = ? "
+                "AND state = 'complete' AND primary_name IS ? AND size IS ? AND mtime_ns IS ?",
+                (
+                    json.dumps(result, allow_nan=False),
+                    self._seq + 1,
+                    exposure_id,
+                    self._root_id,
+                    primary,
+                    size,
+                    mtime_ns,
+                ),
+            )
+            if done.rowcount:
+                self._seq += 1
+
     def _apply_metrics(self, db: sqlite3.Connection) -> None:
         for exposure_id, primary, size, mtime_ns, metrics, meta in self._measured:
             mean = metrics.get("mean")
@@ -382,6 +413,7 @@ class Scanner:
                 if not self._recent_loaded:
                     self._load_recent(db, now)
                 self._apply_metrics(db)
+                self._apply_processing(db)
                 self._scan(db, now, report, walked)
                 self._poll(db, now, report)
                 self._verify(db, now, report)
@@ -406,6 +438,7 @@ class Scanner:
             self._full_at = now
         self._cold = False
         self._measured.clear()  # they are in the index now (a failed cycle keeps them for the next)
+        self._processed.clear()
         report.pending = len(self._pending)
         return report
 
@@ -999,11 +1032,11 @@ class Scanner:
                 continue
             primary = min(shown, key=lambda m: (primary_rank(m["role"]), m["name"]))
             complete = primary["state"] == "complete"
-            movie_arrived = (
-                self._remeasure_with_movie
-                and states.get("movie") == "complete"
-                and json.loads(old["members"]).get("movie") != "complete"
+            movie_completed = (
+                states.get("movie") == "complete" and json.loads(old["members"]).get("movie") != "complete"
             )
+            movie_arrived = self._remeasure_with_movie and movie_completed
+            movie_to_process = self._reprocess_with_movie and movie_completed
             when, source = old["time"], old["time_source"]
             if source in (None, "mtime") and primary["mtime_ns"] is not None:
                 when, source = primary["mtime_ns"] / _NS, "mtime"
@@ -1014,11 +1047,14 @@ class Scanner:
                 "UPDATE exposures SET metrics = CASE WHEN ? = 0 AND primary_name IS ? AND size IS ? "
                 "AND mtime_ns IS ? THEN metrics END, mean_counts = CASE WHEN ? = 0 AND primary_name IS ? "
                 "AND size IS ? AND mtime_ns IS ? THEN mean_counts END, "
+                "processing = CASE WHEN ? = 0 AND primary_name IS ? AND size IS ? AND mtime_ns IS ? "
+                "THEN processing END, "
                 "state = ?, primary_name = ?, primary_role = ?, size = ?, mtime_ns = ?, "
                 "completed_at = ?, verified = ?, note = ?, members = ?, time = ?, time_source = ?, seq = ? "
                 "WHERE id = ?",
                 (
                     *(int(movie_arrived), primary["name"], primary["size"], primary["mtime_ns"]) * 2,
+                    *(int(movie_to_process), primary["name"], primary["size"], primary["mtime_ns"]),
                     "complete" if complete else "incoming",
                     primary["name"],
                     primary["role"],

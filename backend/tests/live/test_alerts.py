@@ -465,7 +465,7 @@ _V2_ALERT_STATES = (
 )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6])
 def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
@@ -483,7 +483,12 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
         db.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
     index.close()
     old = sqlite3.connect(path)  # what the earlier versions looked like
-    old.executescript("ALTER TABLE watches DROP COLUMN quality;")  # 5 and before: no acceptance thresholds
+    old.executescript(  # 6 and before: no external programs
+        "DROP INDEX exposures_unprocessed; ALTER TABLE watches DROP COLUMN processing; "
+        "ALTER TABLE exposures DROP COLUMN processing;"
+    )
+    if version <= 5:  # no acceptance thresholds
+        old.executescript("ALTER TABLE watches DROP COLUMN quality;")
     if version <= 4:  # no calibration of the ice thickness
         old.executescript(
             "ALTER TABLE watches DROP COLUMN ice_i0; ALTER TABLE watches DROP COLUMN ice_mfp_nm;"
@@ -511,8 +516,10 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "6"
+        == "7"
     )
+    assert db.execute("SELECT processing FROM watches").fetchone()[0] == 0  # nothing runs unless asked for
+    assert db.execute("SELECT processing FROM exposures").fetchone()[0] is None
     row = db.execute(
         "SELECT user, logical, active, alerts, alerts_at, seen_at, ice_i0, ice_mfp_nm, quality FROM watches"
     ).fetchone()

@@ -47,6 +47,8 @@ from imagebio.live.quality import QualityRules
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
+from imagebio.tools.pipeline import Job, process
+from imagebio.tools.runner import clean_environment
 
 __all__ = ["CATEGORIES", "MAX_ACTIVE_WATCHES", "MAX_STOPPED_WATCHES", "LiveService", "WatchInfo"]
 
@@ -75,6 +77,10 @@ _MEASURE_BATCH: Final = 16  # candidates looked up at a time
 #: reference the others are compared to, which a single odd image therefore cannot set.
 _REFERENCE_TOP: Final = 0.02
 _REFERENCE_MIN: Final = 20  # measured images under which a session has no reference yet
+#: Seconds an exposure waits for its movie before the external programs run without it.
+MOVIE_WAIT_S: Final = 120.0
+_PROCESS_IDLE_S: Final = 2.0  # a worker with nothing to run looks again after this
+_RUN_PREFIX: Final = "run-"  # directories of the runs of the external programs (tools/pipeline.py)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +161,24 @@ class LiveService:
         self._channels = {c.name: c for c in settings.alert_channels}
         self._tested: dict[str, float] = {}  # user -> their last test notice
         self._seen: dict[int, float] = {}  # watch -> last time its user was allowed to look at it
+        #: The external programs the administrator declared (tools/), None: none.
+        self._processing = settings.processing
+        self._aligns_movies = settings.processing is not None and settings.processing.motion is not None
+        self._work = (
+            settings.processing.work_dir if settings.processing is not None else None
+        ) or settings.live_state_dir / "work"
+        secret = settings.smtp.password_env if settings.smtp is not None else None
+        self._program_env = clean_environment({secret} if secret else ())
+        #: Results waiting for the scanner of their directory, which alone numbers changes.
+        self._results: dict[int, list[tuple[int, str, int | None, int | None, dict[str, Any]]]] = {}
+        #: (directory, exposure) being run, or run and not yet recorded: not to be picked again.
+        self._running: set[tuple[int, int]] = set()
+        self._handed: dict[int, set[int]] = {}  # given to a scanner whose cycle has not succeeded yet
+        self._turn_user = ""  # whose exposure ran last: the next turn is somebody else's
+        self._turn_root: dict[str, int] = {}  # and, for each user, in which of their directories
+        self._ran = {"ok": 0, "failed": 0}
+        self._workers: list[threading.Thread] = []
+        self._stop_processing = threading.Event()
 
     # ── index and scanners ───────────────────────────────────────────────────
     @property
@@ -180,16 +204,31 @@ class LiveService:
         if (self._settings.live_state_dir / "live.sqlite").is_file():
             self._sync_scanners()
             self._purge_orphans()
+        if self._processing is not None and self._settings.live_scan:
+            self._clear_work()  # what a server that was killed left behind
+            for n in range(self._processing.slots):
+                worker = threading.Thread(
+                    target=self._process_until,
+                    args=(self._stop_processing,),
+                    name=f"live-programs-{n}",
+                    daemon=True,
+                )
+                worker.start()
+                self._workers.append(worker)
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
             threads = list(self._threads.values())
             self._threads.clear()
+        self._stop_processing.set()  # a program that runs is killed, with what it started
         for _, stop in threads:
             stop.set()
         for thread, _ in threads:
             thread.join(timeout=30)
+        for worker in self._workers:
+            worker.join(timeout=30)
+        self._workers.clear()
         with self._lock:
             if self._index_value is not None:
                 self._index_value.close()
@@ -254,7 +293,9 @@ class LiveService:
                 self._registry,
                 self._scan_settings,
                 remeasure_with_movie=self._settings.live_drift,
+                reprocess_with_movie=self._aligns_movies,
             )
+            self._new_scanner(root_id)
         except Exception:
             log.exception("cannot start the live scanner of root %s", root_id)
             return
@@ -263,7 +304,9 @@ class LiveService:
             try:
                 started = time.perf_counter()
                 now = self.clock()
+                handed = self._hand_results(scanner, root_id)
                 report = scanner.cycle(now)
+                self._recorded(root_id, handed, report)
                 self._pending[root_id] = report.pending
                 self.check_alerts(root_id, now)
                 if report.error is None:
@@ -288,9 +331,12 @@ class LiveService:
                     self._registry,
                     self._scan_settings,
                     remeasure_with_movie=self._settings.live_drift,
+                    reprocess_with_movie=self._aligns_movies,
                 )
             when = self.clock() if now is None else now
+            handed = self._hand_results(scanner, root_id)
             reports[root_id] = scanner.cycle(when)
+            self._recorded(root_id, handed, reports[root_id])
             self._pending[root_id] = reports[root_id].pending
             self.check_alerts(root_id, when)
             if reports[root_id].error is None:
@@ -425,6 +471,209 @@ class LiveService:
                 break
         return done
 
+    # ── external programs on the exposures ───────────────────────────────────
+    def _clear_work(self) -> None:
+        """Remove the directories of runs that never ended (the server was killed)."""
+        if self._work.is_dir():
+            for entry in self._work.iterdir():
+                if entry.name.startswith(_RUN_PREFIX) and entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+
+    def _hand_results(self, scanner: Scanner, root_id: int) -> list[int]:
+        """Give the scanner of a directory what the programs gave for its exposures."""
+        with self._lock:
+            results = self._results.pop(root_id, [])
+        for result in results:
+            scanner.add_processing(*result)
+        return [result[0] for result in results]
+
+    def _recorded(self, root_id: int, handed: list[int], report: CycleReport) -> None:
+        """After a cycle: what was handed to the scanner is in the index, unless the cycle
+        failed (the scanner then keeps it for its next one)."""
+        with self._lock:
+            waiting = self._handed.setdefault(root_id, set())
+            waiting.update(handed)
+            if report.error is None:
+                self._running.difference_update((root_id, exposure) for exposure in waiting)
+                waiting.clear()
+
+    def _new_scanner(self, root_id: int) -> None:
+        """A scanner starts for a directory: what the one before it held and never recorded is
+        lost with it, and those exposures may be run again."""
+        with self._lock:
+            for exposure in self._handed.pop(root_id, ()):
+                self._running.discard((root_id, exposure))
+
+    def _unprocessed(self, root_id: int, now: float, skip: set[int]) -> sqlite3.Row | None:
+        """The newest exposure of a directory the programs have not run on: among those that
+        arrived while it was watched (a session found already written is not gone through).
+        With a motion step, an exposure waits for its movie, ``MOVIE_WAIT_S`` at most."""
+        marks = ",".join("?" * len(_ACQUIRED))
+        movie = (
+            "AND (e.primary_role = 'movie' OR e.completed_at <= ? OR EXISTS (SELECT 1 FROM files f "
+            "WHERE f.exposure_id = e.id AND f.role = 'movie' AND f.state = 'complete')) "
+            if self._aligns_movies
+            else "AND ? IS NOT NULL "
+        )
+        rows = (
+            self.index.connection()
+            .execute(
+                "SELECT e.id, e.primary_name, e.primary_role, e.size, e.mtime_ns, e.meta, d.rel "  # noqa: S608
+                "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
+                "WHERE e.root_id = ? AND e.processing IS NULL AND e.arrived = 1 AND e.state = 'complete' "
+                f"AND e.category IN ({marks}) AND e.primary_role IN ('image', 'movie') "
+                "AND e.time IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM files f WHERE f.exposure_id = e.id AND f.role = 'movie' "
+                f"AND f.state = 'pending') {movie}ORDER BY e.time DESC LIMIT ?",
+                (root_id, *_ACQUIRED, now - MOVIE_WAIT_S, len(skip) + 1),
+            )
+            .fetchall()
+        )
+        return next((row for row in rows if row["id"] not in skip), None)
+
+    def _next_job(self, now: float) -> tuple[int, Path, sqlite3.Row] | None:
+        """The exposure to run the programs on next. Users take turns, and each user's
+        directories take turns within theirs: somebody who follows eight sessions, or a session
+        with thousands of movies waiting, does not keep the programs from anybody else."""
+        if self._closed or not (self._settings.live_state_dir / "live.sqlite").is_file():
+            return None
+        with self._lock:
+            rows = (
+                self.index.connection()
+                .execute(
+                    "SELECT DISTINCT w.user, w.root_id, r.path FROM watches w "
+                    "JOIN roots r ON r.id = w.root_id "
+                    "WHERE w.active = 1 AND w.processing = 1 ORDER BY w.user, w.root_id"
+                )
+                .fetchall()
+            )
+            wanted = {row["root_id"] for row in rows}
+            for root_id in [r for r in self._results if r not in wanted]:  # nobody asks any more
+                del self._results[root_id]
+            self._running = {key for key in self._running if key[0] in wanted}
+            by_user: dict[str, list[tuple[int, Path]]] = {}
+            for row in rows:
+                by_user.setdefault(row["user"], []).append((row["root_id"], Path(row["path"])))
+            users = sorted(by_user)
+            for user in [u for u in users if u > self._turn_user] + [
+                u for u in users if u <= self._turn_user
+            ]:
+                last = self._turn_root.get(user, 0)
+                roots = by_user[user]
+                for root_id, path in [r for r in roots if r[0] > last] + [r for r in roots if r[0] <= last]:
+                    skip = {exposure for root, exposure in self._running if root == root_id}
+                    row = self._unprocessed(root_id, now, skip)
+                    if row is not None:
+                        self._turn_user, self._turn_root[user] = user, root_id
+                        self._running.add((root_id, row["id"]))
+                        return root_id, path, row
+        return None
+
+    def _job_of(self, root: Path, row: sqlite3.Row) -> Job:
+        """What the programs need to know of an exposure, from what its acquisition says."""
+        epu = json.loads(row["meta"]).get("epu") or {}
+        directory = root.joinpath(*[part for part in row["rel"].split("/") if part])
+        primary = directory / row["primary_name"]
+        movie: Path | None = primary if row["primary_role"] == "movie" else None
+        if movie is None:
+            found = (
+                self.index.connection()
+                .execute(
+                    "SELECT name FROM files WHERE exposure_id = ? AND role = 'movie' AND state = 'complete' "
+                    "ORDER BY name LIMIT 1",
+                    (row["id"],),
+                )
+                .fetchone()
+            )
+            movie = directory / found["name"] if found is not None else None
+
+        def positive(value: Any) -> float | None:
+            ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+            return float(value) if ok and value > 0 else None
+
+        apix = positive(epu.get("pixel_size"))
+        if apix is None:  # no metadata file: what the image itself says
+            try:
+                x = self._planes.info(primary)[0].calibration.x
+                apix = positive(x.value) if x.known and x.unit == "Å" else None
+            except (ImageBioError, OSError, ValueError):
+                apix = None
+        kv = positive(epu.get("voltage"))
+        frames = positive(epu.get("fractions"))
+        dose = positive(epu.get("dose"))
+        return Job(
+            movie=movie,
+            image=primary if row["primary_role"] == "image" else None,
+            apix=apix,
+            kv=kv if kv is not None and 20 <= kv <= 1500 else self._settings.kv,
+            cs_mm=self._settings.cs_mm,
+            amplitude=self._settings.amplitude_contrast,
+            dose=dose / frames if dose is not None and frames is not None else None,
+            frames=int(frames) if frames is not None else None,
+        )
+
+    def process_once(self, now: float | None = None, stop: threading.Event | None = None) -> bool:
+        """Run the declared programs on one exposure, in the calling thread; False when none
+        waits. The result enters the index at the next cycle of the scanner of its directory."""
+        if self._processing is None:
+            return False
+        picked = self._next_job(self.clock() if now is None else now)
+        if picked is None:
+            return False
+        root_id, root, row = picked
+        try:
+            result = process(
+                self._job_of(root, row), self._processing, self._work, stop=stop, env=self._program_env
+            )
+        except Exception:  # recorded, so that the exposure is not tried again for ever
+            log.exception("the external programs could not be run on an exposure of root %s", root_id)
+            result = {"error": "the programs could not be run"}
+        with self._lock:
+            if result is None:  # the server is stopping: the run does not count
+                self._running.discard((root_id, row["id"]))
+                return False
+            failed = "error" in result or any(isinstance(v, dict) and "error" in v for v in result.values())
+            self._ran["failed" if failed else "ok"] += 1
+            self._results.setdefault(root_id, []).append(
+                (row["id"], row["primary_name"], row["size"], row["mtime_ns"], result)
+            )
+        return True
+
+    def _process_until(self, stop: threading.Event) -> None:
+        wait = 0.0
+        while not stop.wait(wait):
+            try:
+                wait = 0.0 if self.process_once(stop=stop) else _PROCESS_IDLE_S
+            except Exception:
+                log.exception("the worker of the external programs failed")
+                wait = _PROCESS_IDLE_S
+
+    def _processing_of(self, db: sqlite3.Connection, watch: WatchInfo) -> dict[str, Any]:
+        """Whether the programs are declared, asked for by this watch, and how far they are."""
+        declared = self._processing
+        steps = [name for name in ("motion", "ctf") if declared is not None and getattr(declared, name)]
+        on = bool(db.execute("SELECT processing FROM watches WHERE id = ?", (watch.id,)).fetchone()[0])
+        done = db.execute(
+            "SELECT COUNT(*) FROM exposures WHERE root_id = ? AND processing IS NOT NULL", (watch.root_id,)
+        ).fetchone()[0]
+        waiting = 0
+        if on and declared is not None:
+            marks = ",".join("?" * len(_ACQUIRED))
+            waiting = db.execute(
+                "SELECT COUNT(*) FROM exposures WHERE root_id = ? AND processing IS NULL AND arrived = 1 "  # noqa: S608
+                f"AND state = 'complete' AND category IN ({marks})",
+                (watch.root_id, *_ACQUIRED),
+            ).fetchone()[0]
+        return {"available": declared is not None, "steps": steps, "on": on, "done": done, "waiting": waiting}
+
+    def set_processing(self, watch: WatchInfo, on: bool) -> dict[str, Any]:
+        """Ask for, or no longer ask for, the external programs on the exposures of a watch."""
+        if on and self._processing is None:
+            raise InvalidRequestError("no processing program is declared on this server")
+        with self.index.write() as db:
+            db.execute("UPDATE watches SET processing = ? WHERE id = ?", (int(on), watch.id))
+        return self._processing_of(self.index.connection(), watch)
+
     def metrics(self) -> dict[str, Any]:
         """Figures for a monitoring system: no path, no user. Empty when the Live mode was
         never used (the index is not created for the occasion)."""
@@ -454,11 +703,14 @@ class LiveService:
             for row in db.execute("SELECT id, cycle_at, cycle_ms, error FROM roots ORDER BY id")
         ]
         thumbs = db.execute("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM thumbs").fetchone()[0]
+        with self._lock:
+            programs = {**self._ran, "running": len(self._running)} if self._processing is not None else None
         return {
             "watches": states,
             "roots": roots,
             "index_bytes": index_file.stat().st_size,
             "thumb_bytes": thumbs,
+            "programs": programs,
         }
 
     # ── watches ──────────────────────────────────────────────────────────────
@@ -624,6 +876,7 @@ class LiveService:
             "alerts": [c for c, state in self._alert_states(db, watch.id).items() if state.told],
             "ice": self._ice(db, watch),
             "quality": self.quality(watch),
+            "processing": self._processing_of(db, watch),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
@@ -728,7 +981,7 @@ class LiveService:
         rows = db.execute(
             "SELECT e.id, e.seq, e.name, e.category, e.state, e.primary_name, e.primary_role, "  # noqa: S608
             "e.size, e.time, e.time_source, e.first_seen, e.completed_at, e.verified, e.note, "
-            "e.members, e.meta, e.metrics, d.rel "
+            "e.members, e.meta, e.metrics, e.processing, d.rel "
             "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
             f"WHERE e.root_id = ? AND e.seq > ? AND e.primary_name IS NOT NULL AND e.category IN ({marks}) "
             "ORDER BY e.seq LIMIT ?",
@@ -755,6 +1008,7 @@ class LiveService:
                 "members": json.loads(row["members"]),
                 "meta": json.loads(row["meta"]),
                 "metrics": json.loads(row["metrics"]) if row["metrics"] is not None else None,
+                "processing": json.loads(row["processing"]) if row["processing"] is not None else None,
             }
             for row in rows
         ]

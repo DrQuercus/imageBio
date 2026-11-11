@@ -50,7 +50,7 @@ def hold_state_dir(directory: Path, *, alone: bool = False) -> IO[str] | None:
     return handle
 
 
-SCHEMA_VERSION: Final = 6
+SCHEMA_VERSION: Final = 7
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
 _BUSY_TIMEOUT_S = 30.0
 
@@ -64,6 +64,10 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     3: ("ALTER TABLE exposures ADD COLUMN metrics TEXT", "ALTER TABLE exposures ADD COLUMN mean_counts REAL"),
     4: ("ALTER TABLE watches ADD COLUMN ice_i0 REAL", "ALTER TABLE watches ADD COLUMN ice_mfp_nm REAL"),
     5: ("ALTER TABLE watches ADD COLUMN quality TEXT",),
+    6: (
+        "ALTER TABLE watches ADD COLUMN processing INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE exposures ADD COLUMN processing TEXT",
+    ),
 }
 
 _SCHEMA: Final = """
@@ -94,6 +98,7 @@ CREATE TABLE IF NOT EXISTS watches (
     ice_i0     REAL,                     -- mean counts of an empty hole, given by the user; NULL: not known
     ice_mfp_nm REAL,                     -- mean free path for the ice thickness, nm; NULL: the server's
     quality    TEXT,                     -- JSON acceptance thresholds (live/quality.py), NULL: none
+    processing INTEGER NOT NULL DEFAULT 0,  -- 1: its user asked for the external programs
     UNIQUE (user, logical)
 );
 
@@ -141,6 +146,7 @@ CREATE TABLE IF NOT EXISTS exposures (
     seq          INTEGER NOT NULL,
     metrics      TEXT,                   -- JSON measured on the pixels (live/metrics.py); NULL: not yet
     mean_counts  REAL,                   -- the mean of the metrics, to compare the images of a session
+    processing   TEXT,                   -- JSON from the external programs (tools/pipeline.py); NULL: not run
     UNIQUE (dir_id, name)
 );
 CREATE INDEX IF NOT EXISTS exposures_seq ON exposures (root_id, seq);
@@ -148,6 +154,8 @@ CREATE INDEX IF NOT EXISTS exposures_time ON exposures (root_id, time);
 CREATE INDEX IF NOT EXISTS exposures_unmeasured ON exposures (root_id, time)
     WHERE metrics IS NULL AND arrived = 1;
 CREATE INDEX IF NOT EXISTS exposures_mean ON exposures (root_id, mean_counts) WHERE mean_counts IS NOT NULL;
+CREATE INDEX IF NOT EXISTS exposures_unprocessed ON exposures (root_id, time)
+    WHERE processing IS NULL AND arrived = 1;
 
 CREATE TABLE IF NOT EXISTS files (
     id           INTEGER PRIMARY KEY,

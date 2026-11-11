@@ -152,6 +152,17 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         rules = AlertRules(names, no_image, disk_free, rate_drop)
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
 
+    @app.put("/api/live/watches/{watch_id}/processing")
+    def live_watch_processing_set(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        on: bool = Query(...),
+    ) -> Response:
+        """Ask for, or stop asking for, the programs the administrator declared (motion
+        correction, CTF) on the exposures that arrive in this session."""
+        _only(request, frozenset({"on"}))
+        return _json(live.set_processing(own_watch(request, watch_id), on))
+
     @app.put("/api/live/watches/{watch_id}/quality")
     def live_watch_quality_set(
         request: Request,
