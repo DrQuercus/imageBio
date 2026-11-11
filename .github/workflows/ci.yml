@@ -52,7 +52,9 @@ jobs:
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium
+      # --with-deps fetches system packages from Ubuntu's mirrors, which the runners cannot always
+      # resolve; what was missing each time was fonts, so the browser alone is enough to go on
+      - run: timeout 180 npx playwright install --with-deps chromium || npx playwright install chromium
         working-directory: frontend
       # the end-to-end tests start the real backend, which serves the build made above
       - run: npm run e2e
