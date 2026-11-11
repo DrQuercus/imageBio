@@ -47,12 +47,18 @@ def test_hot_pixels_and_holes_in_the_data_do_not_move_the_mean() -> None:
     assert robust_mean_std(np.full((8, 8), np.nan, np.float32)) is None
 
 
-def test_a_large_image_is_trimmed_from_a_subset_and_averaged_in_full() -> None:
+def test_a_large_image_is_measured_on_an_evenly_spaced_subset() -> None:
     rng = np.random.default_rng(3)
-    plane = rng.normal(100, 10, (1500, 1500)).astype(np.float32)  # more pixels than the subset holds
+    plane = rng.normal(100, 10, (2500, 3000)).astype(
+        np.float32
+    )  # 7.5 million pixels: one out of two each way
     mean, std = robust_mean_std(plane)  # type: ignore[misc]
-    kept = trimmed(plane)
-    assert mean == pytest.approx(kept.mean(), abs=0.02) and std == pytest.approx(kept.std(), abs=0.05)
+    subset = trimmed(plane[::2, ::2])
+    assert mean == pytest.approx(subset.mean(), rel=1e-6) and std == pytest.approx(subset.std(), rel=1e-6)
+    whole = trimmed(plane)  # and that says the same as all the pixels, to a thousandth of the spread
+    assert mean == pytest.approx(whole.mean(), abs=0.03) and std == pytest.approx(whole.std(), abs=0.03)
+    just_under = rng.normal(100, 10, (2048, 2048)).astype(np.float32)  # four million: all of them
+    assert robust_mean_std(just_under)[0] == pytest.approx(trimmed(just_under).mean(), rel=1e-6)  # type: ignore[index]
 
 
 def naive_ice_ratio(plane: np.ndarray, apix: float) -> float:
@@ -111,14 +117,35 @@ def test_the_ice_ring_ratio_is_not_given_when_it_cannot_be_measured() -> None:
     assert ice_ring_ratio(noise, 1.6) is None  # too coarse a pixel: no fine side to compare to
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         assert ice_ring_ratio(noise, bad) is None
-    assert ice_ring_ratio(noise[:40, :40], 1.0) is None  # too small a field
-    assert ice_ring_ratio(np.zeros((256, 256), np.float32), 1.0) is None  # nothing to compare
+    assert ice_ring_ratio(noise[:511, :], 1.0) is None  # too small a field
+    assert ice_ring_ratio(np.zeros((512, 512), np.float32), 1.0) is None  # nothing to compare
     holes = noise.copy()
     holes[::7, ::5] = np.nan
     assert ice_ring_ratio(holes, 1.0) == pytest.approx(1.0, abs=0.2)  # finite all the same
     assert measure_plane(noise, None).keys() == {"mean", "std"}  # no pixel size, no ring
     assert measure_plane(noise, 1.0).keys() == {"mean", "std", "ice_ring"}
     assert measure_plane(np.full((64, 64), np.nan, np.float32), 1.0) == {}
+
+
+def test_plain_noise_is_never_called_crystalline_ice() -> None:
+    """Regression: on a 64-pixel image the bands held a hundred points of the spectrum, the
+    ratio wandered by 20 %, and one image of plain noise in five was above the 1.2 at which the
+    interface marks crystalline ice. Small images get no ratio; the others stay close to 1."""
+    rng = np.random.default_rng(9)
+    for side in (64, 256, 511):
+        assert ice_ring_ratio(rng.normal(0, 1, (side, side)).astype(np.float32), 0.83) is None
+    for apix in (0.83, 0.5, 1.3):  # the smaller the pixel, the fewer points in the bands
+        ratios = np.array(
+            [ice_ring_ratio(rng.normal(30, 3, (512, 512)).astype(np.float32), apix) for _ in range(60)],
+            dtype=np.float64,
+        )
+        assert ratios.min() > 0.83 and ratios.max() < 1.17, apix
+        assert ratios.mean() == pytest.approx(1.0, abs=0.02)
+    field = np.array(  # what a real image gives: a field of 2048 pixels, counts of a few electrons
+        [ice_ring_ratio(rng.poisson(2, (2048, 2048)).astype(np.uint16), 0.83) for _ in range(4)],
+        dtype=np.float64,
+    )
+    assert field.min() > 0.98 and field.max() < 1.02
 
 
 def test_a_large_image_is_measured_on_its_central_field() -> None:
@@ -139,7 +166,7 @@ def planes():
 
 def test_an_image_file_is_measured_with_its_own_pixel_size(tmp_path: Path, planes: PlaneService) -> None:
     rng = np.random.default_rng(7)
-    image = (rng.normal(30, 2, (256, 256)) + 0.5 * rings((256, 256), 1.1, 3.67, rng)).astype(np.float32)
+    image = (rng.normal(30, 2, (512, 512)) + 0.5 * rings((512, 512), 1.1, 3.67, rng)).astype(np.float32)
     (tmp_path / "a.mrc").write_bytes(mrc_bytes(image, 1.1))
     measured = measure(planes, tmp_path / "a.mrc", "image", apix=9.9)  # the header knows better
     assert measured.keys() == {"mean", "std", "ice_ring"}
@@ -162,7 +189,7 @@ def test_an_image_file_is_measured_with_its_own_pixel_size(tmp_path: Path, plane
 
 def test_a_movie_is_measured_on_its_first_frames_and_says_so(tmp_path: Path, planes: PlaneService) -> None:
     rng = np.random.default_rng(8)
-    movie = rng.poisson(3, (10, 128, 128)).astype(np.uint16)
+    movie = rng.poisson(3, (10, 512, 512)).astype(np.uint16)
     movie[5:] += 50  # frames that are not read must not count
     (tmp_path / "m.mrc").write_bytes(mrc_bytes(movie, 0.9, stack=True))
     measured = measure(planes, tmp_path / "m.mrc", "movie")

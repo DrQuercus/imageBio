@@ -196,6 +196,21 @@ export interface LiveItem {
     image?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
     movie?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
   };
+  /** Measured on the pixels, a moment after the image is complete. null: not measured (yet);
+   *  empty: the image could not be read. */
+  metrics: ImageMetrics | null;
+}
+
+export interface ImageMetrics {
+  /** Counts per pixel over the exposure, hot pixels left out. */
+  mean?: number;
+  std?: number;
+  /** Power where crystalline ice diffracts (3.4-3.95 Å) over the power on both sides: about 1
+   *  on vitreous ice. Absent when the pixel is too coarse to tell. */
+  ice_ring?: number;
+  /** True for a movie without an integrated image: the mean is scaled from its first frames. */
+  estimated?: boolean;
+  frames?: number;
 }
 
 export interface LivePage {
@@ -229,6 +244,9 @@ export interface LiveSummary {
   disk: { total: number; free: number; percent: number | null } | null;
   /** Conditions an alert is firing for at the moment. */
   alerts: AlertCondition[];
+  /** Images measured so far, and the mean counts of the brightest of them (the thinnest ice of
+   *  the session, or none at all): what the others are compared to. null: too few yet. */
+  ice: { measured: number; reference: number | null };
 }
 
 export type AlertCondition = "no_image" | "disk" | "rate_drop" | "scanner";

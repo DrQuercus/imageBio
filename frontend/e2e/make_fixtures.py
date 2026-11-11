@@ -64,6 +64,17 @@ def main(out: Path) -> None:
     )
     write_session(demo / "epu_session")
     rng = np.random.default_rng(42)
+
+    # outside the data roots: an image of crystalline ice, which a Live test drops into the session.
+    # Plane waves of period 3.67 Å in many directions, at the pixel size of the session's images.
+    (out / "spare").mkdir(exist_ok=True)
+    yy, xx = np.mgrid[0:512, 0:512].astype(np.float64)
+    icy = rng.normal(30, 3, (512, 512))
+    for angle in rng.uniform(0, np.pi, 24):
+        k = 2 * np.pi * 0.83 / 3.67
+        icy += 0.6 * np.cos(k * (xx * np.cos(angle) + yy * np.sin(angle)) + rng.uniform(0, 2 * np.pi))
+    write_mrc(out / "spare" / "icy.mrc", icy.astype(np.float32), 0.83)
+
     y, x = np.mgrid[0:48, 0:64]
 
     # value = 100 * y + x, 1.5 Å per pixel

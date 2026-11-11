@@ -33,27 +33,33 @@ ICE_BAND: Final = (3.40, 3.95)
 ICE_SIDES: Final = ((3.05, 3.30), (4.10, 4.60))
 #: Share of the pixels left out at each end before the mean is taken (hot and dead pixels).
 _TRIM_PERCENT: Final = 0.1
-_MAX_SAMPLES: Final = 2**20  # pixels the trimming thresholds are estimated from
+_MAX_SAMPLES: Final = 2**22  # pixels of a large image that mean and spread are taken from
 _FIELD: Final = 2048  # the spectrum is taken on a central field of at most this side
+#: Under this side the bands hold too few points of the spectrum for the ratio to mean anything.
+#: Measured on plain noise at 0.83 Å per pixel, its spread is 20 % on a 64-pixel image (one in
+#: five would be called crystalline), 7 % at 256 pixels, 3 % at 512 and 0.5 % on the 2048-pixel
+#: field of a real micrograph.
+_MIN_FIELD: Final = 512
 _TILE: Final = 512
 _MOVIE_FRAMES: Final = 4  # frames of a movie that are averaged, as for its thumbnail
 
 
 def robust_mean_std(plane: npt.NDArray[Any]) -> tuple[float, float] | None:
     """Mean and standard deviation of the finite pixels that lie between the 0.1th and the
-    99.9th percentile (bounds included): a few hot pixels do not move them. The percentiles are
-    estimated on an evenly spaced subset of a large image. None when no pixel is finite."""
+    99.9th percentile (bounds included): a few hot pixels do not move them. A large image is
+    measured on an evenly spaced subset of its pixels (one out of ``n`` along both axes, about
+    four million of them): the mean of that many pixels is known to better than a thousandth
+    of their spread. None when no pixel is finite."""
     data = np.asarray(plane)
-    if data.dtype.kind != "f":
-        data = data.astype(np.float32)
-    flat = data.reshape(-1)
-    step = max(1, math.ceil(flat.size / _MAX_SAMPLES))
-    sample = flat[::step]
-    sample = sample[np.isfinite(sample)]
-    if sample.size == 0:
+    if data.ndim == 2:
+        step = max(1, math.ceil(math.sqrt(data.size / _MAX_SAMPLES)))
+        data = data[::step, ::step]
+    values = np.asarray(data, dtype=np.float64 if data.dtype.itemsize > 4 else np.float32).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
         return None
-    low, high = (float(v) for v in np.percentile(sample, (_TRIM_PERCENT, 100 - _TRIM_PERCENT)))
-    kept = flat[(flat >= low) & (flat <= high)]  # comparisons are false for NaN
+    low, high = (float(v) for v in np.percentile(values, (_TRIM_PERCENT, 100 - _TRIM_PERCENT)))
+    kept = values[(values >= low) & (values <= high)]
     if kept.size == 0:
         return None
     return float(kept.mean(dtype=np.float64)), float(kept.std(dtype=np.float64))
@@ -62,14 +68,15 @@ def robust_mean_std(plane: npt.NDArray[Any]) -> tuple[float, float] | None:
 def ice_ring_ratio(plane: npt.NDArray[Any], apix: float) -> float | None:
     """Mean power in the ice band over the mean power of the two bands around it, from the
     averaged periodogram of the central field. None when the pixel is too coarse for the
-    fine side of the band to exist (above about 1.5 Å), or when there is nothing to compare."""
+    fine side of the band to exist (above about 1.5 Å), when the image is too small for the
+    ratio to mean anything, or when there is nothing to compare."""
     if not (math.isfinite(apix) and apix > 0) or 2 * apix > ICE_SIDES[0][0]:
         return None
     h, w = plane.shape
     side_y, side_x = min(h, _FIELD), min(w, _FIELD)
     y0, x0 = (h - side_y) // 2, (w - side_x) // 2
     field = plane[y0 : y0 + side_y, x0 : x0 + side_x]
-    if min(field.shape) < 64:
+    if min(field.shape) < _MIN_FIELD:
         return None
     power, _ = power_spectrum(field, tile=_TILE)
     frequency, profile = radial_profile(power)

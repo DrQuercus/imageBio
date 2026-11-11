@@ -13,10 +13,11 @@ const tileNames = (page: Page) =>
   page.getByTestId("tile").evaluateAll((tiles) => tiles.map((t) => (t as HTMLElement).dataset.name ?? ""));
 
 /** Write an exposure into the session as a microscope would: the image, then its metadata.
- *  `cut` keeps only that share of the image file (a write that stopped in the middle). */
-function writeExposure(name: string, cut = 1): { finish: () => void } {
+ *  `cut` keeps only that share of the image file (a write that stopped in the middle);
+ *  `pixels`: the image file to use instead of a copy of one of the session. */
+function writeExposure(name: string, cut = 1, pixels?: string): { finish: () => void } {
   const source = fs.readdirSync(DATA).find((f) => /_\d{6}\.mrc$/.test(f))!;
-  const image = fs.readFileSync(path.join(DATA, source));
+  const image = fs.readFileSync(pixels ?? path.join(DATA, source));
   const xml = fs
     .readFileSync(path.join(DATA, source.replace(".mrc", ".xml")), "utf8")
     .replace(/<acquisitionDateTime>[^<]*</, `<acquisitionDateTime>${new Date().toISOString()}<`);
@@ -201,4 +202,29 @@ test("alerts are set per session, kept, and can be tried", async ({ page }) => {
   } finally {
     await new Promise((resolve) => receiver.close(resolve));
   }
+});
+
+test("images are measured: ice against the session, and a mark on crystalline ice", async ({ page }) => {
+  await page.goto(LINK);
+  // the images of the session are measured a few at each pass of the scanner
+  await expect(page.getByTestId("stat-ice")).toHaveText(/^-?\d\.\d\d$/, { timeout: 60_000 });
+  await expect(page.getByTestId("stat-ice-sub")).toContainText(/sur \d+ images · anneau 0 %/);
+  const newest = page.getByTestId("tile").first();
+  await expect(newest).toHaveAttribute("title", /Coups moyens : \d+/);
+  await expect(newest).toHaveAttribute("title", /Glace relative : -?\d\.\d\d/);
+  await expect(newest).not.toHaveAttribute("title", /Anneau de glace/); // 64 pixels: too small an image to tell
+  await expect(newest).toContainText(/glace -?\d\.\d\d/);
+  await expect(page.locator('[data-testid="tile"][data-flags~="ice_ring"]')).toHaveCount(0);
+
+  // an image of crystalline ice arrives: it is marked as soon as it is measured
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const name = `FoilHole_29999998_Data_39999998_998_${stamp}`;
+  writeExposure(name, 1, path.resolve(".e2e-data/spare/icy.mrc")).finish();
+  const tile = page.locator(`[data-testid="tile"][data-name="${name}"]`);
+  await expect(tile).toHaveAttribute("data-state", "complete", { timeout: 20_000 });
+  await expect(tile).toHaveAttribute("data-flags", "ice_ring", { timeout: 20_000 });
+  await expect(tile).toContainText("glace cristalline");
+  await expect(tile).toHaveAttribute("title", /Anneau de glace : ([2-9]|\d\d)\.\d\d/); // far above 1
+  await expect(page.getByTestId("stat-ice-sub")).toContainText(/ · anneau [1-9]\d* %/);
+  await expect(page.getByTestId("error")).toHaveCount(0);
 });

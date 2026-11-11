@@ -4,6 +4,8 @@ import { formatAgo, formatBytes, freshness } from "./store";
 
 interface Props {
   summary: LiveSummary;
+  /** Relative ice of the last measured images (store.ts, iceSummary); null: nothing to say yet. */
+  ice: { median: number; ring: number; count: number } | null;
   /** performance.now() when the summary arrived: the server's clock is carried forward from it. */
   receivedAt: number;
 }
@@ -12,7 +14,7 @@ const clock = (seconds: number) =>
   new Date(seconds * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 /** The session at a glance: how many images, how fast, since when nothing came, disk left. */
-export function StatsBar({ summary, receivedAt }: Props) {
+export function StatsBar({ summary, ice, receivedAt }: Props) {
   const [, tick] = useState(0);
   useEffect(() => {
     const id = window.setInterval(() => tick((n) => n + 1), 1000);
@@ -53,6 +55,17 @@ export function StatsBar({ summary, receivedAt }: Props) {
           {since === null ? "—" : formatAgo(since)}
         </span>
         <span className="stat-sub">{summary.last ? clock(summary.last.time) : "aucune"}</span>
+      </div>
+      <div className="stat" title="Glace traversée, par rapport aux images les plus claires de la session : ln(I₀/I) sur les coups moyens, médiane des dernières images mesurées. À multiplier par le libre parcours moyen du microscope (300 à 400 nm) pour une épaisseur. « Anneau » : part de ces images dont l'anneau de glace cristalline dépasse 1,2.">
+        <span className="stat-label">Glace</span>
+        <span className="stat-value small" data-testid="stat-ice">{ice ? ice.median.toFixed(2) : "—"}</span>
+        <span className="stat-sub" data-testid="stat-ice-sub">
+          {ice
+            ? `sur ${ice.count} image${ice.count > 1 ? "s" : ""} · anneau ${Math.round(ice.ring * 100)} %`
+            : summary.ice.measured
+              ? `${summary.ice.measured} image${summary.ice.measured > 1 ? "s" : ""} mesurée${summary.ice.measured > 1 ? "s" : ""} : il en faut 20`
+              : "pas encore mesurée"}
+        </span>
       </div>
       <div className={`stat${summary.alerts.includes("disk") ? " alerting" : ""}`}>
         <span className="stat-label">Disque</span>

@@ -806,7 +806,7 @@ def old_session(world: World, directory: str, count: int, *, size: int = 16) -> 
 
 
 def test_images_are_measured_as_they_arrive(world: World) -> None:
-    sim = sim_in(world, "cryo/alice_session", 40, pause_probability=0.0)
+    sim = sim_in(world, "cryo/alice_session", 40, pause_probability=0.0, shape=(512, 512), frames=0)
     watch = world.watch("cryo/alice_session", ALICE)
     world.run([sim], 240)
     sim.stop()
@@ -820,7 +820,7 @@ def test_images_are_measured_as_they_arrive(world: World) -> None:
         assert metrics.keys() == {"mean", "std", "ice_ring"}, item["name"]
         assert metrics["mean"] == pytest.approx(pixels.mean(), rel=5e-3)  # no hot pixel here: the plain mean
         assert metrics["std"] == pytest.approx(pixels.std(), rel=0.05)
-        assert 0.3 < metrics["ice_ring"] < 3
+        assert 0.85 < metrics["ice_ring"] < 1.15  # no crystalline ice in this microscope
 
     # the session's reference: the brightest images, the top fiftieth left out
     ice = world.summary(watch, ALICE)["ice"]
@@ -888,7 +888,7 @@ def test_of_a_session_found_already_written_only_the_last_images_are_measured(
     assert {n for n, m in done.items() if m is not None} == set(names[-20:])
     for name in names[-20:]:
         assert done[name]["mean"] == pytest.approx(float(images[name].mean()), rel=0.02)
-        assert "ice_ring" not in done[name]  # 16 pixels: too small a field for a spectrum
+        assert "ice_ring" not in done[name]  # 16 pixels: too small a field for the ratio to mean anything
     assert world.summary(watch, ALICE)["ice"]["measured"] == 20
 
     # an image that arrives now is measured whatever the number of older ones

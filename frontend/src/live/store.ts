@@ -107,6 +107,77 @@ export function itemDetails(item: LiveItem): string {
   return parts.join(" · ");
 }
 
+/** The relative ice of an image as written in the corner of its tile; null: nothing to write. */
+export function iceLabel(item: LiveItem, reference: number | null): string | null {
+  const ice = relativeIce(item, reference);
+  return ice === null ? null : `glace ${ice.toFixed(2)}`;
+}
+
+/** How much ice the beam went through, compared with the brightest images of the session:
+ *  ln(I₀ / I), where I is the mean of the image and I₀ the session's reference. 0: as bright as
+ *  the reference; 1: 2.7 times fewer counts. To be multiplied by the mean free path of the
+ *  microscope (300 to 400 nm) for a thickness. null: not measured, or no reference yet. */
+export function relativeIce(item: LiveItem, reference: number | null): number | null {
+  const mean = item.metrics?.mean;
+  if (typeof mean !== "number" || !(mean > 0) || reference === null || !(reference > 0)) return null;
+  return Math.log(reference / mean);
+}
+
+/** Above this ice-ring ratio the ice is probably crystalline (what cryoSPARC users reject at). */
+export const ICE_RING_LIMIT = 1.2;
+/** Relative ice above which an image has a tenth of the counts of the reference: a grid bar,
+ *  or ice too thick to see through. */
+export const DARK_ABOVE = Math.log(10);
+
+export type ImageFlag = "ice_ring" | "dark";
+
+export const FLAG_LABELS: Record<ImageFlag, { short: string; long: string }> = {
+  ice_ring: { short: "glace cristalline", long: "Anneau de glace marqué : glace cristalline ou contamination" },
+  dark: { short: "très sombre", long: "Dix fois moins de coups que les images claires de la session : barreau de grille ou glace très épaisse" },
+};
+
+/** What is worth a mark on the tile of an image. */
+export function imageFlags(item: LiveItem, reference: number | null): ImageFlag[] {
+  const flags: ImageFlag[] = [];
+  const ring = item.metrics?.ice_ring;
+  if (typeof ring === "number" && ring > ICE_RING_LIMIT) flags.push("ice_ring");
+  const ice = relativeIce(item, reference);
+  if (ice !== null && ice > DARK_ABOVE) flags.push("dark");
+  return flags;
+}
+
+/** The measurements of an image, one per line, for the tooltip of its tile. */
+export function metricsLines(item: LiveItem, reference: number | null): string[] {
+  const m = item.metrics;
+  if (!m) return [];
+  if (typeof m.mean !== "number") return ["Image illisible : pas de mesure"];
+  const lines = [`Coups moyens : ${m.mean.toFixed(m.mean < 100 ? 2 : 0)}${m.estimated ? " (estimés sur les premières frames)" : ""}`];
+  const ice = relativeIce(item, reference);
+  if (ice !== null) lines.push(`Glace relative : ${ice.toFixed(2)} (ln I₀/I)`);
+  if (typeof m.ice_ring === "number") lines.push(`Anneau de glace : ${m.ice_ring.toFixed(2)}`);
+  return lines;
+}
+
+/** Median relative ice of the most recent measured images, and the share of them with a
+ *  marked ice ring. null: no reference, or nothing measured. */
+export function iceSummary(items: LiveItem[], reference: number | null, last = 50): { median: number; ring: number; count: number } | null {
+  const values: number[] = [];
+  let rings = 0;
+  for (let k = items.length - 1; k >= 0 && values.length < last; k--) {
+    const item = items[k];
+    const ice = item ? relativeIce(item, reference) : null;
+    if (!item || ice === null) continue;
+    values.push(ice);
+    if ((item.metrics?.ice_ring ?? 0) > ICE_RING_LIMIT) rings += 1;
+  }
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  const mid = values.length >> 1;
+  const upper = values[mid] ?? 0;
+  const median = values.length % 2 ? upper : ((values[mid - 1] ?? upper) + upper) / 2;
+  return { median, ring: rings / values.length, count: values.length };
+}
+
 /** What each alert condition is called in the interface. */
 export const ALERT_LABELS: Record<AlertCondition, string> = {
   no_image: "plus d'image",

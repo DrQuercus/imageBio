@@ -12,7 +12,7 @@ import { AlertsPanel } from "./AlertsPanel";
 import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
-import { formatLiveLink, type ItemMap, mergeItems, orderItems } from "./store";
+import { formatLiveLink, iceSummary, type ItemMap, mergeItems, orderItems } from "./store";
 
 const POLL_MS = 3000;
 const PAGE = 2000;
@@ -106,6 +106,8 @@ export function LiveView({ dir, onViewer }: Props) {
   }, [watchId]);
 
   const ordered = useMemo(() => orderItems(items), [items]);
+  const reference = summary?.ice.reference ?? null;
+  const ice = useMemo(() => iceSummary(ordered, reference), [ordered, reference]);
   const open = (path: string | null) => {
     window.location.hash = formatLiveLink(path);
   };
@@ -181,7 +183,7 @@ export function LiveView({ dir, onViewer }: Props) {
         )}
         {watch && summary ? (
           <>
-            <StatsBar summary={summary} receivedAt={receivedAt.current} />
+            <StatsBar summary={summary} ice={ice} receivedAt={receivedAt.current} />
             <RateGraph history={history} />
             <div className="grid-bar">
               <span data-testid="grid-count">{ordered.length.toLocaleString("fr-FR")} image{ordered.length > 1 ? "s" : ""}</span>
@@ -194,7 +196,7 @@ export function LiveView({ dir, onViewer }: Props) {
                 <input type="range" min={100} max={320} step={20} value={tile} onChange={(e) => setTile(Number(e.target.value))} aria-label="Taille des vignettes" />
               </label>
             </div>
-            <ImageGrid items={ordered} newestFirst={newestFirst} tile={tile} onOpen={onViewer} />
+            <ImageGrid items={ordered} newestFirst={newestFirst} tile={tile} reference={reference} onOpen={onViewer} />
           </>
         ) : (
           <div className="empty" data-testid="live-empty">

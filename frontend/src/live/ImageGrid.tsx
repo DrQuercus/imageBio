@@ -4,7 +4,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { LiveItem } from "../api/types";
-import { gridLayout, itemDetails, itemTime, tilePosition } from "./store";
+import { FLAG_LABELS, gridLayout, iceLabel, imageFlags, itemDetails, itemTime, metricsLines, tilePosition } from "./store";
 
 const GAP = 8;
 
@@ -16,22 +16,28 @@ interface TileProps {
   top: number;
   left: number;
   size: number;
+  /** Mean counts the images of the session are compared to; null: none yet. */
+  reference: number | null;
   onOpen: (path: string) => void;
 }
 
-const Tile = memo(function Tile({ item, top, left, size, onOpen }: TileProps) {
+const Tile = memo(function Tile({ item, top, left, size, reference, onOpen }: TileProps) {
   const [failed, setFailed] = useState(false);
   const incoming = item.state !== "complete";
   const details = itemDetails(item);
+  const flags = incoming ? [] : imageFlags(item, reference);
+  const ice = incoming ? null : iceLabel(item, reference);
+  const title = [item.name, item.note, ...metricsLines(item, reference)].filter(Boolean).join("\n");
   // positions are set through the style object (CSSOM), which the page's CSP allows
   return (
     <button
       className={`tile${incoming ? " incoming" : ""}`}
       style={{ top, left, width: size, height: size }}
-      title={`${item.name}${item.note ? `\n${item.note}` : ""}`}
+      title={title}
       data-testid="tile"
       data-name={item.name}
       data-state={item.state}
+      data-flags={flags.join(" ")}
       onClick={() => !incoming && onOpen(item.path)}
     >
       {incoming ? (
@@ -49,6 +55,16 @@ const Tile = memo(function Tile({ item, top, left, size, onOpen }: TileProps) {
           {!incoming && !item.verified && <span className="tile-flag" title="Indexé depuis un dossier au repos, sans contrôle du fichier"> · non vérifié</span>}
         </span>
       </span>
+      {ice && <span className="tile-ice">{ice}</span>}
+      {flags.length > 0 && (
+        <span className="tile-marks">
+          {flags.map((flag) => (
+            <span key={flag} className={`tile-mark ${flag}`} title={FLAG_LABELS[flag].long}>
+              {FLAG_LABELS[flag].short}
+            </span>
+          ))}
+        </span>
+      )}
     </button>
   );
 });
@@ -58,10 +74,11 @@ interface Props {
   items: LiveItem[];
   newestFirst: boolean;
   tile: number;
+  reference: number | null;
   onOpen: (path: string) => void;
 }
 
-export function ImageGrid({ items, newestFirst, tile, onOpen }: Props) {
+export function ImageGrid({ items, newestFirst, tile, reference, onOpen }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = useState(0);
@@ -89,7 +106,7 @@ export function ImageGrid({ items, newestFirst, tile, onOpen }: Props) {
     const item = items[newestFirst ? items.length - 1 - position : position];
     if (!item) continue;
     const { top, left } = tilePosition(position, layout.columns, tile, GAP);
-    tiles.push(<Tile key={item.id} item={item} top={top} left={left} size={tile} onOpen={onOpen} />);
+    tiles.push(<Tile key={item.id} item={item} top={top} left={left} size={tile} reference={reference} onOpen={onOpen} />);
   }
 
   return (

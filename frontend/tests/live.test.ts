@@ -6,13 +6,19 @@ import {
   formatBytes,
   formatLiveLink,
   freshness,
+  DARK_ABOVE,
   gridLayout,
   historyBars,
+  iceLabel,
+  iceSummary,
+  imageFlags,
   itemDetails,
   mergeItems,
+  metricsLines,
   orderItems,
   parseLiveLink,
   parseThreshold,
+  relativeIce,
   tilePosition,
 } from "../src/live/store";
 
@@ -35,6 +41,7 @@ function item(id: number, patch: Partial<LiveItem> = {}): LiveItem {
     note: null,
     members: { image: "complete" },
     meta: {},
+    metrics: null,
     ...patch,
   };
 }
@@ -126,6 +133,64 @@ describe("wording", () => {
     expect(itemDetails(item(1))).toBe("");
     expect(itemDetails(item(1, { meta: { epu: { applied_defocus: -1.5, dose: 42.53 } } }))).toBe("-1.5 µm · 42.5 e⁻/Å²");
     expect(itemDetails(item(1, { meta: { mdoc: { tilt_angle: -3, dose: 3.05, defocus: -4 } } }))).toBe("-4.0 µm · 3.0 e⁻/Å² · -3.0°");
+  });
+});
+
+describe("what was measured on an image", () => {
+  const measured = (id: number, mean: number, ring?: number) => item(id, { metrics: { mean, std: 1, ice_ring: ring } });
+
+  it("compares the counts of an image with the brightest of its session", () => {
+    expect(relativeIce(measured(1, 50), 50)).toBe(0);
+    expect(relativeIce(measured(1, 50 / Math.E), 50)).toBeCloseTo(1, 12);
+    expect(relativeIce(measured(1, 60), 50)).toBeCloseTo(Math.log(50 / 60), 12); // brighter than the reference: negative
+    // nothing to say without a measurement, without a reference, or with counts that are not counts
+    expect(relativeIce(item(1), 50)).toBeNull();
+    expect(relativeIce(item(1, { metrics: {} }), 50)).toBeNull();
+    expect(relativeIce(measured(1, 50), null)).toBeNull();
+    expect(relativeIce(measured(1, 0), 50)).toBeNull();
+    expect(relativeIce(measured(1, -3), 50)).toBeNull();
+    expect(relativeIce(measured(1, 50), 0)).toBeNull();
+  });
+
+  it("marks crystalline ice and images ten times darker than the others", () => {
+    expect(imageFlags(item(1), 50)).toEqual([]);
+    expect(imageFlags(measured(1, 40, 1.2), 50)).toEqual([]); // at the limit: not above
+    expect(imageFlags(measured(1, 40, 1.21), 50)).toEqual(["ice_ring"]);
+    expect(imageFlags(measured(1, 40, 1.9), null)).toEqual(["ice_ring"]); // needs no reference
+    expect(DARK_ABOVE).toBeCloseTo(Math.log(10), 12);
+    expect(imageFlags(measured(1, 5.1), 50)).toEqual([]);
+    expect(imageFlags(measured(1, 4.9), 50)).toEqual(["dark"]);
+    expect(imageFlags(measured(1, 4.9), null)).toEqual([]);
+    expect(imageFlags(measured(1, 2, 3), 50)).toEqual(["ice_ring", "dark"]);
+  });
+
+  it("writes the relative ice on the tile and the numbers in its tooltip", () => {
+    const one = item(1, { meta: { epu: { applied_defocus: -1.5, dose: 42.53 } }, metrics: { mean: 30.327, std: 2, ice_ring: 1.347 } });
+    expect(iceLabel(one, 50)).toBe("glace 0.50");
+    expect(iceLabel(one, null)).toBeNull(); // no reference yet
+    expect(iceLabel(item(1), 50)).toBeNull(); // not measured
+    expect(itemDetails(one)).toBe("-1.5 µm · 42.5 e⁻/Å²");
+    expect(metricsLines(one, 50)).toEqual(["Coups moyens : 30.33", "Glace relative : 0.50 (ln I₀/I)", "Anneau de glace : 1.35"]);
+    expect(metricsLines(one, null)).toEqual(["Coups moyens : 30.33", "Anneau de glace : 1.35"]);
+    expect(metricsLines(item(1), 50)).toEqual([]);
+    expect(metricsLines(item(1, { metrics: {} }), 50)).toEqual(["Image illisible : pas de mesure"]);
+    const movie = item(1, { metrics: { mean: 1234.56, estimated: true, frames: 40 } });
+    expect(metricsLines(movie, null)).toEqual(["Coups moyens : 1235 (estimés sur les premières frames)"]);
+  });
+
+  it("summarises the last measured images of the session", () => {
+    expect(iceSummary([], 50)).toBeNull();
+    expect(iceSummary([item(1), item(2)], 50)).toBeNull();
+    expect(iceSummary([measured(1, 40)], null)).toBeNull();
+    const session = [measured(1, 50), measured(2, 50 / Math.E, 1.5), item(3), measured(4, 50 / Math.E ** 2), measured(5, 50 / Math.E ** 4, 2)];
+    const all = iceSummary(session, 50);
+    expect(all?.count).toBe(4);
+    expect(all?.median).toBeCloseTo(1.5, 12); // of 0, 1, 2 and 4
+    expect(all?.ring).toBe(0.5);
+    const lastThree = iceSummary(session, 50, 3); // the most recent measured ones: 1, 2 and 4
+    expect(lastThree?.count).toBe(3);
+    expect(lastThree?.median).toBeCloseTo(2, 12);
+    expect(lastThree?.ring).toBeCloseTo(2 / 3, 12);
   });
 });
 
