@@ -48,6 +48,7 @@ from imagebio.core.config import Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError
 from imagebio.core.model import FileId, json_safe
 from imagebio.cryo.gain import N_ORIENTATIONS
+from imagebio.cryo.picks import read_picks
 from imagebio.fs.roots import MAX_PATH_LENGTH, ResolvedPath, RootSet, User
 from imagebio.io.registry import Registry, default_registry
 from imagebio.live.service import LiveService
@@ -466,6 +467,29 @@ def create_app(
             "defects": result.defects,
             "gain_shape": {"y": result.gain_shape[0], "x": result.gain_shape[1]},
         }
+        return Response(
+            json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
+
+    @app.get("/api/cryo/picks")
+    def cryo_picks(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        picks: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+    ) -> Response:
+        """The particles that a coordinate file (``picks``: STAR, .box, .cbox or .cs, a logical
+        path like any other) holds for the image ``path``: centres in pixels of that image."""
+        options = _check_query(request, frozenset({"path", "picks"}))
+        image = file_of(request, path)
+        chosen = file_of(request, picks)
+        info, file_id = service.info(image.real, options)
+        picks_id = FileId.of(chosen.real)
+        etag = _etag(file_id, "picks", options_key(options), picks_id.etag)
+        headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        found = read_picks(chosen.real, image.logical.rsplit("/", 1)[-1], (info.size_y, info.size_x))
+        body = {**found.to_json(), "picks": chosen.logical, "image": {"x": info.size_x, "y": info.size_y}}
         return Response(
             json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
         )
