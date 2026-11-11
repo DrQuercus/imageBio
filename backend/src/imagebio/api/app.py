@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import zlib
 from collections.abc import AsyncIterator, Mapping
@@ -217,6 +218,15 @@ def create_app(
     async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = {404: "not_found", 405: "method_not_allowed"}.get(exc.status_code, "http_error")
         return _error(exc.status_code, code, code.replace("_", " "))
+
+    @app.exception_handler(sqlite3.OperationalError)
+    async def _index_busy(request: Request, exc: sqlite3.OperationalError) -> JSONResponse:
+        # the only database is the index of the Live mode; a writer that waited in vain for
+        # another one (a scan of a very large directory) is asked to come back, not told "500"
+        log.warning("live index unavailable on %s: %s", request.url.path, exc)
+        return _error(
+            503, "live_index_busy", "the live index is busy: try again in a moment", {"Retry-After": "5"}
+        )
 
     @app.exception_handler(Exception)
     async def _unexpected(request: Request, exc: Exception) -> JSONResponse:

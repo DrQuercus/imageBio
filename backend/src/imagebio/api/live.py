@@ -12,6 +12,7 @@ import json
 from typing import Any, Final
 
 from fastapi import FastAPI, Query, Request
+from fastapi import Path as PathParam
 from fastapi.responses import Response
 
 from imagebio.api.security import current_user
@@ -28,6 +29,10 @@ __all__ = ["register_live_routes"]
 _NO_CACHE: Final = "private, no-cache"
 #: A thumbnail is tied to the content of its file by its ETag: it may be reused for a while.
 _THUMB_CACHE: Final = "private, max-age=300"
+#: Identifiers and sequence numbers are SQLite integers: anything larger names nothing, and
+#: must be refused here rather than fail in the index.
+_MAX_INT: Final = 2**63 - 1
+_WATCH_ID: Final = PathParam(ge=1, le=_MAX_INT)
 
 
 def _json(body: Any, status: int = 200) -> Response:
@@ -58,6 +63,7 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         resolved = roots.resolve(watch.logical, user)
         if not resolved.is_dir or resolved.real != watch.root_path:
             raise NotFoundError("the watched directory is no longer there")
+        live.seen(watch)
         return watch
 
     @app.get("/api/live/watches")
@@ -79,22 +85,25 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         return _json(live.start_watch(user.name, resolved.logical, resolved.real).to_json())
 
     @app.get("/api/live/watches/{watch_id}")
-    def live_watch_summary(request: Request, watch_id: int) -> Response:
+    def live_watch_summary(request: Request, watch_id: int = _WATCH_ID) -> Response:
         _only(request, frozenset())
         return _json(live.summary(own_watch(request, watch_id)))
 
     @app.delete("/api/live/watches/{watch_id}")
-    def live_watch_stop(request: Request, watch_id: int) -> Response:
-        """Stop one's own watch. What was indexed is kept; other users' watches are untouched."""
-        _only(request, frozenset())
+    def live_watch_stop(request: Request, watch_id: int = _WATCH_ID, forget: bool = Query(False)) -> Response:
+        """Stop one's own watch. What was indexed is kept, unless ``forget``: the watch then
+        leaves the list, and the index of its directory goes once nobody else watches it.
+        Other users' watches are untouched."""
+        _only(request, frozenset({"forget"}))
         user = current_user(request, settings)
-        return _json(live.stop_watch(user.name, watch_id).to_json())
+        watch = live.stop_watch(user.name, watch_id, forget=forget)
+        return _json({**watch.to_json(), "forgotten": forget})
 
     @app.get("/api/live/watches/{watch_id}/items")
     def live_watch_items(
         request: Request,
-        watch_id: int,
-        since: int = Query(0, ge=0),
+        watch_id: int = _WATCH_ID,
+        since: int = Query(0, ge=0, le=_MAX_INT),
         limit: int = Query(1000, ge=1, le=MAX_ITEMS),
         category: str = Query("data,image", max_length=64),
     ) -> Response:
@@ -108,7 +117,7 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
 
     @app.get("/api/live/watches/{watch_id}/history")
     def live_watch_history(
-        request: Request, watch_id: int, bucket: int = Query(60, ge=1, le=86400)
+        request: Request, watch_id: int = _WATCH_ID, bucket: int = Query(60, ge=1, le=86400)
     ) -> Response:
         """Acquisitions per time bucket, by acquisition time."""
         _only(request, frozenset({"bucket"}))
@@ -122,14 +131,14 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         return _json({"channels": live.alert_channels()})
 
     @app.get("/api/live/watches/{watch_id}/alerts")
-    def live_watch_alerts(request: Request, watch_id: int) -> Response:
+    def live_watch_alerts(request: Request, watch_id: int = _WATCH_ID) -> Response:
         _only(request, frozenset())
         return _json(live.alerts(own_watch(request, watch_id)))
 
     @app.put("/api/live/watches/{watch_id}/alerts")
     def live_watch_alerts_set(
         request: Request,
-        watch_id: int,
+        watch_id: int = _WATCH_ID,
         channels: str = Query("", max_length=1024),
         no_image: float | None = Query(None),
         disk_free: float | None = Query(None),
@@ -143,7 +152,7 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
 
     @app.post("/api/live/watches/{watch_id}/alerts/test")
-    def live_watch_alerts_test(request: Request, watch_id: int) -> Response:
+    def live_watch_alerts_test(request: Request, watch_id: int = _WATCH_ID) -> Response:
         """Send a test notice to the channels of the watch."""
         _only(request, frozenset())
         return _json({"results": live.test_alerts(own_watch(request, watch_id))})

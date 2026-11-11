@@ -11,7 +11,6 @@ check on every request that the user may still read the watched directory (the A
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import shutil
@@ -20,7 +19,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -32,18 +31,20 @@ from imagebio.live.alerts import (
     CONDITIONS,
     AlertDeliveryError,
     AlertRules,
+    AlertState,
     Notice,
     Notifier,
     Reading,
     evaluate,
     notice_for,
+    step,
 )
 from imagebio.live.index import Index
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
 
-__all__ = ["CATEGORIES", "MAX_ACTIVE_WATCHES", "LiveService", "WatchInfo"]
+__all__ = ["CATEGORIES", "MAX_ACTIVE_WATCHES", "MAX_STOPPED_WATCHES", "LiveService", "WatchInfo"]
 
 log = logging.getLogger(__name__)
 
@@ -51,11 +52,17 @@ CATEGORIES: Final = ("data", "image", "gridsquare", "foilhole", "atlas")
 #: Categories that count as acquisitions (rates, last image).
 _ACQUIRED: Final = ("data", "image")
 MAX_ACTIVE_WATCHES: Final = 8  # per user
+#: Stopped watches a user keeps (with the index of their directory); older ones are forgotten.
+MAX_STOPPED_WATCHES: Final = 32
 MAX_ITEMS: Final = 5000
 _THUMB_MEMORY_BYTES: Final = 64 * 2**20
 _RENDER_SLOTS: Final = 4  # thumbnails computed at once: each reads a full image
 _MAX_DELIVERY_ATTEMPTS: Final = 5  # a notice that cannot be delivered is tried at this many cycles
-_TEST_INTERVAL_S: Final = 10.0  # between two test notices of one watch
+_TEST_INTERVAL_S: Final = 10.0  # between two test notices of one user
+#: Alerts are sent for a watch as long as its user came to look at it in the last week: nobody
+#: is told for ever about a session they left, or may no longer read.
+_ALERT_IDLE_S: Final = 7 * 86400.0
+_SEEN_EVERY_S: Final = 600.0  # how often "its user looked at it" is written to the index
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,18 +125,21 @@ class LiveService:
         self._lock = threading.RLock()
         self._index_value: Index | None = None
         self._threads: dict[int, tuple[threading.Thread, threading.Event]] = {}
+        #: Scanners told to stop that may still be finishing a cycle, by directory.
+        self._retired: dict[int, threading.Thread] = {}
         self._manual: dict[int, Scanner] = {}
         self._pending: dict[int, int] = {}  # root -> files being followed, as of the last cycle
         self._thumbs: OrderedDict[tuple[FileId, int], bytes] = OrderedDict()
         self._thumb_bytes = 0
-        self._thumb_writes = 0
+        self._thumb_db_bytes: int | None = None  # size of the thumbnails in the index, once counted
         self._render = threading.BoundedSemaphore(_RENDER_SLOTS)
         self._closed = False
         #: Delivers alert notices, and tells how full a volume is; tests replace both.
         self.notifier = notifier or Notifier(settings.smtp)
         self.disk_usage: Callable[[Path], Any] = shutil.disk_usage
         self._channels = {c.name: c for c in settings.alert_channels}
-        self._tested: dict[int, float] = {}
+        self._tested: dict[str, float] = {}  # user -> their last test notice
+        self._seen: dict[int, float] = {}  # watch -> last time its user was allowed to look at it
 
     # ── index and scanners ───────────────────────────────────────────────────
     @property
@@ -147,6 +157,7 @@ class LiveService:
         """Resume the watches that were active when the server stopped, if any were ever made."""
         if (self._settings.live_state_dir / "live.sqlite").is_file():
             self._sync_scanners()
+            self._purge_orphans()
 
     def close(self) -> None:
         with self._lock:
@@ -178,17 +189,38 @@ class LiveService:
             wanted = self._active_roots()
             for root_id in list(self._threads):
                 if root_id not in wanted:
-                    self._threads.pop(root_id)[1].set()
+                    thread, stop = self._threads.pop(root_id)
+                    stop.set()
+                    self._retired[root_id] = thread  # it may be in the middle of a cycle
             for root_id, path in wanted.items():
                 if root_id not in self._threads:
                     stop = threading.Event()
                     thread = threading.Thread(
-                        target=self._run, args=(root_id, path, stop), name=f"live-scan-{root_id}", daemon=True
+                        target=self._run,
+                        args=(root_id, path, stop, self._retired.pop(root_id, None)),
+                        name=f"live-scan-{root_id}",
+                        daemon=True,
                     )
                     self._threads[root_id] = (thread, stop)
                     thread.start()
+            self._retired = {r: t for r, t in self._retired.items() if t.is_alive()}
 
-    def _run(self, root_id: int, path: Path, stop: threading.Event) -> None:
+    def _run(
+        self, root_id: int, path: Path, stop: threading.Event, previous: threading.Thread | None
+    ) -> None:
+        if previous is not None:
+            # one scanner per directory at a time: the one that was stopped finishes its cycle
+            # first (two would index the same files, each from its own idea of the tree)
+            previous.join()
+        if not stop.is_set():
+            self._scan_until(stop, root_id, path)
+        if not self._closed:
+            try:
+                self._purge_orphans()  # the watch may have been forgotten while a cycle ran
+            except Exception:
+                log.exception("cannot tidy the live index after the scanner of root %s", root_id)
+
+    def _scan_until(self, stop: threading.Event, root_id: int, path: Path) -> None:
         try:
             scanner = Scanner(self.index, root_id, path, self._registry, self._scan_settings)
         except Exception:
@@ -259,11 +291,16 @@ class LiveService:
                     )
             db.execute("INSERT OR IGNORE INTO roots (path, created_at) VALUES (?, ?)", (str(real), now))
             root_id = db.execute("SELECT id FROM roots WHERE path = ?", (str(real),)).fetchone()["id"]
+            # a watch that is started again counts silence from now, not from the day its
+            # alerts were set: it would otherwise announce at once hours without an image
             db.execute(
-                "INSERT INTO watches (user, logical, root_id, active, created_at) VALUES (?, ?, ?, 1, ?) "
+                "INSERT INTO watches (user, logical, root_id, active, created_at, seen_at) "
+                "VALUES (?, ?, ?, 1, ?, ?) "
                 "ON CONFLICT (user, logical) DO UPDATE SET active = 1, root_id = excluded.root_id, "
-                "stopped_at = NULL",
-                (user, logical, root_id, now),
+                "stopped_at = NULL, seen_at = excluded.seen_at, alerts_at = CASE "
+                "WHEN watches.active = 1 OR watches.alerts IS NULL THEN watches.alerts_at "
+                "ELSE excluded.seen_at END",
+                (user, logical, root_id, now, now),
             )
             watch_id = db.execute(
                 "SELECT id FROM watches WHERE user = ? AND logical = ?", (user, logical)
@@ -271,22 +308,70 @@ class LiveService:
         self._sync_scanners()
         return self.watch(user, watch_id)
 
-    def stop_watch(self, user: str, watch_id: int) -> WatchInfo:
-        """Stop one's own watch. The index of the directory is kept; scanning goes on only if
-        somebody else still watches it."""
+    def stop_watch(self, user: str, watch_id: int, *, forget: bool = False) -> WatchInfo:
+        """Stop one's own watch. The index of the directory is kept, and scanning goes on only
+        if somebody else still watches it. With ``forget`` the watch is removed altogether, and
+        the index of its directory with it once no watch, active or stopped, points at it.
+
+        A user keeps their last :data:`MAX_STOPPED_WATCHES` stopped watches: older ones are
+        forgotten, so that the index does not grow with every session ever looked at."""
+        now = self.clock()
         with self.index.write() as db:
-            cursor = db.execute(
-                "UPDATE watches SET active = 0, stopped_at = ? WHERE id = ? AND user = ?",
-                (self.clock(), watch_id, user),
-            )
-            if cursor.rowcount == 0:
+            row = db.execute(_WATCH_SQL + "WHERE w.id = ? AND w.user = ?", (watch_id, user)).fetchone()
+            if row is None:
                 raise NotFoundError("no such watch")
+            watch = _watch_of(row)
+            if watch.active:
+                watch = replace(watch, active=False, stopped_at=now)
+                db.execute("UPDATE watches SET active = 0, stopped_at = ? WHERE id = ?", (now, watch_id))
+            doomed = [watch_id] if forget else []
+            doomed += [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM watches WHERE user = ? AND active = 0 AND id != ? "
+                    "ORDER BY stopped_at DESC, id DESC LIMIT -1 OFFSET ?",
+                    (user, watch_id if forget else -1, MAX_STOPPED_WATCHES),
+                )
+            ]
             db.execute("DELETE FROM alert_states WHERE watch_id = ?", (watch_id,))  # nothing left to resolve
+            for doomed_id in doomed:
+                db.execute("DELETE FROM alert_states WHERE watch_id = ?", (doomed_id,))
+                db.execute("DELETE FROM watches WHERE id = ?", (doomed_id,))
         self._sync_scanners()
         with self._lock:
             for root_id in set(self._manual) - set(self._active_roots()):
                 del self._manual[root_id]
-        return self.watch(user, watch_id)
+            for doomed_id in doomed:
+                self._seen.pop(doomed_id, None)
+        self._purge_orphans()
+        return watch
+
+    def seen(self, watch: WatchInfo) -> None:
+        """Note that the user of ``watch`` was just allowed to look at it."""
+        self._seen[watch.id] = self.clock()
+
+    def _purge_orphans(self) -> None:
+        """Drop the index of the directories that no watch points at any more. A directory
+        whose scanner is still finishing a cycle is left to that scanner, on its way out."""
+        with self._lock:
+            me = threading.current_thread()
+            busy = {r for r, t in self._retired.items() if t.is_alive() and t is not me}
+            busy |= set(self._threads) | set(self._manual)
+        with self.index.write() as db:
+            orphans = [
+                row["id"]
+                for row in db.execute("SELECT id FROM roots WHERE id NOT IN (SELECT root_id FROM watches)")
+                if row["id"] not in busy
+            ]
+            for root_id in orphans:
+                db.execute(
+                    "DELETE FROM files WHERE dir_id IN (SELECT id FROM dirs WHERE root_id = ?)", (root_id,)
+                )
+                db.execute("DELETE FROM exposures WHERE root_id = ?", (root_id,))
+                db.execute("DELETE FROM dirs WHERE root_id = ?", (root_id,))
+                db.execute("DELETE FROM roots WHERE id = ?", (root_id,))
+        for root_id in orphans:
+            self._pending.pop(root_id, None)
 
     # ── what a watch shows ───────────────────────────────────────────────────
     def summary(self, watch: WatchInfo) -> dict[str, Any]:
@@ -330,7 +415,7 @@ class LiveService:
                 "last_5_min": self._arrived_since(db, watch.root_id, now, 300) * 12,
                 "last_hour": self._arrived_since(db, watch.root_id, now, 3600),
             },
-            "alerts": [row["condition"] for row in self._alert_rows(db, watch.id)],
+            "alerts": [c for c, state in self._alert_states(db, watch.id).items() if state.told],
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
@@ -434,15 +519,30 @@ class LiveService:
         return [{"name": c.name, "kind": c.kind} for c in self._channels.values()]
 
     @staticmethod
-    def _alert_rows(db: sqlite3.Connection, watch_id: int) -> list[sqlite3.Row]:
+    def _alert_states(db: sqlite3.Connection, watch_id: int) -> dict[str, AlertState]:
+        """Where each condition of a watch stands, in the order conditions are reported."""
         rows = db.execute(
-            "SELECT condition, since, notified, attempts, error FROM alert_states WHERE watch_id = ?",
+            "SELECT condition, since, phase, clear_since, delivered, todo, attempts, error "
+            "FROM alert_states WHERE watch_id = ?",
             (watch_id,),
         ).fetchall()
-        return sorted(rows, key=lambda row: CONDITIONS.index(row["condition"]))
+        states = {
+            row["condition"]: AlertState(
+                row["condition"],
+                row["since"],
+                row["phase"],
+                row["clear_since"],
+                tuple(json.loads(row["delivered"])),
+                tuple(json.loads(row["todo"])),
+                row["attempts"],
+                row["error"],
+            )
+            for row in rows
+        }
+        return {c: states[c] for c in CONDITIONS if c in states}
 
     def alerts(self, watch: WatchInfo) -> dict[str, Any]:
-        """The rules of a watch and the conditions that hold at the moment."""
+        """The rules of a watch and the conditions that were announced and still hold."""
         db = self.index.connection()
         row = db.execute("SELECT alerts, alerts_at FROM watches WHERE id = ?", (watch.id,)).fetchone()
         return {
@@ -451,12 +551,13 @@ class LiveService:
             "channels": self.alert_channels(),
             "firing": [
                 {
-                    "condition": state["condition"],
-                    "since": state["since"],
-                    "notified": bool(state["notified"]),
-                    "error": state["error"],
+                    "condition": state.condition,
+                    "since": state.since,
+                    "notified": not state.todo,  # every channel took the notice
+                    "error": state.error,
                 }
-                for state in self._alert_rows(db, watch.id)
+                for state in self._alert_states(db, watch.id).values()
+                if state.told
             ],
         }
 
@@ -484,10 +585,11 @@ class LiveService:
         if not rules.channels:
             raise InvalidRequestError("choose at least one alert channel first")
         now = self.clock()
-        with self._lock:
-            if now - self._tested.get(watch.id, -_TEST_INTERVAL_S) < _TEST_INTERVAL_S:
+        with self._lock:  # per user, not per watch: several watches are not several times the notices
+            last = self._tested.get(watch.user)
+            if last is not None and now - last < _TEST_INTERVAL_S:
                 raise InvalidRequestError("a test was sent a moment ago: wait a few seconds")
-            self._tested[watch.id] = now
+            self._tested[watch.user] = now
         notice = Notice(
             "test",
             True,
@@ -545,54 +647,86 @@ class LiveService:
         )
 
     def check_alerts(self, root_id: int, now: float) -> list[Notice]:
-        """Judge the rules of every active watch on a directory, as of ``now``; send a notice
-        for each condition that started or stopped, and return what was delivered. Called after
-        each scan cycle."""
+        """Judge the rules of every active watch on a directory, as of ``now``; send the notices
+        that are owed (a condition that started or stopped, a channel that failed last time) and
+        return those that reached at least one channel. Called after each scan cycle."""
         db = self.index.connection()
         watches = db.execute(
-            "SELECT w.id, w.logical, w.alerts, w.alerts_at, r.path "
-            "FROM watches w JOIN roots r ON r.id = w.root_id "
-            "WHERE w.root_id = ? AND w.active = 1 AND w.alerts IS NOT NULL",
+            "SELECT w.id, w.logical, w.alerts, w.alerts_at, w.seen_at, r.path "
+            "FROM watches w JOIN roots r ON r.id = w.root_id WHERE w.root_id = ? AND w.active = 1",
             (root_id,),
         ).fetchall()
         delivered: list[Notice] = []
         for watch in watches:
+            seen = max(watch["seen_at"] or 0.0, self._seen.get(watch["id"], 0.0))
+            if seen - (watch["seen_at"] or 0.0) >= _SEEN_EVERY_S:
+                with self.index.write() as tx:
+                    tx.execute("UPDATE watches SET seen_at = ? WHERE id = ?", (seen, watch["id"]))
             rules = AlertRules.from_json(watch["alerts"])
-            if not rules.armed:
+            if not rules.armed or now - max(seen, watch["alerts_at"] or 0.0) > _ALERT_IDLE_S:
                 continue
+            states = self._alert_states(db, watch["id"])
             reading = self._reading(db, root_id, Path(watch["path"]), watch["alerts_at"] or now, now)
-            holds = evaluate(rules, reading)
-            states = {row["condition"]: row for row in self._alert_rows(db, watch["id"])}
+            holds = evaluate(rules, reading, {c for c, state in states.items() if state.told})
             for condition in CONDITIONS:
-                sentence, state = holds[condition], states.get(condition)
-                if sentence is not None and (state is None or not state["notified"]):
-                    # it starts, or its notice has not gone through yet
-                    if state is not None and state["attempts"] >= _MAX_DELIVERY_ATTEMPTS:
-                        continue
-                    notice = notice_for(condition, True, sentence, watch["logical"], reading)
-                    errors = [e for e in (self._send(name, notice) for name in rules.channels) if e]
-                    with self.index.write() as tx:
-                        tx.execute(
-                            "INSERT INTO alert_states "
-                            "(watch_id, condition, since, notified, attempts, error) "
-                            "VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT (watch_id, condition) DO UPDATE SET "
-                            "notified = excluded.notified, attempts = attempts + 1, error = excluded.error",
-                            (watch["id"], condition, now, 0 if errors else 1, errors[0] if errors else None),
-                        )
-                    if not errors:
+                before = states.get(condition)
+                after = step(before, condition, holds[condition] is not None, now, rules.channels)
+                if after is not None and after.todo and after.attempts < _MAX_DELIVERY_ATTEMPTS:
+                    after, notice = self._deliver(after, holds[condition], watch["logical"], reading)
+                    if notice is not None:
                         delivered.append(notice)
-                elif sentence is None and state is not None:
-                    # it stopped: say so, if its start had been said
-                    with self.index.write() as tx:
-                        tx.execute(
-                            "DELETE FROM alert_states WHERE watch_id = ? AND condition = ?",
-                            (watch["id"], condition),
-                        )
-                    if state["notified"]:
-                        notice = notice_for(condition, False, None, watch["logical"], reading)
-                        if not [e for e in (self._send(name, notice) for name in rules.channels) if e]:
-                            delivered.append(notice)
+                if (
+                    after is not None
+                    and after.phase == "resolving"
+                    and (not after.todo or after.attempts >= _MAX_DELIVERY_ATTEMPTS)
+                ):
+                    after = None  # said, or given up: nothing left to remember
+                if after != before:
+                    self._keep_state(watch["id"], condition, after)
         return delivered
+
+    def _deliver(
+        self, state: AlertState, sentence: str | None, session: str, reading: Reading
+    ) -> tuple[AlertState, Notice | None]:
+        """Send the notice of ``state`` to the channels that still miss it. Returns the state
+        after that, and the notice if at least one channel took it."""
+        firing = state.phase == "firing"
+        if firing and sentence is None:
+            return state, None  # on its way out: no longer the moment to announce it
+        notice = notice_for(state.condition, firing, sentence, session, reading)
+        errors = {name: self._send(name, notice) for name in state.todo}
+        got = tuple(name for name, error in errors.items() if error is None)
+        state = replace(
+            state,
+            delivered=state.delivered + got if firing else state.delivered,
+            todo=tuple(name for name, error in errors.items() if error is not None),
+            attempts=state.attempts + 1,
+            error=next((error for error in errors.values() if error is not None), None),
+        )
+        return state, notice if got else None
+
+    def _keep_state(self, watch_id: int, condition: str, state: AlertState | None) -> None:
+        with self.index.write() as db:
+            if state is None:
+                db.execute(
+                    "DELETE FROM alert_states WHERE watch_id = ? AND condition = ?", (watch_id, condition)
+                )
+                return
+            db.execute(
+                "INSERT OR REPLACE INTO alert_states (watch_id, condition, since, phase, clear_since, "
+                "delivered, todo, attempts, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    watch_id,
+                    condition,
+                    state.since,
+                    state.phase,
+                    state.clear_since,
+                    json.dumps(state.delivered),
+                    json.dumps(state.todo),
+                    state.attempts,
+                    state.error,
+                ),
+            )
 
     # ── thumbnails ───────────────────────────────────────────────────────────
     def thumbnail(self, real: Path, px: int) -> tuple[bytes, FileId]:
@@ -622,6 +756,9 @@ class LiveService:
                 data = render_thumbnail(self._planes, real, px)
             self._keep_thumbnail(file_id, px, data)
         with self._lock:
+            known = self._thumbs.pop(key, None)  # another request may have made it meanwhile
+            if known is not None:
+                self._thumb_bytes -= len(known)
             self._thumbs[key] = data
             self._thumb_bytes += len(data)
             while self._thumb_bytes > _THUMB_MEMORY_BYTES and self._thumbs:
@@ -630,25 +767,41 @@ class LiveService:
         return data, file_id
 
     def _keep_thumbnail(self, file_id: FileId, px: int, data: bytes) -> None:
+        """Keep a thumbnail in the index, which never holds more than ``thumb_cache_bytes``:
+        the oldest go first, down to nine tenths of the limit."""
         cap = self._settings.thumb_cache_bytes
-        if cap <= 0:
+        if len(data) > cap:
             return
-        with (
-            contextlib.suppress(sqlite3.OperationalError),
-            self.index.write() as db,
-        ):  # busy: not worth failing for
-            db.execute(
-                "INSERT OR REPLACE INTO thumbs (path, px, size, mtime_ns, data, used_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (file_id.path, px, file_id.size, file_id.mtime_ns, data, self.clock()),
-            )
-            self._thumb_writes += 1
-            if self._thumb_writes % 200 == 1:  # now and then: drop the oldest tenth when over the cap
-                total = db.execute("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM thumbs").fetchone()[0]
-                if total > cap:
-                    count = db.execute("SELECT COUNT(*) FROM thumbs").fetchone()[0]
-                    db.execute(
-                        "DELETE FROM thumbs WHERE rowid IN "
-                        "(SELECT rowid FROM thumbs ORDER BY used_at LIMIT ?)",
-                        (max(1, count // 10),),
-                    )
+        try:
+            with self.index.write() as db:
+                # the running total is only trusted when the transaction that updated it ended well
+                total, self._thumb_db_bytes = self._thumb_db_bytes, None
+                if total is None:
+                    total = db.execute("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM thumbs").fetchone()[0]
+                replaced = db.execute(
+                    "SELECT LENGTH(data) FROM thumbs WHERE path = ? AND px = ?", (file_id.path, px)
+                ).fetchone()
+                db.execute(
+                    "INSERT OR REPLACE INTO thumbs (path, px, size, mtime_ns, data, used_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (file_id.path, px, file_id.size, file_id.mtime_ns, data, self.clock()),
+                )
+                total += len(data) - (replaced[0] if replaced is not None else 0)
+                while total > cap:
+                    oldest = db.execute(
+                        "SELECT rowid, LENGTH(data) FROM thumbs ORDER BY used_at, rowid LIMIT 256"
+                    ).fetchall()
+                    doomed: list[tuple[int]] = []
+                    for rowid, size in oldest:
+                        if total <= cap * 0.9:
+                            break
+                        doomed.append((rowid,))
+                        total -= size
+                    if not doomed:
+                        break
+                    db.executemany("DELETE FROM thumbs WHERE rowid = ?", doomed)
+                    if total <= cap * 0.9:
+                        break
+            self._thumb_db_bytes = total
+        except sqlite3.OperationalError:  # busy: not worth failing for
+            pass

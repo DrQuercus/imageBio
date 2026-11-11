@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +35,7 @@ class World:
         self.now = BASE
         self.sent: list[tuple[str, Notice]] = []  # (channel, notice) delivered by the server
         self.failures = 0  # deliveries that will fail before one succeeds
+        self.broken: set[str] = set()  # channels that refuse everything
         self.client = self._client()
 
     def _client(self):
@@ -51,6 +54,9 @@ class World:
         return client
 
     def send(self, channel: AlertChannel, notice: Notice) -> None:
+        if channel.name in self.broken:
+            self.refused = getattr(self, "refused", 0) + 1
+            raise AlertDeliveryError(f"channel {channel.name!r}: ConnectionRefusedError")
         if self.failures > 0:
             self.failures -= 1
             raise AlertDeliveryError(f"channel {channel.name!r}: ConnectionRefusedError")
@@ -394,6 +400,53 @@ def test_thumbnail_sizes_kinds_and_cache(world: World, monkeypatch: pytest.Monke
     assert changed.headers["etag"] != r.headers["etag"] and changed.content != r.content
 
 
+def test_the_thumbnail_caches_keep_to_their_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the index only dropped old thumbnails every 200 writes, a tenth at a time,
+    and held several times its limit; two requests for one thumbnail counted its size twice
+    in memory, for good."""
+    tree = build_tree(tmp_path / "data")
+    session = tree.base / "public/session"
+    session.mkdir()
+    rng = np.random.default_rng(5)
+    for n in range(40):
+        (session / f"{n:02d}.mrc").write_bytes(mrc_bytes(rng.normal(0, 1, (64, 64)).astype(np.float32), 1.0))
+    cap = 20_000
+    with make_client(tree, state_dir=tmp_path / "state", live_scan=False, thumb_cache_bytes=cap) as client:
+        live = client.app.state.live
+        db = live.index.connection()
+        sizes = []
+        for n in range(40):
+            r = client.get(THUMB, params={"path": f"public/session/{n:02d}.mrc", "size": 64})
+            assert r.status_code == 200
+            sizes.append(len(r.content))
+            stored = db.execute("SELECT COALESCE(SUM(LENGTH(data)), 0), COUNT(*) FROM thumbs").fetchone()
+            assert stored[0] <= cap, n
+        assert sum(sizes) > 2 * cap  # the limit was really reached
+        assert stored[0] >= cap // 2 and stored[1] >= 5  # and the cache is not emptied either
+        kept = [row[0] for row in db.execute("SELECT path FROM thumbs ORDER BY path")]
+        assert kept[-1].endswith("39.mrc") and not any(k.endswith("00.mrc") for k in kept)  # oldest first
+
+        # two requests for the same new thumbnail at the same time: counted once
+        import imagebio.live.service as service
+
+        (session / "new.mrc").write_bytes(mrc_bytes(rng.normal(0, 1, (64, 64)).astype(np.float32), 1.0))
+        both = threading.Barrier(2, timeout=10)
+        render = service.render_thumbnail
+
+        def together(*args: object, **kwargs: object) -> bytes:
+            both.wait()
+            return render(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(service, "render_thumbnail", together)
+        real = session / "new.mrc"
+        threads = [threading.Thread(target=live.thumbnail, args=(real, 64)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert live._thumb_bytes == sum(len(v) for v in live._thumbs.values())
+
+
 @pytest.mark.parametrize(
     ("params", "who", "status", "code"),
     [
@@ -488,6 +541,157 @@ def test_a_user_cannot_watch_without_limit(world: World) -> None:
     assert world.client.post(WATCHES, params={"path": "public/s8"}, headers=ALICE).status_code == 200
 
 
+def index_counts(world: World) -> dict[str, int]:
+    db = world.live.index.connection()
+    tables = ("roots", "watches", "dirs", "exposures", "files")
+    return {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+
+
+def test_a_forgotten_watch_takes_its_index_with_it(world: World) -> None:
+    """Regression: nothing ever left the index: every directory ever watched stayed in it."""
+    sim = sim_in(world, "public/shared", 30, pause_probability=0.0)
+    alice = world.watch("public/shared", ALICE)
+    bob = world.watch("public/shared", BOB)
+    other = world.watch("public/bob_session", BOB)
+    world.run([sim], 60)
+    full = index_counts(world)
+    assert full["roots"] == 2 and full["exposures"] > 5 and full["files"] > 20
+
+    # stopping keeps everything: the session can still be looked at, and started again
+    assert world.client.delete(f"{WATCHES}/{alice}", headers=ALICE).json()["forgotten"] is False
+    assert index_counts(world) == full
+    assert world.items(alice, ALICE)["items"]
+    # forgetting removes the watch; the directory stays indexed for Bob, who still watches it
+    gone = world.client.delete(f"{WATCHES}/{alice}", params={"forget": "true"}, headers=ALICE)
+    assert gone.status_code == 200 and gone.json()["forgotten"] is True and gone.json()["id"] == alice
+    assert world.client.get(WATCHES, headers=ALICE).json()["watches"] == []
+    assert world.client.get(f"{WATCHES}/{alice}", headers=ALICE).status_code == 404
+    assert index_counts(world) == {**full, "watches": 2}
+    assert (
+        world.client.delete(f"{WATCHES}/{bob}", params={"forget": "true"}, headers=ALICE).status_code == 404
+    )
+
+    # the last watch on the directory goes: so does what was indexed of it, and only of it
+    assert world.client.delete(f"{WATCHES}/{bob}", params={"forget": "true"}, headers=BOB).status_code == 200
+    assert index_counts(world) == {"roots": 1, "watches": 1, "dirs": 1, "exposures": 0, "files": 0}
+    assert [w["id"] for w in world.client.get(WATCHES, headers=BOB).json()["watches"]] == [other]
+    again = world.watch("public/shared", BOB)  # and watching it again starts from nothing, and works
+    world.run([sim], 30)
+    assert len(world.items(again, BOB)["items"]) >= full["exposures"]
+    bad = world.client.delete(f"{WATCHES}/{again}", params={"forget": "perhaps"}, headers=BOB)
+    assert bad.status_code == 400
+
+
+def test_only_the_last_stopped_watches_are_kept(world: World) -> None:
+    """Regression: stopped watches, and the index of their directories, piled up without limit."""
+    from imagebio.live.service import MAX_STOPPED_WATCHES
+
+    (world.tree.base / "public/s0").mkdir()
+    kept_by_bob = world.watch("public/s0", BOB)
+    ids = []
+    for n in range(MAX_STOPPED_WATCHES + 3):
+        (world.tree.base / f"public/s{n}").mkdir(exist_ok=True)
+        (world.tree.base / f"public/s{n}/a.mrc").write_bytes(mrc_bytes(np.zeros((8, 8), np.float32), 1.0))
+        ids.append(world.watch(f"public/s{n}", ALICE))
+        world.run([], 5)
+        world.client.delete(f"{WATCHES}/{ids[-1]}", headers=ALICE)
+    listed = [w["id"] for w in world.client.get(WATCHES, headers=ALICE).json()["watches"]]
+    assert sorted(listed) == ids[3:]  # the three oldest were forgotten
+    counts = index_counts(world)
+    # their directories left the index, except the one somebody else still watches
+    assert counts["roots"] == MAX_STOPPED_WATCHES + 1 and counts["exposures"] == MAX_STOPPED_WATCHES + 1
+    assert world.items(kept_by_bob, BOB)["items"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"{WATCHES}/99999999999999999999",
+        f"{WATCHES}/99999999999999999999/items",
+        f"{WATCHES}/99999999999999999999/alerts",
+        f"{WATCHES}/{{watch}}/items?since=99999999999999999999",
+        f"{WATCHES}/0",
+        f"{WATCHES}/-3/history",
+    ],
+)
+def test_numbers_no_index_can_hold_are_refused(world: World, url: str) -> None:
+    """Regression: an integer beyond 64 bits reached SQLite and came back as a 500."""
+    watch = world.watch("public/shared", ALICE)
+    r = world.client.get(url.format(watch=watch), headers=ALICE)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_request"
+    r = world.client.delete(f"{WATCHES}/99999999999999999999", headers=ALICE)
+    assert r.status_code == 400
+    assert world.client.get(f"{WATCHES}/{2**63 - 1}", headers=ALICE).status_code == 404  # fits: unknown
+
+
+def test_a_busy_index_asks_to_come_back(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a request that had to write while a scanner held the index for long waited
+    thirty seconds and got "500 internal error"."""
+    monkeypatch.setattr("imagebio.live.index._BUSY_TIMEOUT_S", 0.2)
+    watch = world.watch("public/shared", ALICE)
+    writer = sqlite3.connect(world.state / "live.sqlite", isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")  # somebody is in the middle of a long write
+    try:
+        r = world.client.post(WATCHES, params={"path": "public/bob_session"}, headers=ALICE)
+        assert r.status_code == 503 and r.json()["error"]["code"] == "live_index_busy"
+        assert r.headers["retry-after"] == "5" and "sqlite" not in r.text.lower()
+        assert world.client.delete(f"{WATCHES}/{watch}", headers=ALICE).status_code == 503
+        assert world.summary(watch, ALICE)["watch"]["active"] is True  # reading goes on meanwhile
+        assert world.items(watch, ALICE)["items"] == []
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    assert world.client.post(WATCHES, params={"path": "public/bob_session"}, headers=ALICE).status_code == 200
+
+
+def test_the_same_host_on_another_port_is_another_site(world: World, tmp_path: Path) -> None:
+    """Regression: the Origin of a request was compared by host name only: any other program
+    listening on this computer (http://localhost:9999) could start and stop watches."""
+
+    def start(client, headers: dict[str, str]):
+        return client.post(WATCHES, params={"path": "public/shared"}, headers=headers)
+
+    with make_client(build_tree(tmp_path / "standalone")) as alone:  # Host: localhost, plain http
+        (tmp_path / "standalone/public/shared").mkdir()
+        for origin in (
+            "http://localhost:9999",
+            "https://localhost",
+            "http://localhost.:8080",
+            "http://[::1]",
+        ):
+            r = start(alone, {"Origin": origin})
+            assert r.status_code == 403 and r.json()["error"]["code"] == "cross_site_request", origin
+        for origin in ("http://localhost", "http://LOCALHOST:80", "http://localhost."):
+            assert start(alone, {"Origin": origin}).status_code == 200, origin
+        # the port of the application itself, when it is not the default one
+        assert start(alone, {"Origin": "http://localhost:8000", "Host": "localhost:8000"}).status_code == 200
+        assert start(alone, {"Origin": "http://localhost", "Host": "localhost:8000"}).status_code == 403
+        # in standalone mode nobody is trusted to say what the application is called
+        forged = {
+            "Origin": "https://evil.example",
+            "X-Forwarded-Host": "evil.example",
+            "X-Forwarded-Proto": "https",
+        }
+        assert start(alone, forged).status_code == 403
+
+    # behind the proxy: the Host it passes on, or what it says the outside calls the application
+    for headers, status in (
+        ({"Origin": "http://localhost:9999"}, 403),
+        ({"Origin": "https://localhost:8443"}, 403),
+        ({"Origin": "https://localhost"}, 200),  # the proxy does not say the scheme: either one
+        ({"Origin": "https://localhost", "X-Forwarded-Proto": "http"}, 403),
+        ({"Origin": "https://localhost", "X-Forwarded-Proto": "https"}, 200),
+        ({"Origin": "https://imagebio.lab.example"}, 403),
+        ({"Origin": "https://imagebio.lab.example", "X-Forwarded-Host": "imagebio.lab.example"}, 200),
+        ({"Origin": "https://imagebio.lab.example:8443", "X-Forwarded-Host": "imagebio.lab.example"}, 403),
+        (
+            {"Origin": "https://imagebio.lab.example:8443", "X-Forwarded-Host": "imagebio.lab.example:8443"},
+            200,
+        ),
+    ):
+        assert start(world.client, {**ALICE, **headers}).status_code == status, headers
+
+
 def test_another_site_cannot_start_or_stop_a_watch(world: World) -> None:
     """The identity comes from the proxy, not from a secret of the page: a request that changes
     something must come from the application itself."""
@@ -571,6 +775,52 @@ def test_background_scanning_starts_and_stops_with_the_watches(tmp_path: Path) -
         assert not t.is_alive()
 
 
+def test_a_directory_never_has_two_scanners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: stopping a watch and starting it again while a cycle was running left the
+    old scanner finishing its cycle next to the new one, both writing the same directory."""
+    from imagebio.live.scanner import CycleReport
+
+    gate = threading.Event()
+    inside = threading.Event()
+    made: list[object] = []
+    together = [0, 0]  # scanners in a cycle now, and the most there ever were
+    guard = threading.Lock()
+
+    class SlowScanner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            made.append(self)
+
+        def cycle(self, now: float) -> CycleReport:
+            with guard:
+                together[0] += 1
+                together[1] = max(together)
+            inside.set()
+            gate.wait(20)
+            with guard:
+                together[0] -= 1
+            return CycleReport()
+
+    monkeypatch.setattr("imagebio.live.service.Scanner", SlowScanner)
+    tree = build_tree(tmp_path / "data")
+    (tree.base / "public/session").mkdir()
+    with make_client(tree, state_dir=tmp_path / "state", live_interval_s=0.5) as client:
+        live = client.app.state.live
+        watch = client.post(WATCHES, params={"path": "public/session"}).json()["id"]
+        assert inside.wait(10)  # the first scanner is in the middle of a cycle
+        client.delete(f"{WATCHES}/{watch}")
+        assert client.post(WATCHES, params={"path": "public/session"}).json()["id"] == watch
+        time.sleep(0.5)
+        assert len(made) == 1  # the new one waits for the old one to be done
+        inside.clear()
+        gate.set()
+        assert inside.wait(10)  # then takes over
+        deadline = time.monotonic() + 10
+        while len(made) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(made) == 2 and together[1] == 1
+        assert [t.is_alive() for t, _ in live._threads.values()] == [True]
+
+
 # ── alerts ────────────────────────────────────────────────────────────────────
 
 CHANNELS = (
@@ -650,15 +900,21 @@ def test_an_alert_leaves_within_two_scan_cycles_of_its_threshold(alerting: World
     assert alerting.summary(watch, ALICE)["alerts"] == []
 
 
+def fake_disk(world: World, free_bytes: float) -> dict[str, float]:
+    """Make the server believe its volume has 1000 GB, of which ``free["bytes"]`` are free."""
+    free = {"bytes": free_bytes}
+    world.live.disk_usage = lambda path: type(
+        "Usage", (), {"total": 1000e9, "free": free["bytes"], "used": 0}
+    )()
+    return free
+
+
 def test_disk_and_rate_alerts(alerting: World) -> None:
     sim = sim_in(alerting, "cryo/alice_session", 23, pause_probability=0.0)
     watch = alerting.watch("cryo/alice_session", ALICE)
-    free = {"bytes": 500e9}
-    alerting.live.disk_usage = lambda path: type(
-        "Usage", (), {"total": 1000e9, "free": free["bytes"], "used": 0}
-    )()
+    free = fake_disk(alerting, 500e9)
     set_alerts(alerting, watch, ALICE, channels="phone,hook", disk_free=5, rate_drop=50)
-    alerting.run([sim], 300)
+    alerting.run([sim], 420)
     assert alerting.sent == []
     assert alerting.summary(watch, ALICE)["disk"] == {"total": 1000e9, "free": 500e9, "percent": 50.0}
 
@@ -670,19 +926,64 @@ def test_disk_and_rate_alerts(alerting: World) -> None:
     ]
     assert "Il reste 3.2 % d'espace libre (32 Go)." in alerting.sent[0][1].body
     free["bytes"] = 400e9
-    alerting.run([sim], 10)
+    alerting.run([sim], 110)  # room is back, but not for long enough to say so
+    assert len(alerting.sent) == 2 and alerting.summary(watch, ALICE)["alerts"] == ["disk"]
+    alerting.run([sim], 20)
     assert [(c, n.firing) for c, n in alerting.sent[2:]] == [("phone", False), ("hook", False)]
     assert alerting.sent[2][1].title == "imageBio : de la place est revenue sur le disque"
+    assert alerting.summary(watch, ALICE)["alerts"] == []
 
-    # the microscope stops: five minutes later the rate over five minutes is far under the hour's
+    # the microscope stops: the rate over five minutes falls far under the hour's, and stays there
     del alerting.sent[:]
     sim.stop()
-    alerting.run([sim], 400)
+    alerting.run([sim], 280)
+    assert alerting.sent == []
+    alerting.run([sim], 160)
     assert [(c, n.condition, n.firing) for c, n in alerting.sent] == [
         ("phone", "rate_drop", True),
         ("hook", "rate_drop", True),
     ]
     assert "images/h sur 5 minutes, contre" in alerting.sent[0][1].body
+
+
+def test_a_rate_is_back_when_images_arrive_not_when_the_hour_has_emptied(alerting: World) -> None:
+    """Regression: an hour after the microscope stopped, the hour held no image either, the
+    comparison no longer applied, and "le débit est revenu" was sent about a dead session."""
+    sim = sim_in(alerting, "cryo/alice_session", 24, pause_probability=0.0)
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    set_alerts(alerting, watch, ALICE, channels="phone", rate_drop=50)
+    alerting.run([sim], 420)
+    sim.stop()
+    alerting.run([sim], 600)
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("rate_drop", True)]
+    alerting.run([], 2 * 3600)  # nothing comes: nothing "came back"
+    assert len(alerting.sent) == 1 and alerting.summary(watch, ALICE)["alerts"] == ["rate_drop"]
+    again = sim_in(alerting, "cryo/alice_session", 25, pause_probability=0.0)
+    alerting.run([again], 300)
+    assert [(n.condition, n.firing) for _, n in alerting.sent[1:]] == [("rate_drop", False)]
+    assert alerting.sent[1][1].title == "imageBio : le débit est revenu"
+
+
+def test_a_value_that_hovers_around_its_threshold_is_told_once(alerting: World) -> None:
+    """Regression: a disk going back and forth across its threshold sent two notices at every
+    scan cycle. Leaving a condition takes a clear margin, and two minutes."""
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    free = fake_disk(alerting, 500e9)
+    set_alerts(alerting, watch, ALICE, channels="phone", disk_free=5)
+    for second in range(0, 900, 5):
+        free["bytes"] = 49e9 if second % 10 == 0 else 51e9  # 4.9 %, 5.1 %, 4.9 %, …
+        alerting.run([], 5)
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("disk", True)]
+    free["bytes"] = 53e9  # above the threshold, not clearly: still not resolved
+    alerting.run([], 300)
+    assert len(alerting.sent) == 1
+    for second in range(0, 300, 5):  # clearly above, but only every other cycle
+        free["bytes"] = 80e9 if second % 10 == 0 else 49e9
+        alerting.run([], 5)
+    assert len(alerting.sent) == 1
+    free["bytes"] = 80e9
+    alerting.run([], 130)
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("disk", True), ("disk", False)]
 
 
 def test_a_notice_that_cannot_be_delivered_is_tried_again_then_given_up(alerting: World) -> None:
@@ -718,6 +1019,93 @@ def test_a_notice_that_cannot_be_delivered_is_tried_again_then_given_up(alerting
         .fetchone()[0]
     )
     assert attempts == 5 and alerting.failures == 10**6 - 5
+
+
+def test_a_failing_channel_does_not_make_the_others_hear_it_again(alerting: World) -> None:
+    """Regression: with one channel down, the notice was sent again to the working ones at
+    each of the five attempts, and the "resolved" notice never left."""
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    free = fake_disk(alerting, 30e9)
+    set_alerts(alerting, watch, ALICE, channels="phone,hook,team", disk_free=5)
+    alerting.broken = {"phone"}
+    alerting.run([], 120)
+    assert [(c, n.firing) for c, n in alerting.sent] == [("hook", True), ("team", True)]  # once each
+    assert alerting.refused == 5  # the one that fails is tried again, then left alone
+    state = alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json()["firing"]
+    assert state == [
+        {
+            "condition": "disk",
+            "since": BASE,
+            "notified": False,
+            "error": "channel 'phone': ConnectionRefusedError",
+        }
+    ]
+
+    # it ends: those who were told are told, the other never heard of it
+    alerting.broken = {"hook"}
+    free["bytes"] = 500e9
+    alerting.run([], 130)
+    assert [(c, n.firing) for c, n in alerting.sent[2:]] == [("team", False)]
+    assert alerting.summary(watch, ALICE)["alerts"] == []
+    # and a "resolved" that could not be delivered is not lost: it leaves when the channel is back
+    alerting.broken = set()
+    alerting.run([], 10)
+    assert [(c, n.firing) for c, n in alerting.sent[3:]] == [("hook", False)]
+    alerting.run([], 60)
+    assert len(alerting.sent) == 4
+    assert alerting.live.index.connection().execute("SELECT COUNT(*) FROM alert_states").fetchone()[0] == 0
+
+
+def test_a_watch_started_again_counts_silence_from_then(alerting: World) -> None:
+    """Regression: a watch stopped for the night kept the date its alerts were set, and
+    announced "no image for 10 h" the second it was started again."""
+    watch = alerting.watch("cryo/alice_session", ALICE)
+    set_alerts(alerting, watch, ALICE, channels="phone", no_image=5)
+    alerting.client.delete(f"{WATCHES}/{watch}", headers=ALICE)
+    alerting.now += 10 * 3600
+    assert alerting.watch("cryo/alice_session", ALICE) == watch
+    assert alerting.client.get(f"{WATCHES}/{watch}/alerts", headers=ALICE).json()["set_at"] == alerting.now
+    restarted = alerting.now
+    alerting.run([], 290)
+    assert alerting.sent == []
+    sent_at = run_until(alerting, [], 30, 1)
+    assert restarted + 300 <= sent_at <= restarted + 310
+    assert "Aucune image depuis 5 min" in alerting.sent[0][1].body
+
+
+def test_alerts_stop_for_a_watch_nobody_looks_at_any_more(alerting: World) -> None:
+    """Regression: rules kept sending for ever, even to somebody who no longer opened the
+    session, or who had lost the right to read it. They last a week past the last visit."""
+    watch = alerting.watch("public/shared", ALICE)
+    free = fake_disk(alerting, 500e9)
+    set_alerts(alerting, watch, ALICE, channels="phone", disk_free=5)
+    for _ in range(6):  # six days, with a look at the page every day
+        alerting.now += 86400
+        alerting.summary(watch, ALICE)
+        alerting.run([], 5)
+    alerting.now += 6 * 86400  # six more days: the last visit is recent enough
+    free["bytes"] = 10e9
+    alerting.run([], 10)
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("disk", True)]
+    assert set_alerts(alerting, watch, ALICE, channels="phone", disk_free=5).status_code == 200
+
+    alerting.restart()  # the last visit is remembered across a restart
+    fake_disk(alerting, 10e9)
+    del alerting.sent[:]
+    alerting.now += 8 * 86400  # more than a week without anybody
+    alerting.run([], 30)
+    assert alerting.sent == []
+    alerting.summary(watch, ALICE)  # she comes back
+    alerting.run([], 10)
+    assert [(n.condition, n.firing) for _, n in alerting.sent] == [("disk", True)]
+
+    # a visit that is refused is not a visit
+    del alerting.sent[:]
+    set_alerts(alerting, watch, ALICE, channels="phone", disk_free=5)
+    alerting.now += 8 * 86400
+    assert alerting.client.get(f"{WATCHES}/{watch}", headers=BOB).status_code == 404
+    alerting.run([], 30)
+    assert alerting.sent == []
 
 
 def test_rules_are_per_watch_and_survive_a_restart(alerting: World) -> None:
@@ -757,6 +1145,9 @@ def test_the_scanner_failing_is_an_alert_of_its_own(alerting: World) -> None:
     assert alerting.sent[0][1].title == "imageBio : la surveillance échoue"
     assert "internal error (OSError)" in alerting.sent[0][1].body
     alerting.run([], 5)  # a cycle that works clears the error
+    assert alerting.summary(watch, ALICE)["scanner"]["error"] is None
+    assert len(alerting.sent) == 1  # a scanner that fails now and then is not told at every cycle
+    alerting.run([], 60)
     assert [(n.condition, n.firing) for _, n in alerting.sent] == [("scanner", True), ("scanner", False)]
 
 
@@ -845,6 +1236,15 @@ def test_a_test_notice_tells_which_channels_work(alerting: World) -> None:
     alerting.now += 11
     assert alerting.client.post(url, headers=ALICE).status_code == 200
     assert alerting.client.post(url, headers=BOB).status_code == 404
+    # regression: the limit was per watch, so eight watches sent eight times the notices at once
+    other = alerting.watch("public/shared", ALICE)
+    set_alerts(alerting, other, ALICE, channels="phone")
+    flood = alerting.client.post(f"{WATCHES}/{other}/alerts/test", headers=ALICE)
+    assert flood.status_code == 400 and "wait" in flood.json()["error"]["message"]
+    bob = alerting.watch("public/shared", BOB)  # somebody else has their own limit
+    set_alerts(alerting, bob, BOB, channels="hook")
+    assert alerting.client.post(f"{WATCHES}/{bob}/alerts/test", headers=BOB).status_code == 200
+    alerting.now += 11
     assert alerting.client.post(url, headers={**ALICE, "Sec-Fetch-Site": "cross-site"}).status_code == 403
 
 

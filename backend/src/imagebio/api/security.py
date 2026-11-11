@@ -32,6 +32,7 @@ _SECURITY_HEADERS: Final = (
 )
 _OPEN_PATHS: Final = frozenset({"/healthz"})
 _SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+_DEFAULT_PORTS: Final = {"http": "80", "https": "443"}
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -74,6 +75,16 @@ def host_name(header: str) -> str:
     return host.rstrip(".")
 
 
+def host_and_port(authority: str) -> tuple[str, str]:
+    """The host (as :func:`host_name` gives it) and the port of ``host[:port]``; the port is
+    empty when it is not written."""
+    text = authority.strip().lower()
+    name = host_name(text)
+    rest = text[text.find("]") + 1 :] if text.startswith("[") else text
+    port = rest.rsplit(":", 1)[1] if rest.count(":") == 1 else ""
+    return name, port
+
+
 class SecurityMiddleware:
     """Refuses foreign ``Host`` headers (DNS rebinding), refuses requests that change something
     when another site sent them, and adds the security headers.
@@ -84,7 +95,13 @@ class SecurityMiddleware:
     Requests other than GET and HEAD carry no secret of their own (the identity comes from the
     reverse proxy, or there is none in standalone mode), so a page of another site could send
     them on behalf of a user. A browser says where such a request comes from (``Origin``,
-    ``Sec-Fetch-Site``): it is refused unless it comes from this application.
+    ``Sec-Fetch-Site``): it is refused unless it comes from this application, which means the
+    same host *and the same port* (another program on this computer, or another service of
+    the same machine, is another origin), and the same scheme when it is known.
+
+    Behind a reverse proxy the application is known by the ``Host`` the proxy passes on, by
+    ``X-Forwarded-Host`` when the proxy rewrites ``Host``, or by the public names of
+    ``allowed_hosts``; its scheme by ``X-Forwarded-Proto``.
     """
 
     def __init__(self, app: Callable[[Scope, Receive, Send], Awaitable[None]], settings: Settings) -> None:
@@ -92,6 +109,8 @@ class SecurityMiddleware:
         loopback = is_loopback_host(settings.host)
         self.allowed = (_LOOPBACK_NAMES | settings.allowed_hosts) if loopback else settings.allowed_hosts
         self.enforce = loopback or bool(settings.allowed_hosts)
+        self.proxied = settings.auth_mode == "proxy"
+        self.public_names = settings.allowed_hosts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -140,8 +159,20 @@ class SecurityMiddleware:
         origin = headers.get(b"origin")
         if origin is None:
             return True
-        scheme, separator, authority = origin.strip().partition("://")
-        if not separator or scheme.lower() not in ("http", "https") or "/" in authority:
+        scheme, separator, authority = origin.strip().lower().partition("://")
+        if not separator or scheme not in _DEFAULT_PORTS or "/" in authority or "@" in authority:
             return False  # "null", or not an origin at all
-        name = host_name(authority)
-        return name in self.allowed or any(name == host_name(h) for h in hosts)
+        name, port = host_and_port(authority)
+        port = port or _DEFAULT_PORTS[scheme]
+        # what this application is called from outside: scheme (when known), names and ports
+        own_scheme: str | None = str(scope.get("scheme", "http"))
+        own = list(hosts)
+        if self.proxied:  # the proxy is the only client: what it says of the outside is trusted
+            forwarded = headers.get(b"x-forwarded-proto", "").split(",")[0].strip().lower()
+            own_scheme = forwarded if forwarded in _DEFAULT_PORTS else None
+            own += [h for h in headers.get(b"x-forwarded-host", "").split(",") if h.strip()]
+            own += sorted(self.public_names)
+        if own_scheme is not None and scheme != own_scheme:
+            return False
+        default = _DEFAULT_PORTS.get(own_scheme or scheme, "")
+        return any((name, port) == (n, p or default) for n, p in map(host_and_port, own))

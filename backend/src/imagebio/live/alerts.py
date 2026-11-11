@@ -5,10 +5,16 @@ dropping) and picks *channels* among those the administrator configured (ntfy, w
 e-mail). Users never give an address: the server only writes to places its own configuration
 names.
 
-Each condition is a small state machine: when it starts to hold, one notice is sent; when it
-stops, one "resolved" notice is sent. Nothing is repeated while it lasts. Rules are judged
-right after each scan cycle (:func:`evaluate` is pure: a reading in, the conditions that hold
-out), so a notice leaves within one cycle of its threshold being crossed.
+Each condition is a small state machine (:class:`AlertState`, :func:`step`): when it starts
+to hold, one notice is sent to each channel; when it stops, one "resolved" notice is sent to
+the channels that were told. Nothing is repeated while it lasts, and a channel that fails is
+tried again on its own: the others are not told twice. Rules are judged right after each scan
+cycle (:func:`evaluate` is pure: a reading in, the conditions that hold out), so a notice
+leaves within one cycle of its threshold being crossed.
+
+A value that hovers around its threshold must not send a notice at every cycle: a condition is
+harder to leave than to enter (:func:`evaluate` is told what was already announced), and the
+noisy ones must last, or be gone, for a while before anything is said (:data:`HOLD_S`).
 """
 
 from __future__ import annotations
@@ -19,7 +25,8 @@ import smtplib
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from collections.abc import Collection
+from dataclasses import asdict, dataclass, replace
 from email.message import EmailMessage
 from typing import Any, Final
 
@@ -28,19 +35,32 @@ from imagebio.core.errors import ImageBioError, InvalidRequestError
 
 __all__ = [
     "CONDITIONS",
+    "HOLD_S",
     "AlertDeliveryError",
     "AlertRules",
+    "AlertState",
     "Notice",
     "Notifier",
     "Reading",
     "evaluate",
     "notice_for",
+    "step",
 ]
 
 #: Conditions an alert can be about, in the order they are reported.
 CONDITIONS: Final = ("no_image", "disk", "rate_drop", "scanner")
-#: A rate is only said to drop when the last hour saw at least this many images.
-_MIN_HOURLY: Final = 12
+#: A rate is only said to drop when the last hour saw at least this many images: under one
+#: image a minute, five minutes hold too few images to tell a drop from chance (the "no image
+#: for N minutes" rule is the one for slow sessions).
+_MIN_HOURLY: Final = 60
+#: For each condition: how long it must hold before it is told, and how long it must be gone
+#: before it is told resolved (seconds). Silence and a failing scanner are told at once.
+HOLD_S: Final[dict[str, tuple[float, float]]] = {
+    "no_image": (0.0, 0.0),
+    "disk": (0.0, 120.0),
+    "rate_drop": (120.0, 120.0),
+    "scanner": (0.0, 60.0),
+}
 _USER_AGENT: Final = "imagebio-live"
 
 
@@ -130,9 +150,13 @@ def _gigabytes(n: int | None) -> str:
     return "" if n is None else f" ({n / 1e9:.0f} Go)"
 
 
-def evaluate(rules: AlertRules, r: Reading) -> dict[str, str | None]:
+def evaluate(rules: AlertRules, r: Reading, told: Collection[str] = ()) -> dict[str, str | None]:
     """For each condition, the sentence that describes it when it holds, None when it does not.
-    A condition whose threshold is not set never holds; the scanner failing is always told."""
+    A condition whose threshold is not set never holds; the scanner failing is always told.
+
+    ``told``: the conditions that were already announced. Those are left less easily than they
+    are entered: the disk must be clearly above its threshold again, and a rate is back when
+    images arrive, not when the hour it is compared to has emptied."""
     out: dict[str, str | None] = dict.fromkeys(CONDITIONS)
     if rules.no_image_min is not None:
         since = max(r.armed_at, r.last_arrival if r.last_arrival is not None else r.armed_at)
@@ -143,21 +167,73 @@ def evaluate(rules: AlertRules, r: Reading) -> dict[str, str | None]:
                 else "aucune depuis le réglage des alertes"
             )
             out["no_image"] = f"Aucune image depuis {_minutes(r.now - since)} ({last})."
-    if (
-        rules.disk_free_pct is not None
-        and r.disk_free_pct is not None
-        and r.disk_free_pct < rules.disk_free_pct
-    ):
-        out["disk"] = f"Il reste {r.disk_free_pct:.1f} % d'espace libre{_gigabytes(r.disk_free_bytes)}."
-    if (
-        rules.rate_drop_pct is not None
-        and r.rate_hour >= _MIN_HOURLY
-        and r.rate_5min < r.rate_hour * rules.rate_drop_pct / 100
-    ):
-        out["rate_drop"] = f"{r.rate_5min} images/h sur 5 minutes, contre {r.rate_hour} dans l'heure."
+    if rules.disk_free_pct is not None and r.disk_free_pct is not None:
+        limit = rules.disk_free_pct
+        if "disk" in told:
+            limit += max(0.5, limit / 10)
+        if r.disk_free_pct < limit:
+            out["disk"] = f"Il reste {r.disk_free_pct:.1f} % d'espace libre{_gigabytes(r.disk_free_bytes)}."
+    if rules.rate_drop_pct is not None:
+        was_told = "rate_drop" in told
+        reference = max(r.rate_hour, _MIN_HOURLY) if was_told else r.rate_hour
+        if (was_told or r.rate_hour >= _MIN_HOURLY) and r.rate_5min < reference * rules.rate_drop_pct / 100:
+            out["rate_drop"] = f"{r.rate_5min} images/h sur 5 minutes, contre {r.rate_hour} dans l'heure."
     if r.scanner_error:
         out["scanner"] = f"Le dossier ne peut plus être lu : {r.scanner_error}"
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class AlertState:
+    """Where one condition of one watch stands.
+
+    ``pending``: it holds, not for long enough to be told. ``firing``: it was told, or is being
+    told (``todo``: the channels that did not take the notice yet). ``resolving``: it is gone
+    and the channels that had been told are being told so."""
+
+    condition: str
+    since: float  # when it started to hold
+    phase: str = "pending"
+    clear_since: float | None = None  # firing: since when it is no longer seen
+    delivered: tuple[str, ...] = ()  # channels that got the "firing" notice
+    todo: tuple[str, ...] = ()  # channels still owed the notice of this phase
+    attempts: int = 0  # cycles in which the notice of this phase was sent
+    error: str | None = None  # public message of the last failed delivery
+
+    @property
+    def told(self) -> bool:
+        """Whether somebody may have been told that the condition holds."""
+        return self.phase == "firing"
+
+
+def step(
+    state: AlertState | None, condition: str, holds: bool, now: float, channels: tuple[str, ...]
+) -> AlertState | None:
+    """The state of ``condition`` after one more reading. Pure: delivering the notices that
+    the new state owes (``todo``) is the caller's business. None: nothing to remember."""
+    hold_on, hold_off = HOLD_S[condition]
+    if state is None:
+        if not holds:
+            return None
+        state = AlertState(condition, now)
+    if state.phase == "pending":
+        if not holds:
+            return None
+        if now - state.since >= hold_on:
+            return replace(state, phase="firing", todo=channels, attempts=0, error=None)
+        return state
+    if state.phase == "firing":
+        if holds:
+            return replace(state, clear_since=None) if state.clear_since is not None else state
+        clear_since = state.clear_since if state.clear_since is not None else now
+        if now - clear_since < hold_off:
+            return replace(state, clear_since=clear_since)
+        if not state.delivered:
+            return None  # nobody was told that it started
+        return replace(
+            state, phase="resolving", clear_since=clear_since, todo=state.delivered, attempts=0, error=None
+        )
+    return state  # resolving: until its notice is delivered or given up
 
 
 @dataclass(frozen=True, slots=True)

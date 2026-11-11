@@ -15,13 +15,16 @@ from imagebio.core.config import AlertChannel, ConfigError, Settings, SmtpConfig
 from imagebio.core.errors import InvalidRequestError
 from imagebio.live.alerts import (
     CONDITIONS,
+    HOLD_S,
     AlertDeliveryError,
     AlertRules,
+    AlertState,
     Notice,
     Notifier,
     Reading,
     evaluate,
     notice_for,
+    step,
 )
 from imagebio.live.index import SCHEMA_VERSION, Index
 
@@ -106,8 +109,109 @@ def test_disk_and_rate() -> None:
         == "288 images/h sur 5 minutes, contre 600 dans l'heure."
     )
     assert (
-        evaluate(rules, reading(rate_5min=0, rate_hour=11))["rate_drop"] is None
+        evaluate(rules, reading(rate_5min=0, rate_hour=59))["rate_drop"] is None
     )  # too few images to speak of a rate
+    assert evaluate(rules, reading(rate_5min=0, rate_hour=60))["rate_drop"] is not None
+
+
+def test_a_condition_is_harder_to_leave_than_to_enter() -> None:
+    """Once announced, the disk must be clearly above its threshold, and the rate is compared
+    to an hour that counts for at least one image a minute: it comes back with images."""
+    rules = AlertRules(("phone",), disk_free_pct=5, rate_drop_pct=50)
+    told = {"disk", "rate_drop"}
+    assert evaluate(rules, reading(disk_free_pct=5.2))["disk"] is None
+    assert evaluate(rules, reading(disk_free_pct=5.2), told)["disk"] is not None
+    assert evaluate(rules, reading(disk_free_pct=5.49), told)["disk"] is not None
+    assert evaluate(rules, reading(disk_free_pct=5.5), told)["disk"] is None
+    small = AlertRules(("phone",), disk_free_pct=0.2)  # a small threshold still has a margin
+    assert evaluate(small, reading(disk_free_pct=0.6), {"disk"})["disk"] is not None
+    assert evaluate(small, reading(disk_free_pct=0.7), {"disk"})["disk"] is None
+
+    assert evaluate(rules, reading(rate_5min=0, rate_hour=0))["rate_drop"] is None
+    assert evaluate(rules, reading(rate_5min=0, rate_hour=0), told)["rate_drop"] is not None
+    assert evaluate(rules, reading(rate_5min=24, rate_hour=2), told)["rate_drop"] is not None
+    assert evaluate(rules, reading(rate_5min=36, rate_hour=3), told)["rate_drop"] is None
+    assert evaluate(rules, reading(rate_5min=288, rate_hour=600), told)["rate_drop"] is not None
+    assert evaluate(rules, reading(rate_5min=300, rate_hour=600), told)["rate_drop"] is None
+    # what was told of one condition changes nothing for the others
+    assert evaluate(rules, reading(disk_free_pct=5.2), {"rate_drop", "no_image"})["disk"] is None
+
+
+def walk(condition: str, readings: list[tuple[float, bool]], channels=("phone", "hook")) -> list[str]:
+    """The phases a condition goes through over ``readings`` (seconds, holds), delivering at once."""
+    state: AlertState | None = None
+    phases = []
+    for at, holds in readings:
+        state = step(state, condition, holds, NOW + at, channels)
+        if state is not None and state.todo:  # what the service does: deliver, then forget a resolved one
+            delivered = state.delivered + state.todo if state.phase == "firing" else state.delivered
+            state = AlertState(state.condition, state.since, state.phase, state.clear_since, delivered)
+            if state.phase == "resolving":
+                phases.append("resolved")
+                state = None
+                continue
+        phases.append(state.phase if state is not None else "-")
+    return phases
+
+
+def test_the_steps_of_a_condition() -> None:
+    assert HOLD_S.keys() == set(CONDITIONS)
+    # silence is told at once, and resolved at once
+    assert walk("no_image", [(0, False), (5, True), (10, True), (15, False), (20, False)]) == [
+        "-",
+        "firing",
+        "firing",
+        "resolved",
+        "-",
+    ]
+    # a rate must stay low for two minutes before it is told, and a blip is never told
+    low = [(t, True) for t in range(0, 125, 5)]
+    assert walk("rate_drop", low)[-2:] == ["pending", "firing"]
+    assert walk("rate_drop", [(0, True), (60, True), (65, False), (70, True), (185, True), (190, True)]) == [
+        "pending",
+        "pending",
+        "-",
+        "pending",
+        "pending",
+        "firing",
+    ]
+    # and be back for two minutes before that is told; coming and going keeps it firing
+    back = walk("disk", [(0, True), (5, False), (60, False), (120, False), (125, False), (130, False)])
+    assert back == ["firing", "firing", "firing", "firing", "resolved", "-"]
+    flapping = [(t, t % 10 == 0) for t in range(0, 600, 5)]
+    assert set(walk("disk", flapping)) == {"firing"}
+    assert walk("scanner", [(0, True), (5, False), (60, False), (65, False)])[-1] == "resolved"
+
+
+def test_a_step_says_which_channels_are_owed_a_notice() -> None:
+    started = step(None, "disk", True, NOW, ("phone", "hook"))
+    assert started == AlertState("disk", NOW, "firing", todo=("phone", "hook"))
+    assert started.told and step(started, "disk", True, NOW + 5, ("phone", "hook")) is started
+    assert not AlertState("rate_drop", NOW).told  # pending: nobody was told
+
+    # one channel took it: when the condition ends, only that one is told
+    partly = AlertState("disk", NOW, "firing", delivered=("hook",), todo=("phone",), attempts=5, error="x")
+    leaving = step(partly, "disk", False, NOW + 10, ("phone", "hook"))
+    assert leaving == AlertState(
+        "disk",
+        NOW,
+        "firing",
+        clear_since=NOW + 10,
+        delivered=("hook",),
+        todo=("phone",),
+        attempts=5,
+        error="x",
+    )
+    assert step(leaving, "disk", True, NOW + 20, ()).clear_since is None  # it is back: the count starts again
+    gone = step(leaving, "disk", False, NOW + 130, ("phone", "hook"))
+    assert gone == AlertState(
+        "disk", NOW, "resolving", clear_since=NOW + 10, delivered=("hook",), todo=("hook",)
+    )
+    assert step(gone, "disk", True, NOW + 135, ("phone",)) is gone  # finishes being told before anything else
+
+    # nobody ever got the notice: there is nothing to resolve
+    unheard = AlertState("no_image", NOW, "firing", todo=("phone",), attempts=5, error="x")
+    assert step(unheard, "no_image", False, NOW + 10, ("phone",)) is None
 
 
 def test_the_scanner_failing_is_always_told() -> None:
@@ -353,7 +457,16 @@ def test_bad_alert_configuration_is_refused(tmp_path: Path, text: str) -> None:
 # ── the index of an earlier version ───────────────────────────────────────────
 
 
-def test_an_index_written_before_alerts_existed_is_brought_up_to_date(tmp_path: Path) -> None:
+#: The alert states as version 2 of the index kept them.
+_V2_ALERT_STATES = (
+    "CREATE TABLE alert_states (watch_id INTEGER NOT NULL REFERENCES watches(id), condition TEXT NOT NULL, "
+    "since REAL NOT NULL, notified INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, "
+    "error TEXT, PRIMARY KEY (watch_id, condition));"
+)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
     with index.write() as db:
@@ -362,11 +475,18 @@ def test_an_index_written_before_alerts_existed_is_brought_up_to_date(tmp_path: 
             "INSERT INTO watches (user, logical, root_id, active, created_at) VALUES ('alice', 'cryo/session', 1, 1, 2.0)"
         )
     index.close()
-    old = sqlite3.connect(path)  # what version 1 looked like
-    old.executescript(
-        "ALTER TABLE watches DROP COLUMN alerts; ALTER TABLE watches DROP COLUMN alerts_at; "
-        "DROP TABLE alert_states; UPDATE meta SET value = '1' WHERE key = 'schema_version';"
-    )
+    old = sqlite3.connect(path)  # what the earlier versions looked like
+    old.executescript("ALTER TABLE watches DROP COLUMN seen_at; DROP TABLE alert_states;")
+    if version == 1:  # before alerts existed
+        old.executescript(
+            "ALTER TABLE watches DROP COLUMN alerts; ALTER TABLE watches DROP COLUMN alerts_at;"
+        )
+    else:  # alerts, without the memory of which channel was told
+        old.executescript(_V2_ALERT_STATES)
+        old.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
+        old.execute("INSERT INTO alert_states VALUES (1, 'no_image', 4.0, 1, 1, NULL)")
+    old.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(version),))
+    old.commit()
     old.close()
 
     index = Index(path)
@@ -374,11 +494,15 @@ def test_an_index_written_before_alerts_existed_is_brought_up_to_date(tmp_path: 
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "2"
+        == "3"
     )
-    row = db.execute("SELECT user, logical, active, alerts, alerts_at FROM watches").fetchone()
-    assert tuple(row) == ("alice", "cryo/session", 1, None, None)  # what was there is kept
+    row = db.execute("SELECT user, logical, active, alerts, alerts_at, seen_at FROM watches").fetchone()
+    rules = (None, None) if version == 1 else ('{"channels": ["phone"]}', 3.0)
+    assert tuple(row) == ("alice", "cryo/session", 1, *rules, None)  # what was there is kept
+    # the states of version 2 cannot say which channel was told: they start again
     assert db.execute("SELECT COUNT(*) FROM alert_states").fetchone()[0] == 0
+    columns = {r["name"] for r in db.execute("PRAGMA table_info(alert_states)")}
+    assert {"phase", "clear_since", "delivered", "todo"} <= columns and "notified" not in columns
     index.close()
     Index(path).close()  # and opening it again changes nothing
 

@@ -22,12 +22,17 @@ from typing import Final
 
 __all__ = ["SCHEMA_VERSION", "Index"]
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
+#: How long a writer waits for another one (seconds) before giving up with "database is locked".
+_BUSY_TIMEOUT_S = 30.0
 
 #: Statements that bring an index from version N to N + 1 (tables are created by the schema
 #: itself: only what "CREATE TABLE IF NOT EXISTS" cannot do is here).
 _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: ("ALTER TABLE watches ADD COLUMN alerts TEXT", "ALTER TABLE watches ADD COLUMN alerts_at REAL"),
+    # version 3 keeps, for each alert, which channels were told: the states of version 2 cannot
+    # say it. They are dropped (the schema creates the new table): what still holds is told again.
+    2: ("DROP TABLE IF EXISTS alert_states", "ALTER TABLE watches ADD COLUMN seen_at REAL"),
 }
 
 _SCHEMA: Final = """
@@ -54,16 +59,20 @@ CREATE TABLE IF NOT EXISTS watches (
     stopped_at REAL,
     alerts     TEXT,                     -- JSON rules (live/alerts.py), NULL: none
     alerts_at  REAL,                     -- when they were set: silence is counted from then
+    seen_at    REAL,                     -- last time its user was allowed to look at it
     UNIQUE (user, logical)
 );
 
-CREATE TABLE IF NOT EXISTS alert_states (
-    watch_id  INTEGER NOT NULL REFERENCES watches(id),
-    condition TEXT NOT NULL,             -- no_image | disk | rate_drop | scanner
-    since     REAL NOT NULL,             -- when the condition started to hold
-    notified  INTEGER NOT NULL DEFAULT 0,  -- 1: its notice was delivered to every channel
-    attempts  INTEGER NOT NULL DEFAULT 0,
-    error     TEXT,                      -- public message of the last failed delivery
+CREATE TABLE IF NOT EXISTS alert_states (    -- live/alerts.py, AlertState
+    watch_id    INTEGER NOT NULL REFERENCES watches(id),
+    condition   TEXT NOT NULL,           -- no_image | disk | rate_drop | scanner
+    since       REAL NOT NULL,           -- when the condition started to hold
+    phase       TEXT NOT NULL,           -- pending | firing | resolving
+    clear_since REAL,                    -- firing: since when it is no longer seen
+    delivered   TEXT NOT NULL DEFAULT '[]',  -- JSON: channels that got the "firing" notice
+    todo        TEXT NOT NULL DEFAULT '[]',  -- JSON: channels still owed the notice of this phase
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    error       TEXT,                    -- public message of the last failed delivery
     PRIMARY KEY (watch_id, condition)
 );
 
@@ -164,7 +173,8 @@ class Index:
             )
 
     def _open(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self._path, timeout=30.0, isolation_level=None)  # explicit transactions
+        # isolation_level None: transactions are explicit
+        db = sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
         if self._path != ":memory:":
