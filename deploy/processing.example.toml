@@ -1,0 +1,62 @@
+# Programs run on the exposures of a watched session, for users who ask for it in the Live
+# mode: a motion correction on the movie, then a CTF estimation. To paste into imagebio.toml.
+#
+# NEVER RUN with the real programs: neither MotionCor3 nor CTFFIND, nor a GPU, was available
+# when this was written. imageBio's side (running, time limits, reading the result files) is
+# tested against stand-ins; the options and answers below come from the documentation of the
+# programs as remembered. Run each program by hand once, then adjust.
+#
+# - "argv" is a list of arguments, not a command line: nothing is split, no shell is involved.
+# - Placeholders: {movie} {image} {out} {apix} {kv} {cs} {amp} {dose} {frames}.
+#   {out} is a directory made for the run and removed afterwards; "result" and "image" are in it.
+#   An exposure for which a placeholder is not known (no pixel size...) is not processed.
+# - In a container, the programs and their libraries must be in the image, and the GPU given to it.
+# - A gain reference, a defect file, the EER upsampling... are written here as fixed arguments.
+
+[processing]
+slots = 1                         # programs run at once: one per GPU
+
+[processing.motion]
+argv = [
+    "/opt/MotionCor3/MotionCor3",
+    "-InMrc", "{movie}",
+    "-OutMrc", "{out}/aligned.mrc",
+    "-PixSize", "{apix}",
+    "-kV", "{kv}",
+    "-Patch", "5", "5",
+    "-Gpu", "0",
+    "-OutStar", "1",              # frame shifts as a RELION-style file next to the sum
+]
+result = "{out}/aligned.star"
+parser = "motion-star"            # or "motion-log" with result = "{out}/*-Patch-Full.log" and -LogDir {out}/
+image = "{out}/aligned.mrc"       # the sum, handed to the CTF step
+timeout = 600
+
+[processing.motion.formats]       # other movie formats: the whole argument list again
+tiff = ["/opt/MotionCor3/MotionCor3", "-InTiff", "{movie}", "-OutMrc", "{out}/aligned.mrc",
+        "-PixSize", "{apix}", "-kV", "{kv}", "-Patch", "5", "5", "-Gpu", "0", "-OutStar", "1",
+        "-Gain", "/srv/microscope/gain/current.mrc"]
+eer = ["/opt/MotionCor3/MotionCor3", "-InEer", "{movie}", "-OutMrc", "{out}/aligned.mrc",
+       "-PixSize", "{apix}", "-kV", "{kv}", "-Patch", "5", "5", "-Gpu", "0", "-OutStar", "1",
+       "-Gain", "/srv/microscope/gain/current.gain", "-EerSampling", "1"]
+
+[processing.ctf]
+argv = ["/opt/ctffind/bin/ctffind"]
+# CTFFIND asks its questions on standard input: one answer per line, in its order. These are
+# the questions of version 4.1; version 5 asks more (tilt, thickness): add their answers.
+stdin = [
+    "{image}",                    # input image
+    "{out}/diag.mrc",             # diagnostic output; the fit goes to {out}/diag.txt
+    "{apix}", "{kv}", "{cs}", "{amp}",
+    "512",                        # size of the amplitude spectrum
+    "30", "5",                    # minimum and maximum resolution, Å
+    "5000", "50000", "100",       # minimum and maximum defocus, search step, Å
+    "no",                         # is the astigmatism known?
+    "no",                         # slower, more exhaustive search?
+    "no",                         # restrain the astigmatism?
+    "no",                         # look for a phase shift?
+    "no",                         # expert options?
+]
+result = "{out}/diag.txt"
+parser = "ctffind"
+timeout = 120

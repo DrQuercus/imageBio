@@ -138,6 +138,79 @@ def test_invalid_config_is_rejected(tmp_path: Path, text: str):
         Settings.load(cfg)
 
 
+PROGRAMS = """
+[processing]
+slots = 2
+work_dir = "/scratch/imagebio"
+
+[processing.motion]
+argv = ["/opt/mc3/MotionCor3", "-InMrc", "{movie}", "-OutMrc", "{out}/sum.mrc", "-PixSize", "{apix}", "-FmDose", "{dose}"]
+result = "{out}/*-Patch-Full.log"
+parser = "motion-log"
+image = "{out}/sum.mrc"
+timeout = 900
+
+[processing.motion.formats]
+EER = ["/opt/mc3/MotionCor3", "-InEer", "{movie}", "-OutMrc", "{out}/sum.mrc"]
+
+[processing.ctf]
+argv = ["/opt/ctffind"]
+stdin = ["{image}", "{out}/diag.mrc", "{apix}", "{kv}", "{cs}", "{amp}", "no"]
+result = "{out}/diag.txt"
+parser = "ctffind"
+"""
+
+
+def test_external_programs_are_declared_as_argument_lists(tmp_path: Path):
+    cfg = tmp_path / "imagebio.toml"
+    cfg.write_text(PROGRAMS)
+    declared = Settings.load(cfg).processing
+    assert declared is not None and Settings().processing is None  # nothing runs unless declared
+    assert (declared.slots, declared.work_dir) == (2, Path("/scratch/imagebio"))
+    assert declared.motion is not None and declared.ctf is not None
+    assert declared.motion.argv[:3] == ("/opt/mc3/MotionCor3", "-InMrc", "{movie}")
+    assert declared.motion.formats == {
+        "eer": ("/opt/mc3/MotionCor3", "-InEer", "{movie}", "-OutMrc", "{out}/sum.mrc")
+    }
+    assert (declared.motion.timeout_s, declared.ctf.timeout_s) == (900.0, 300.0)
+    assert declared.ctf.stdin[-1] == "no" and declared.ctf.parser == "ctffind"
+
+    def broken(old: str, new: str) -> str:
+        assert old in PROGRAMS
+        return PROGRAMS.replace(old, new)
+
+    for bad, why in (
+        (broken('argv = ["/opt/ctffind"]', 'argv = "/opt/ctffind {image}"'), "a list"),  # a command line
+        (broken('argv = ["/opt/ctffind"]', 'argv = ["ctffind"]'), "absolute path"),  # found through PATH
+        (broken('argv = ["/opt/ctffind"]', 'argv = ["{out}/ctffind"]'), "absolute path"),
+        (broken('argv = ["/opt/ctffind"]', "argv = []"), "list of 1 to"),
+        (broken('"{kv}", "{cs}"', '"{kV}", "{cs}"'), "brace that is not a placeholder"),
+        (broken('"{kv}", "{cs}"', '"{voltage}", "{cs}"'), "unknown placeholder"),
+        (broken('result = "{out}/diag.txt"', 'result = "/tmp/diag.txt"'), "files of {out}/"),
+        (broken('image = "{out}/sum.mrc"', 'image = "{movie}"'), "files of {out}/"),
+        (broken('parser = "ctffind"', 'parser = "gctf"'), "parser must be 'ctffind'"),
+        (broken('parser = "motion-log"', 'parser = "ctffind"'), "'motion-star' or 'motion-log'"),
+        (broken('"-InMrc", "{movie}", ', ""), "every argv must name {movie}"),
+        (broken('"-InEer", "{movie}", ', ""), "every argv must name {movie}"),
+        (broken("EER = ", "DM4 = "), "unknown movie format"),
+        (broken('stdin = ["{image}", ', 'stdin = ["{movie}", '), "it must name {image}"),
+        (broken('"{amp}", "no"]', '"{amp}", "{dose}"]'), "are not its"),
+        (broken("timeout = 900", "timeout = 0"), "timeout must be between"),
+        (broken("timeout = 900", 'timeout = "long"'), "a number of seconds"),
+        (broken("slots = 2", "slots = 0"), "slots must be between"),
+        (broken("slots = 2", "slots = 1.5"), "whole number"),
+        (broken('work_dir = "/scratch/imagebio"', 'work_dir = "scratch"'), "absolute path"),
+        (broken('parser = "ctffind"', 'parser = "ctffind"\nshell = true'), "expected argv"),
+        ("[processing]\nslots = 1\n", "declares neither"),
+        (PROGRAMS + '\n[processing.pick]\nargv = ["/opt/cryolo"]\n', "unknown key"),
+        (broken('"{amp}", "no"]', '"{amp}", "no\\nyes"]'), "control characters"),
+    ):
+        cfg.write_text(bad)
+        with pytest.raises(ConfigError) as refused:
+            Settings.load(cfg)
+        assert why in str(refused.value), (why, str(refused.value))
+
+
 def test_missing_config_file(tmp_path: Path):
     with pytest.raises(ConfigError):
         Settings.load(tmp_path / "nope.toml")

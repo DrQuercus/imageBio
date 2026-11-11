@@ -38,6 +38,22 @@ Settings come from a TOML file (``imagebio serve --config imagebio.toml``)::
     kind = "email"
     to = ["cryoem@lab.example"]
 
+    [processing]                    # optional: programs run on each exposure of a watched session
+    slots = 1                       # how many run at once (one per GPU)
+
+    [processing.motion]             # on the movie; see docs/exploitation.md for a full example
+    argv = ["/opt/MotionCor3/MotionCor3", "-InMrc", "{movie}", "-OutMrc", "{out}/aligned.mrc", "..."]
+    result = "{out}/aligned.star"   # what the parser reads
+    parser = "motion-star"          # or "motion-log"
+    image = "{out}/aligned.mrc"     # the sum it wrote, handed to the CTF step
+    timeout = 600
+
+    [processing.ctf]                # on that sum, else on the image the microscope integrated
+    argv = ["/opt/ctffind/bin/ctffind"]
+    stdin = ["{image}", "{out}/diag.mrc", "{apix}", "{kv}", "{cs}", "{amp}", "..."]
+    result = "{out}/diag.txt"
+    parser = "ctffind"
+
     [[roots]]
     name = "glacios"                # first component of every client-visible path
     path = "/srv/glacios"
@@ -57,6 +73,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit
+
+from imagebio.tools.templates import check_template
 
 ROOT_NAME_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _ADDRESS_RE: Final = re.compile(r"[^@\s<>,;]{1,64}@[^@\s<>,;]{1,255}")
@@ -156,6 +174,105 @@ class SmtpConfig:
             raise ConfigError("[alerts.smtp]: host, port (1-65535) and a valid 'from' address are required")
 
 
+_MOVIE_FORMATS: Final = frozenset({"mrc", "mrcs", "tif", "tiff", "eer"})
+_MAX_ARGUMENTS: Final = 256
+_MAX_ARGUMENT_CHARS: Final = 4096
+_MAX_STDIN_LINES: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class ToolStep:
+    """A program the Live mode may run on each exposure, as the administrator declares it: an
+    argument list (never a command line: nothing is split or handed to a shell) whose arguments
+    may name placeholders (``imagebio.tools.templates.PLACEHOLDERS``)."""
+
+    #: The program (an absolute path) and its arguments.
+    argv: tuple[str, ...]
+    #: The file the parser reads once the program ended.
+    result: str
+    #: ``ctffind``, ``motion-star`` or ``motion-log`` (``imagebio.tools.parsers``).
+    parser: str
+    #: Lines typed to the program (CTFFIND asks its questions on standard input).
+    stdin: tuple[str, ...] = ()
+    #: Argument lists for movies of a given extension (``eer``, ``tiff``...), instead of ``argv``.
+    formats: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: Motion step: the sum it writes, which the CTF step then takes. Inside ``{out}``.
+    image: str = ""
+    timeout_s: float = 300.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "argv", tuple(self.argv))
+        object.__setattr__(self, "stdin", tuple(self.stdin))
+        object.__setattr__(self, "formats", {str(k).lower(): tuple(v) for k, v in self.formats.items()})
+        for extension, argv in (("", self.argv), *self.formats.items()):
+            where = f"for .{extension} movies" if extension else "argv"
+            if extension and extension not in _MOVIE_FORMATS:
+                raise ConfigError(
+                    f"processing: unknown movie format {extension!r} ({sorted(_MOVIE_FORMATS)})"
+                )
+            if not argv or len(argv) > _MAX_ARGUMENTS or not all(isinstance(a, str) for a in argv):
+                raise ConfigError(f"processing: {where} must be a list of 1 to {_MAX_ARGUMENTS} strings")
+            if not Path(argv[0]).is_absolute() or "{" in argv[0]:
+                raise ConfigError(f"processing: {where} must start with the absolute path of the program")
+        if len(self.stdin) > _MAX_STDIN_LINES or not all(isinstance(line, str) for line in self.stdin):
+            raise ConfigError(f"processing: stdin must be a list of at most {_MAX_STDIN_LINES} strings")
+        if not 1 <= self.timeout_s <= 86400:
+            raise ConfigError("processing: timeout must be between 1 and 86400 seconds")
+        for template in self.templates():
+            if len(template) > _MAX_ARGUMENT_CHARS:
+                raise ConfigError(f"processing: an argument is longer than {_MAX_ARGUMENT_CHARS} characters")
+            try:
+                check_template(template)
+            except ValueError as e:
+                raise ConfigError(f"processing: {e} in {template!r}") from None
+        if not self.result.startswith("{out}/") or (self.image and not self.image.startswith("{out}/")):
+            raise ConfigError("processing: result and image must be files of {out}/")
+
+    def templates(self) -> tuple[str, ...]:
+        """Every template of the step."""
+        every = [*self.argv, *self.stdin, self.result, *(a for argv in self.formats.values() for a in argv)]
+        return (*every, self.image) if self.image else tuple(every)
+
+    def names(self, placeholder: str) -> bool:
+        return any(f"{{{placeholder}}}" in template for template in self.templates())
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessingConfig:
+    """What the Live mode runs on the exposures of a session whose user asked for it: a motion
+    correction on the movie, then a CTF estimation on the micrograph. Either may be absent."""
+
+    motion: ToolStep | None = None
+    ctf: ToolStep | None = None
+    #: Programs running at once (one per GPU, as a rule).
+    slots: int = 1
+    #: Where each run gets its directory; None: ``work`` in the state directory.
+    work_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.motion is None and self.ctf is None:
+            raise ConfigError("[processing] declares neither [processing.motion] nor [processing.ctf]")
+        if not 1 <= self.slots <= 16:
+            raise ConfigError("processing.slots must be between 1 and 16")
+        if self.work_dir is not None and not Path(self.work_dir).is_absolute():
+            raise ConfigError("processing.work_dir must be an absolute path")
+        if self.motion is not None:
+            if self.motion.parser not in ("motion-star", "motion-log"):
+                raise ConfigError("processing.motion: parser must be 'motion-star' or 'motion-log'")
+            argvs = (self.motion.argv, *self.motion.formats.values())
+            if self.motion.names("image") or not all(any("{movie}" in a for a in argv) for argv in argvs):
+                raise ConfigError("processing.motion: every argv must name {movie}, and none {image}")
+        if self.ctf is not None:
+            if self.ctf.parser != "ctffind":
+                raise ConfigError("processing.ctf: parser must be 'ctffind'")
+            if not self.ctf.names("image") or self.ctf.formats or self.ctf.image:
+                raise ConfigError("processing.ctf: it must name {image}, and has neither formats nor image")
+            if any(self.ctf.names(name) for name in ("movie", "dose", "frames")):
+                raise ConfigError(
+                    "processing.ctf works on the micrograph: {movie}, {dose} and {frames} are not its"
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     roots: tuple[RootConfig, ...] = ()
@@ -199,6 +316,8 @@ class Settings:
     #: Where the live monitor may send alerts.
     alert_channels: tuple[AlertChannel, ...] = ()
     smtp: SmtpConfig | None = None
+    #: Programs run on the exposures of a watched session (motion correction, CTF); None: none.
+    processing: ProcessingConfig | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -280,7 +399,16 @@ class Settings:
                 raise ConfigError(f"[{name}]: unknown key(s) {sorted(unknown)}")
             return sec
 
-        unknown_top = set(data) - {"server", "auth", "cache", "live", "microscope", "alerts", "roots"}
+        unknown_top = set(data) - {
+            "server",
+            "auth",
+            "cache",
+            "live",
+            "microscope",
+            "alerts",
+            "processing",
+            "roots",
+        }
         if unknown_top:
             raise ConfigError(f"unknown section(s) {sorted(unknown_top)}")
         server = section("server", {"host", "port", "allowed_hosts", "trust_network", "metrics"})
@@ -328,6 +456,53 @@ class Settings:
                 username=str(raw["username"]) if "username" in raw else None,
                 password_env=str(raw["password_env"]) if "password_env" in raw else None,
             )
+        processing = None
+        if "processing" in data:
+            declared = section("processing", {"slots", "work_dir", "motion", "ctf"})
+            steps: dict[str, ToolStep | None] = {"motion": None, "ctf": None}
+            for kind in steps:
+                if kind not in declared:
+                    continue
+                raw_step = declared[kind]
+                keys = {"argv", "stdin", "result", "parser", "image", "timeout", "formats"}
+                lists = (
+                    [raw_step.get(k, []) for k in ("argv", "stdin")] if isinstance(raw_step, Mapping) else []
+                )
+                formats = raw_step.get("formats", {}) if isinstance(raw_step, Mapping) else None
+                if (
+                    not isinstance(raw_step, Mapping)
+                    or set(raw_step) - keys
+                    or not {"argv", "result", "parser"} <= set(raw_step)
+                    or not all(isinstance(x, list) for x in lists)
+                    or not isinstance(formats, Mapping)
+                    or not all(isinstance(v, list) for v in formats.values())
+                ):
+                    raise ConfigError(
+                        f"[processing.{kind}]: expected argv (a list), result, parser and optional "
+                        f"{sorted(keys - {'argv', 'result', 'parser'})}"
+                    )
+                try:
+                    timeout = float(raw_step.get("timeout", 300))
+                except (TypeError, ValueError):
+                    raise ConfigError(f"[processing.{kind}]: timeout must be a number of seconds") from None
+                steps[kind] = ToolStep(
+                    argv=tuple(raw_step["argv"]),
+                    result=str(raw_step["result"]),
+                    parser=str(raw_step["parser"]),
+                    stdin=tuple(raw_step.get("stdin", ())),
+                    formats={str(k): tuple(v) for k, v in formats.items()},
+                    image=str(raw_step.get("image", "")),
+                    timeout_s=timeout,
+                )
+            slots = declared.get("slots", 1)
+            if isinstance(slots, bool) or not isinstance(slots, int):
+                raise ConfigError("processing.slots must be a whole number")
+            processing = ProcessingConfig(
+                motion=steps["motion"],
+                ctf=steps["ctf"],
+                slots=slots,
+                work_dir=Path(str(declared["work_dir"])) if "work_dir" in declared else None,
+            )
         raw_roots = data.get("roots", [])
         if not isinstance(raw_roots, list):
             raise ConfigError("[[roots]] must be an array of tables")
@@ -370,6 +545,7 @@ class Settings:
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),
             smtp=smtp,
+            processing=processing,
         )
 
     @classmethod

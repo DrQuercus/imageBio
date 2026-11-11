@@ -39,6 +39,15 @@ def test_the_configurations_shipped_are_accepted() -> None:
         assert settings.user_header == "X-Forwarded-User"  # what the Caddy files send
 
 
+def test_the_example_of_external_programs_is_a_valid_declaration() -> None:
+    declared = Settings.load(DEPLOY / "processing.example.toml").processing
+    assert declared is not None and declared.slots == 1
+    assert declared.motion is not None and declared.ctf is not None
+    assert declared.motion.parser == "motion-star" and set(declared.motion.formats) == {"tiff", "eer"}
+    assert declared.motion.timeout_s == 600 and declared.ctf.timeout_s == 120
+    assert declared.ctf.stdin[0] == "{image}" and len(declared.ctf.stdin) == 17
+
+
 def test_every_variable_of_the_stack_is_explained_in_the_example() -> None:
     explained = set(
         re.findall(r"^#? ?([A-Z][A-Z0-9_]+)=", (DEPLOY / "compose/env.example").read_text(), re.M)
