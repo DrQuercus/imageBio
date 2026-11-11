@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { isAbort } from "../api/client";
 import type { DatasetInfo, PlaneIndex, Processing, ReaderOptions } from "../api/types";
 import type { DisplaySettings } from "../state/url";
+import type { PickOverlay } from "./cryo";
 import { type GpuLayer, Renderer } from "./gl";
 import type { Lut } from "./luts";
 import { loadPlanes, type PlaneSet, planeKeyOf, toFloat32, valuesAt } from "./planes";
@@ -56,6 +57,8 @@ interface Props {
   onRulerChange: (ruler: Ruler | null) => void;
   /** Å per image pixel, or null when unknown. */
   apix: number | null;
+  /** Particle coordinates to draw over the image, or null. */
+  picks: PickOverlay | null;
   onHover: (info: HoverInfo | null) => void;
   /** Called when a plane is on screen (the frame player waits for it). */
   onShown: (index: PlaneIndex) => void;
@@ -71,7 +74,7 @@ interface Loaded {
 const DETAIL_DELAY_MS = 120;
 
 export function ViewerCanvas(props: Props) {
-  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix } = props;
+  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix, picks } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const glRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -89,8 +92,9 @@ export function ViewerCanvas(props: Props) {
   const planeKey = planeKeyOf(etag, options, index, channels, proc);
 
   // ── drawing ────────────────────────────────────────────────────────────────
-  const state = useRef({ view, viewport, display, ruler, apix, planeKey, rgb: info.rgb, image });
-  state.current = { view, viewport, display, ruler, apix, planeKey, rgb: info.rgb, image };
+  const state = useRef({ view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image });
+  state.current = { view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image };
+  const [drawnPicks, setDrawnPicks] = useState(0);
 
   // ── value under the cursor ─────────────────────────────────────────────────
   // The last pointer position is kept: when another plane arrives under a cursor that does
@@ -145,7 +149,8 @@ export function ViewerCanvas(props: Props) {
         invert: s.display.invert,
         rgb: s.rgb,
       });
-      drawOverlay(overlayRef.current, s.view, s.viewport, dpr, s.ruler, s.apix);
+      const drawn = drawOverlay(overlayRef.current, s.view, s.viewport, dpr, s.ruler, s.apix, s.picks);
+      setDrawnPicks(drawn);
     });
   }, []);
 
@@ -198,7 +203,7 @@ export function ViewerCanvas(props: Props) {
     draw();
   }, [lut, draw]);
 
-  useEffect(draw, [draw, view, viewport, display, ruler, apix]);
+  useEffect(draw, [draw, view, viewport, display, ruler, apix, picks]);
 
   // ── overview: the whole plane, binned ──────────────────────────────────────
   useEffect(() => {
@@ -329,6 +334,8 @@ export function ViewerCanvas(props: Props) {
       ref={wrapRef}
       className={`viewer tool-${tool}`}
       data-testid="viewer"
+      data-picks={picks ? picks.points.length / 2 : undefined}
+      data-picks-drawn={picks ? drawnPicks : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -339,12 +346,13 @@ export function ViewerCanvas(props: Props) {
       onDoubleClick={() => viewport && props.onViewChange(fitView(image, viewport))}
     >
       <canvas ref={glRef} className="viewer-gl" data-testid="viewer-canvas" />
-      <canvas ref={overlayRef} className="viewer-overlay" />
+      <canvas ref={overlayRef} className="viewer-overlay" data-testid="viewer-overlay" />
     </div>
   );
 }
 
-/** Ruler and scale bar, drawn in screen space: constant line width and text size at any zoom. */
+/** Particles, ruler and scale bar, drawn in screen space: constant line width and text size
+ *  at any zoom. Returns the number of particles that fell in the window. */
 function drawOverlay(
   canvas: HTMLCanvasElement | null,
   view: View,
@@ -352,8 +360,9 @@ function drawOverlay(
   dpr: number,
   ruler: Ruler | null,
   apix: number | null,
-): void {
-  if (!canvas) return;
+  picks: PickOverlay | null,
+): number {
+  if (!canvas) return 0;
   const w = Math.round(viewport.width * dpr);
   const h = Math.round(viewport.height * dpr);
   if (canvas.width !== w || canvas.height !== h) {
@@ -361,10 +370,35 @@ function drawOverlay(
     canvas.height = h;
   }
   const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  if (!ctx) return 0;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, viewport.width, viewport.height);
   ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+  let drawn = 0;
+  if (picks && picks.points.length) {
+    // one circle per particle at its real size; a dot when the circle would be a speck
+    const radius = (picks.diameter / 2) * view.zoom;
+    const [ox, oy] = imageToScreen(view, viewport, 0, 0);
+    ctx.strokeStyle = "#4dffa6";
+    ctx.fillStyle = "#4dffa6";
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    for (let k = 0; k < picks.points.length; k += 2) {
+      const sx = ox + (picks.points[k] ?? 0) * view.zoom;
+      const sy = oy + (picks.points[k + 1] ?? 0) * view.zoom;
+      if (sx < -radius || sy < -radius || sx > viewport.width + radius || sy > viewport.height + radius) continue;
+      drawn += 1;
+      if (radius < 2) {
+        ctx.rect(sx - 1, sy - 1, 2, 2);
+      } else {
+        ctx.moveTo(sx + radius, sy);
+        ctx.arc(sx, sy, radius, 0, 2 * Math.PI);
+      }
+    }
+    if (radius < 2) ctx.fill();
+    else ctx.stroke();
+  }
 
   if (apix) {
     // scale bar: a round length close to 120 screen pixels
@@ -415,6 +449,7 @@ function drawOverlay(
       ctx.fillText(label, tx, ty + 2);
     }
   }
+  return drawn;
 }
 
 export function rulerLabel(pixels: number, apix: number | null): string {

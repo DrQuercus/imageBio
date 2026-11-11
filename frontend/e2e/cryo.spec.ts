@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { hoverPixel, openFile, ready, trackRefused } from "./helpers";
+import { type Debug, hoverPixel, openFile, ready, trackRefused } from "./helpers";
 
 /** Standard deviation of the plane on screen, as the Fichier panel shows it. */
 async function shownStd(page: Page): Promise<number> {
@@ -309,4 +309,83 @@ test("a gain stored upside down is noticed, and corrected in one click", async (
   expect(sent.filter((u) => u.includes("aligned.mrc")).some((u) => u.includes("gain="))).toBe(false);
   await expect(page.getByTestId("error")).toHaveCount(0);
   expect(refused).toEqual([]); // nor the frame range of the movie: nothing was asked that does not exist
+});
+
+/** Strongest opacity of the overlay (ruler, particles) around image position (x, y). */
+async function overlayAlpha(page: Page, x: number, y: number): Promise<number> {
+  return page.evaluate(([px, py]) => {
+    const p = (window as unknown as { __imagebio: Debug }).__imagebio.toScreen(px!, py!);
+    const canvas = document.querySelector('[data-testid="viewer-overlay"]') as HTMLCanvasElement;
+    if (!p) return -1;
+    const dpr = window.devicePixelRatio || 1;
+    const data = canvas.getContext("2d")!.getImageData(Math.round(p[0] * dpr) - 2, Math.round(p[1] * dpr) - 2, 5, 5).data;
+    let alpha = 0;
+    for (let k = 3; k < data.length; k += 4) alpha = Math.max(alpha, data[k]!);
+    return alpha;
+  }, [x, y]);
+}
+
+test("particle coordinates are drawn over the image, from a file about it or about a whole data set", async ({ page }) => {
+  const refused = trackRefused(page);
+  await openFile(page, "demo/picks/mic_001.mrc");
+  const viewer = page.getByTestId("viewer");
+  await expect(viewer).not.toHaveAttribute("data-picks");
+  expect(await overlayAlpha(page, 84, 64)).toBe(0);
+
+  // the box file that bears the name of the image is offered
+  await expect(page.getByTestId("picks-candidate")).toHaveText("mic_001.box");
+  await page.getByTestId("picks-candidate").click();
+  await expect(page.getByTestId("picks-status")).toHaveText("3 particules sur cette image");
+  await expect(viewer).toHaveAttribute("data-picks", "3");
+  await expect(viewer).toHaveAttribute("data-picks-drawn", "3");
+  await expect(page.getByTestId("picks-diameter")).toHaveAttribute("placeholder", "40"); // the boxes of the file
+  // a circle 40 pixels across around (64, 64): its edge is drawn, its centre and the next particle's place are not
+  await expect.poll(() => overlayAlpha(page, 84, 64)).toBeGreaterThan(100);
+  expect(await overlayAlpha(page, 64, 44)).toBeGreaterThan(100);
+  expect(await overlayAlpha(page, 64, 64)).toBe(0);
+  expect(await overlayAlpha(page, 148, 64)).toBe(0);
+  // rows counted from the bottom: the particle of (128, 192) is drawn at (128, 64)
+  await page.getByTestId("picks-flip").check();
+  await expect.poll(() => overlayAlpha(page, 148, 64)).toBeGreaterThan(100);
+  expect(await overlayAlpha(page, 84, 64)).toBe(0);
+  await page.getByTestId("picks-flip").uncheck();
+  // a diameter typed by hand
+  await page.getByTestId("picks-diameter").fill("80");
+  await page.getByTestId("picks-diameter").press("Enter");
+  await expect.poll(() => overlayAlpha(page, 104, 64)).toBeGreaterThan(100);
+  expect(await overlayAlpha(page, 84, 64)).toBe(0);
+  // the address follows a moment later
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain("picks=demo%2Fpicks%2Fmic_001.box");
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain("pd=80");
+
+  // a file about this image only does not follow to the next image
+  await page.getByTestId("browser").getByText("mic_002.mrc", { exact: true }).click();
+  await ready(page, "demo/picks/mic_002.mrc");
+  await expect(viewer).not.toHaveAttribute("data-picks");
+  await expect(page.getByTestId("picks-hint")).toBeVisible(); // nothing bears its name
+
+  // a file of a whole data set, chosen in the list: the particles of the image shown, then of the next
+  await page.getByTestId("browser").getByText("particles.star", { exact: true }).click();
+  await expect(page.getByTestId("picks-file")).toHaveText("particles.star");
+  await expect(page.getByTestId("picks-status")).toHaveText("1 particule sur cette image");
+  await page.getByTestId("browser").getByText("mic_001.mrc", { exact: true }).click();
+  await ready(page, "demo/picks/mic_001.mrc");
+  await expect(page.getByTestId("picks-status")).toHaveText("2 particules sur cette image");
+  await expect(viewer).toHaveAttribute("data-picks", "2");
+  // the less certain one is hidden by the score threshold
+  await page.getByTestId("picks-score").fill("0.55");
+  await expect(viewer).toHaveAttribute("data-picks", "1");
+
+  // the link reproduces the overlay
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain("pms=0.55");
+  const link = await page.evaluate(() => window.location.href);
+  expect(link).toContain("picks=demo%2Fpicks%2Fparticles.star");
+  await page.goto("about:blank");
+  await page.goto(link);
+  await ready(page, "demo/picks/mic_001.mrc");
+  await expect(viewer).toHaveAttribute("data-picks", "1");
+  await page.getByTestId("picks-clear").click();
+  await expect(viewer).not.toHaveAttribute("data-picks");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
 });

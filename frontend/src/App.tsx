@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "./api/client";
-import type { DatasetInfoResponse, Me, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
+import type { DatasetInfoResponse, Me, PicksResponse, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
 import { ContrastPanel } from "./components/ContrastPanel";
 import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
-import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, processingKey, processingOf } from "./viewer/cryo";
+import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
@@ -45,6 +45,8 @@ export function App({ onLive }: { onLive: () => void }) {
   const [level, setLevel] = useState(1);
   const [shown, setShown] = useState("");
   const [copied, setCopied] = useState(false);
+  const [picks, setPicks] = useState<PicksResponse | null>(null);
+  const [picksError, setPicksError] = useState<string | null>(null);
 
   // What is on screen. Every request for pixels is built from these values only: the file as
   // the server described it, the options it was opened with and a plane that exists in it.
@@ -88,6 +90,8 @@ export function App({ onLive }: { onLive: () => void }) {
   // Set when the next file to arrive must be fitted to the window. The view cannot simply be
   // cleared here: the previous file is still on screen and would be refitted in its place.
   const fitOnLoad = useRef(false);
+  /** Whether the coordinate file in use names micrographs (it then applies to other images). */
+  const picksMany = useRef(false);
   const pathRef = useRef(path);
   pathRef.current = path;
   const openFile = useCallback((next: string) => {
@@ -95,6 +99,8 @@ export function App({ onLive }: { onLive: () => void }) {
     // filters and frame average follow the user from file to file; a gain only to a file of
     // the same kind in the same directory (an already corrected image must not get it again)
     if (!keepsGain(pathRef.current, next)) setCryo((c) => ({ ...c, gain: null, gainOrient: 0, gainInvert: false }));
+    // a coordinate file about one image does not follow to the next; one of a whole data set does
+    if (!picksMany.current) setCryo((c) => ({ ...c, picks: null, picksMinScore: null }));
     setPath(next);
     setOptions({});
     setIndex({ t: 0, c: 0, z: 0 });
@@ -159,6 +165,30 @@ export function App({ onLive }: { onLive: () => void }) {
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shownPath, etag, shownOptionsKey, index.t, index.z, statsChannel, procKey]);
+
+  // ── particle coordinates of the image on screen ────────────────────────────
+  const picksFile = cryoOn ? cryo.picks : null;
+  useEffect(() => {
+    setPicks(null);
+    setPicksError(null);
+    if (!shownPath || !picksFile) return;
+    const controller = new AbortController();
+    api
+      .picks(shownPath, picksFile, shownOptions, controller.signal)
+      .then((found) => {
+        picksMany.current = found.many;
+        setPicks(found);
+      })
+      .catch((e) => !isAbort(e) && setPicksError(message(e)));
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownPath, etag, shownOptionsKey, picksFile]);
+  const overlay = useMemo(
+    () => (picks && info ? pickOverlay(picks, cryo, info.shape.x, info.shape.y) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [picks, cryo.picksFlipY, cryo.picksDiameter, cryo.picksMinScore, info?.shape.x, info?.shape.y],
+  );
+  const usePicks = useCallback((file: string) => setCryo((c) => ({ ...c, picks: file, picksMinScore: null })), []);
 
   const changeDisplay = useCallback(
     (patch: Partial<DisplaySettings>) => {
@@ -282,7 +312,7 @@ export function App({ onLive }: { onLive: () => void }) {
       </header>
 
       <aside className="left">
-        <FileBrowser current={path} onOpen={openFile} onError={onError} />
+        <FileBrowser current={path} onOpen={openFile} onError={onError} onPicks={response && cryoOn ? usePicks : undefined} picks={cryo.picks} />
       </aside>
 
       <main className="center">
@@ -310,6 +340,7 @@ export function App({ onLive }: { onLive: () => void }) {
               ruler={ruler}
               onRulerChange={setRuler}
               apix={apix}
+              picks={overlay}
               onHover={setHover}
               onShown={onShown}
               onError={onError}
@@ -334,7 +365,7 @@ export function App({ onLive }: { onLive: () => void }) {
               averageEnd={tEnd} />
             {cryoOn && (
               <CryoPanel path={response.path} etag={etag} info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix}
-                problem={filterProblem(cryo, apix)} options={shownOptions} onOptions={setOptions} />
+                problem={filterProblem(cryo, apix)} options={shownOptions} onOptions={setOptions} picks={picks} picksError={picksError} />
             )}
             <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
           </>

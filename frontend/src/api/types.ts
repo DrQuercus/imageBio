@@ -201,6 +201,25 @@ export interface LiveItem {
   metrics: ImageMetrics | null;
 }
 
+/** Particle coordinates of one image (GET /api/cryo/picks). */
+export interface PicksResponse {
+  format: "star" | "box" | "cbox" | "cs";
+  /** Particles in the answer; `total`: in the file for this image (the answer is bounded). */
+  count: number;
+  total: number;
+  /** Centres in pixels of the image, rows counted from the first row of the file. */
+  x: number[];
+  y: number[];
+  score: number[] | null;
+  /** Size of the boxes in pixels, when the file has boxes. */
+  box: number | null;
+  /** The file names micrographs: it applies to other images too. */
+  many: boolean;
+  notes: string[];
+  picks: string;
+  image: { x: number; y: number };
+}
+
 export interface ImageMetrics {
   /** Counts per pixel over the exposure, hot pixels left out. */
   mean?: number;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, isAbort } from "../api/client";
-import type { DatasetInfo, DirEntry, GainCheck, ReaderOptions } from "../api/types";
+import type { DatasetInfo, DirEntry, GainCheck, PicksResponse, ReaderOptions } from "../api/types";
 import {
   averageEnd,
   type CryoSettings,
@@ -11,6 +11,9 @@ import {
   groupForDose,
   LOWPASS_PRESETS,
   ORIENTATION_LABELS,
+  pickCandidates,
+  pickDiameter,
+  scoreRange,
 } from "../viewer/cryo";
 
 interface FieldProps {
@@ -47,6 +50,85 @@ function NumberField({ value, onCommit, label, testid, min, max, integer, placeh
     <input inputMode="decimal" value={draft} placeholder={placeholder} aria-label={label} data-testid={testid}
       onChange={(e) => setDraft(e.target.value)} onBlur={commit}
       onKeyDown={(e) => e.key === "Enter" && commit()} />
+  );
+}
+
+interface PicksProps {
+  path: string;
+  /** Width of the image in pixels: the default size of the circles follows it. */
+  width: number;
+  cryo: CryoSettings;
+  onChange: (patch: Partial<CryoSettings>) => void;
+  /** What the server read in the chosen file for this image; null: not read (yet). */
+  picks: PicksResponse | null;
+  failure: string | null;
+}
+
+/** Particle coordinates over the image: the files next to it that bear its name are offered;
+ *  any other is chosen in the file list on the left. */
+function PicksSection({ path, width, cryo, onChange, picks, failure }: PicksProps) {
+  const [candidates, setCandidates] = useState<DirEntry[]>([]);
+  const dir = dirname(path);
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .list(dir, 0, 1000, controller.signal)
+      .then((l) => !controller.signal.aborted && setCandidates(pickCandidates(l.entries, path)), () => setCandidates([]));
+    return () => controller.abort();
+  }, [dir, path]);
+
+  const range = scoreRange(picks);
+  const name = cryo.picks?.split("/").pop() ?? "";
+  return (
+    <>
+      <div className="field-label">Pointés</div>
+      {!cryo.picks && candidates.length === 0 && (
+        <div className="hint" data-testid="picks-hint">Cliquez un fichier .star, .box, .cbox ou .cs dans la liste de gauche.</div>
+      )}
+      {!cryo.picks &&
+        candidates.map((c) => (
+          <button key={c.path} className="wide" data-testid="picks-candidate" title={c.path} onClick={() => onChange({ picks: c.path, picksMinScore: null })}>
+            {c.name}
+          </button>
+        ))}
+      {cryo.picks && (
+        <>
+          <div className="chosen" title={cryo.picks}>
+            <span className="name" data-testid="picks-file">{name}</span>
+            <button aria-label="Retirer les pointés" data-testid="picks-clear" onClick={() => onChange({ picks: null, picksMinScore: null })}>×</button>
+          </div>
+          {failure && <div className="note warn" data-testid="picks-status">{failure}</div>}
+          {!failure && !picks && <div className="note" data-testid="picks-status">Lecture…</div>}
+          {picks && (
+            <div className="note" data-testid="picks-status">
+              {picks.count.toLocaleString("fr-FR")} particule{picks.count > 1 ? "s" : ""} sur cette image
+              {picks.total > picks.count ? ` (${picks.total.toLocaleString("fr-FR")} dans le fichier)` : ""}
+            </div>
+          )}
+          {picks?.notes.map((note) => (
+            <div key={note} className="note warn" data-testid="picks-note">{note}</div>
+          ))}
+          <label className="check" title="Les lignes sont comptées depuis le haut de l'image telle qu'elle est enregistrée ; certains programmes comptent depuis le bas.">
+            <input type="checkbox" checked={cryo.picksFlipY} data-testid="picks-flip" onChange={(e) => onChange({ picksFlipY: e.target.checked })} />
+            Retourner Y
+          </label>
+          <label className="threshold">
+            <span>Diamètre</span>
+            <NumberField value={cryo.picksDiameter} onCommit={(v) => onChange({ picksDiameter: v })} label="Diamètre des cercles (pixels)"
+              testid="picks-diameter" min={2} max={4096} placeholder={String(Math.round(pickDiameter(cryo, picks, width)))} />
+            <span>px</span>
+          </label>
+          {range && (
+            <label className="threshold" title="Masquer les particules sous ce score">
+              <span>Score ≥</span>
+              <input type="range" min={range[0]} max={range[1]} step={(range[1] - range[0]) / 100} data-testid="picks-score"
+                value={cryo.picksMinScore ?? range[0]} onChange={(e) => onChange({ picksMinScore: Number(e.target.value) })} />
+              <span>{(cryo.picksMinScore ?? range[0]).toFixed(2)}</span>
+            </label>
+          )}
+        </>
+      )}
+    </>
   );
 }
 
@@ -174,10 +256,13 @@ interface Props {
   problem: string | null;
   options: ReaderOptions;
   onOptions: (options: ReaderOptions) => void;
+  /** Particles read in the coordinate file for this image, and why they could not be. */
+  picks: PicksResponse | null;
+  picksError: string | null;
 }
 
-/** Cryo-EM tools: resolution filters, frame average, EER grouping, power spectrum. */
-export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, options, onOptions }: Props) {
+/** Cryo-EM tools: resolution filters, frame average, EER grouping, picks, power spectrum. */
+export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, options, onOptions, picks, picksError }: Props) {
   const frames = info.shape.t;
   const end = averageEnd(t, cryo.average, frames);
   const fractions = typeof info.metadata.n_fractions === "number" ? info.metadata.n_fractions : null;
@@ -267,6 +352,7 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
       )}
 
       <GainSection path={path} etag={etag} options={options} cryo={cryo} onChange={onChange} named={namedGain} />
+      <PicksSection path={path} width={info.shape.x} cryo={cryo} onChange={onChange} picks={picks} failure={picksError} />
 
       <div className="buttons">
         <button className={cryo.spectrum ? "on" : ""} data-testid="spectrum-toggle" title="Spectre de puissance (P)"

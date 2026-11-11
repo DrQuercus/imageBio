@@ -75,6 +75,20 @@ def main(out: Path) -> None:
         icy += 0.6 * np.cos(k * (xx * np.cos(angle) + yy * np.sin(angle)) + rng.uniform(0, 2 * np.pi))
     write_mrc(out / "spare" / "icy.mrc", icy.astype(np.float32), 0.83)
 
+    # two micrographs with particles at known places, a box file for the first one and a
+    # RELION file for both
+    (demo / "picks").mkdir(exist_ok=True)
+    for name in ("mic_001", "mic_002"):
+        write_mrc(demo / "picks" / f"{name}.mrc", rng.normal(50, 5, (256, 256)).astype(np.float32), 1.2)
+    (demo / "picks" / "mic_001.box").write_text("44 44 40 40\n172 44 40 40\n108 172 40 40\n")  # centres 64,64 192,64 128,192
+    (demo / "picks" / "particles.star").write_text(
+        "data_optics\n\nloop_\n_rlnOpticsGroup #1\n_rlnImagePixelSize #2\n1 1.2\n\n"
+        "data_particles\n\nloop_\n_rlnCoordinateX #1\n_rlnCoordinateY #2\n_rlnMicrographName #3\n"
+        "_rlnAutopickFigureOfMerit #4\n"
+        "60.0 200.0 MotionCorr/job002/mic_001.mrc 0.9\n200.0 200.0 MotionCorr/job002/mic_001.mrc 0.2\n"
+        "128.0 128.0 MotionCorr/job002/mic_002.mrc 0.5\n"
+    )
+
     y, x = np.mgrid[0:48, 0:64]
 
     # value = 100 * y + x, 1.5 Å per pixel

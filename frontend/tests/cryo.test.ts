@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { DirEntry } from "../src/api/types";
+import type { DirEntry, PicksResponse } from "../src/api/types";
 import {
   averageEnd,
   dirname,
@@ -8,6 +8,12 @@ import {
   gainCandidates,
   gainOf,
   groupForDose,
+  isPicksFile,
+  micrographKey,
+  pickCandidates,
+  pickDiameter,
+  pickOverlay,
+  scoreRange,
   ICE_RING,
   keepsGain,
   NO_CRYO,
@@ -153,6 +159,71 @@ describe("gain reference", () => {
     // the one the movie names comes first
     expect(gainCandidates(entries, undefined, "K3_gain.tiff")[0]!.name).toBe("K3_gain.tiff");
     expect(gainCandidates(entries, undefined, "absent.gain")).toHaveLength(4);
+  });
+});
+
+describe("particle coordinates", () => {
+  const found = (patch: Partial<PicksResponse> = {}): PicksResponse => ({
+    format: "star", count: 3, total: 3, x: [10, 20, 30], y: [1, 2, 3], score: [0.2, 0.9, 0.5], box: null, many: false,
+    notes: [], picks: "cryo/a.star", image: { x: 400, y: 300 }, ...patch,
+  });
+
+  it("knows a coordinate file by its extension", () => {
+    for (const name of ["a.star", "A.STAR", "mic.box", "mic.cbox", "J12_picked.cs"]) expect(isPicksFile(name)).toBe(true);
+    for (const name of ["a.mrc", "star", "a.star.bak", "box.txt", "a.csv"]) expect(isPicksFile(name)).toBe(false);
+  });
+
+  it("recognises one micrograph under the names programs give it, as the server does", () => {
+    const key = micrographKey("cryo/s1/FoilHole_1_Data_2_3_20261110_101500.mrc");
+    expect(key).toBe("foilhole_1_data_2_3_20261110_101500");
+    for (const other of [
+      "MotionCorr/job002/Movies/FoilHole_1_Data_2_3_20261110_101500_fractions.mrc",
+      "FoilHole_1_Data_2_3_20261110_101500_EER.eer",
+      "012345678901234567890_FoilHole_1_Data_2_3_20261110_101500_fractions_patch_aligned_doseweighted.mrc",
+      "FoilHole_1_Data_2_3_20261110_101500_autopick.star",
+      "C:\\data\\FoilHole_1_Data_2_3_20261110_101500_Fractions.tiff",
+    ]) {
+      expect(micrographKey(other)).toBe(key);
+    }
+    expect(micrographKey("FoilHole_1_Data_2_3_20261110_101501.mrc")).not.toBe(key);
+    expect(micrographKey("_fractions.mrc")).toBe("_fractions");
+    expect(micrographKey("123_mic.mrc")).toBe("123_mic");
+  });
+
+  it("offers the coordinate files that bear the name of the image", () => {
+    const entry = (name: string, kind: DirEntry["kind"] = "file"): DirEntry => ({
+      name, path: `cryo/s1/${name}`, kind, size: 1, mtime: 0, is_symlink: false, supported: false,
+    });
+    const entries = [entry("mic_001.box"), entry("mic_001_autopick.star"), entry("mic_002.box"), entry("mic_001.cbox", "dir"), entry("mic_001.txt"), entry("particles.star")];
+    expect(pickCandidates(entries, "cryo/s1/mic_001.mrc").map((e) => e.name)).toEqual(["mic_001.box", "mic_001_autopick.star"]);
+    expect(pickCandidates(entries, "cryo/s1/mic_003.mrc")).toEqual([]);
+  });
+
+  it("draws the particles kept, rows counted from the top or from the bottom", () => {
+    const all = pickOverlay(found(), NO_CRYO, 400, 300);
+    expect(Array.from(all.points)).toEqual([10, 1, 20, 2, 30, 3]);
+    expect(all.diameter).toBe(16); // no box in the file: a twenty-fifth of the width
+    const flipped = pickOverlay(found(), { ...NO_CRYO, picksFlipY: true }, 400, 300);
+    expect(Array.from(flipped.points)).toEqual([10, 299, 20, 298, 30, 297]);
+    const best = pickOverlay(found(), { ...NO_CRYO, picksMinScore: 0.5 }, 400, 300);
+    expect(Array.from(best.points)).toEqual([20, 2, 30, 3]); // at the threshold: kept
+    // a threshold means nothing for a file without scores
+    expect(pickOverlay(found({ score: null }), { ...NO_CRYO, picksMinScore: 0.5 }, 400, 300).points).toHaveLength(6);
+    expect(pickOverlay(found({ count: 0, x: [], y: [], score: null }), NO_CRYO, 400, 300).points).toHaveLength(0);
+  });
+
+  it("sizes the circles from the user, else the boxes of the file, else the image", () => {
+    expect(pickDiameter({ ...NO_CRYO, picksDiameter: 90 }, found({ box: 180 }), 4096)).toBe(90);
+    expect(pickDiameter(NO_CRYO, found({ box: 180 }), 4096)).toBe(180);
+    expect(pickDiameter(NO_CRYO, found(), 4096)).toBe(164);
+    expect(pickDiameter(NO_CRYO, null, 100)).toBe(8);
+  });
+
+  it("gives the range of the scores, when there is one", () => {
+    expect(scoreRange(found())).toEqual([0.2, 0.9]);
+    expect(scoreRange(found({ score: null }))).toBeNull();
+    expect(scoreRange(found({ score: [0.5, 0.5] }))).toBeNull(); // nothing to choose between
+    expect(scoreRange(null)).toBeNull();
   });
 });
 

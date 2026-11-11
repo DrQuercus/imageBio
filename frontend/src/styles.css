@@ -270,6 +270,11 @@ progress.disk.stalled { accent-color: var(--red); }
 .threshold { display: grid; grid-template-columns: 1fr 52px auto; align-items: center; gap: 6px; margin-top: 5px; color: var(--dim); font-size: 12px; }
 .threshold input { width: 52px; font-family: var(--mono); }
 .threshold.invalid input { border-color: var(--red); }
+.threshold input[type="range"] { width: 100%; min-width: 0; grid-column: span 1; }
+.chosen { display: flex; align-items: center; gap: 6px; margin-top: 4px; font: 12px var(--mono); color: var(--accent); }
+.chosen .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chosen button { padding: 0 6px; }
+.row.file.picks .icon { color: #4dffa6; }
 .test-results { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--dim); }
 .test-results .warn { color: var(--amber); }
 .app.live .left > .panel { flex: none; }

@@ -58,7 +58,10 @@ describe("links", () => {
       view: { zoom: 0.4375, cx: 2048.5, cy: 1000 },
       display: { min: -12.5, max: 480, gamma: 1.4, lut: "fire", invert: true, auto: false },
       apix: 0.83,
-      cryo: { lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true },
+      cryo: {
+        lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true,
+        picks: "cryo/job 5/particles.star", picksFlipY: true, picksDiameter: 180, picksMinScore: -0.25,
+      },
     };
     const link = formatLink(state);
     expect(link.startsWith("#path=cryo%2Fsession+1%2Fmovie.eer")).toBe(true);
@@ -74,6 +77,14 @@ describe("links", () => {
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, gain: "r/g.gain" } })).toBe("#path=a.mrc&gain=r%2Fg.gain");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: off })).toBe("#path=a.mrc");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, lowpass: 7.5 } })).toBe("#path=a.mrc&lp=7.5");
+    // the settings of the picks mean nothing without a coordinate file
+    const noPicks = { ...off, picks: null, picksFlipY: true, picksDiameter: 64, picksMinScore: 0.3 };
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: noPicks })).toBe("#path=a.mrc");
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...noPicks, picks: "r/a.box", picksMinScore: 0 } })).toBe(
+      "#path=a.mrc&picks=r%2Fa.box&pfy=1&pd=64&pms=0",
+    );
+    expect(parseLink("#path=a.mrc&pfy=1&pd=64").cryo).toBeUndefined();
+    expect(parseLink("#path=a.mrc&picks=r%2Fa.box&pd=-3&pms=x").cryo).toEqual({ picks: "r/a.box" });
   });
 
   it("ignores garbage", () => {

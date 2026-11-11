@@ -80,6 +80,15 @@ export function parseLink(hash: string): LinkState {
     if (orient !== undefined && Number.isInteger(orient) && orient >= 1 && orient <= 7) cryo.gainOrient = orient;
     if (q.get("gi") === "1") cryo.gainInvert = true;
   }
+  const picks = q.get("picks");
+  if (picks) {
+    cryo.picks = picks;
+    if (q.get("pfy") === "1") cryo.picksFlipY = true;
+    const diameter = num(q.get("pd"));
+    if (diameter !== undefined && diameter > 0) cryo.picksDiameter = diameter;
+    const score = num(q.get("pms"));
+    if (score !== undefined) cryo.picksMinScore = score;
+  }
   if (Object.keys(cryo).length) state.cryo = cryo;
   return state;
 }
@@ -118,6 +127,12 @@ export function formatLink(state: LinkState): string {
       q.set("gain", cryo.gain);
       if (cryo.gainOrient) q.set("go", String(cryo.gainOrient));
       if (cryo.gainInvert) q.set("gi", "1");
+    }
+    if (cryo.picks) {
+      q.set("picks", cryo.picks);
+      if (cryo.picksFlipY) q.set("pfy", "1");
+      if (cryo.picksDiameter) q.set("pd", short(cryo.picksDiameter));
+      if (cryo.picksMinScore !== null && cryo.picksMinScore !== undefined) q.set("pms", short(cryo.picksMinScore));
     }
   }
   return `#${q.toString()}`;

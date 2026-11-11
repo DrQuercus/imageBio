@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, isAbort } from "../api/client";
 import type { DirListing } from "../api/types";
+import { isPicksFile } from "../viewer/cryo";
 
 interface Props {
   current: string | null;
@@ -8,6 +9,11 @@ interface Props {
   onError: (message: string) => void;
   /** Told which directory is listed (null: the list of roots). */
   onDirectory?: (path: string | null) => void;
+  /** Lay a coordinate file (.star, .box, .cbox, .cs) over the image shown. Absent: such files
+   *  cannot be used at the moment (no image, or a colour picture). */
+  onPicks?: (path: string) => void;
+  /** The coordinate file in use, if any. */
+  picks?: string | null;
 }
 
 const PAGE = 500;
@@ -24,7 +30,7 @@ function formatSize(bytes: number): string {
 }
 
 /** Server-side file browser: roots, then directories. File names are rendered as text. */
-export function FileBrowser({ current, onOpen, onError, onDirectory }: Props) {
+export function FileBrowser({ current, onOpen, onError, onDirectory, onPicks, picks }: Props) {
   const [roots, setRoots] = useState<{ name: string; available: boolean }[] | null>(null);
   const [dir, setDir] = useState<string | null>(() => (current?.includes("/") ? current.replace(/\/[^/]*$/, "") : null));
   const [listing, setListing] = useState<DirListing | null>(null);
@@ -119,6 +125,17 @@ export function FileBrowser({ current, onOpen, onError, onDirectory }: Props) {
             <button key={e.path} className="row dir" onClick={() => setDir(e.path)}>
               <span className="icon">▸</span>
               <span className="name">{e.name}</span>
+            </button>
+          ) : onPicks && e.kind === "file" && !e.supported && isPicksFile(e.name) ? (
+            <button
+              key={e.path}
+              className={`row file picks${e.path === picks ? " active" : ""}`}
+              title="Superposer ces pointés à l'image affichée"
+              onClick={() => onPicks(e.path)}
+            >
+              <span className="icon">◦</span>
+              <span className="name">{e.name}</span>
+              <span className="meta">{formatSize(e.size)}</span>
             </button>
           ) : (
             <button

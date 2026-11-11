@@ -14,6 +14,7 @@ import type {
   LiveSummary,
   LiveWatch,
   Me,
+  PicksResponse,
   Plane,
   PlaneArray,
   PlaneIndex,
@@ -167,6 +168,10 @@ export const api = {
     options?: ReaderOptions,
     signal?: AbortSignal,
   ) => getJson<GainCheck>(`/api/cryo/gain/check?${buildQuery({ path, ...gain }, options)}`, signal),
+
+  /** The particles a coordinate file holds for an image. */
+  picks: (path: string, picks: string, options: ReaderOptions, signal?: AbortSignal) =>
+    getJson<PicksResponse>(`/api/cryo/picks?${buildQuery({ path, picks }, options)}`, signal),
 
   live: {
     watches: (signal?: AbortSignal) =>

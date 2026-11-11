@@ -1,7 +1,7 @@
 /** Cryo mode, pure logic: what is asked of the server (frame average, resolution filters) and
  *  the geometry of a power spectrum (where a resolution lies, which rings to draw). */
 
-import type { DirEntry, Processing } from "../api/types";
+import type { DirEntry, PicksResponse, Processing } from "../api/types";
 
 export interface CryoSettings {
   /** Low-pass cut-off in Å (detail finer than this is removed), or null. */
@@ -18,6 +18,14 @@ export interface CryoSettings {
   gainOrient: number;
   /** The gain file is a flat-field counts image, to be inverted. */
   gainInvert: boolean;
+  /** Coordinate file drawn over the image (logical path), or null. */
+  picks: string | null;
+  /** Count the rows of the coordinates from the bottom of the image instead of the top. */
+  picksFlipY: boolean;
+  /** Diameter of the circles in image pixels; null: the boxes of the file, or a default. */
+  picksDiameter: number | null;
+  /** Particles under this score are hidden; null: all are shown. */
+  picksMinScore: number | null;
 }
 
 export const NO_CRYO: CryoSettings = {
@@ -28,6 +36,10 @@ export const NO_CRYO: CryoSettings = {
   gain: null,
   gainOrient: 0,
   gainInvert: false,
+  picks: null,
+  picksFlipY: false,
+  picksDiameter: null,
+  picksMinScore: null,
 };
 
 /** The eight orientations of a gain reference, in the order of the server (cryo/gain.py). */
@@ -142,6 +154,84 @@ export function gainCandidates(entries: DirEntry[], except?: string, named?: str
   const found = entries.filter((e) => e.kind === "file" && e.supported && e.path !== except && /gain/i.test(e.name));
   // the reference the movie itself names (EER acquisition metadata) comes first
   return named ? [...found.filter((e) => e.name === named), ...found.filter((e) => e.name !== named)] : found;
+}
+
+// ── particle coordinates ─────────────────────────────────────────────────────
+
+/** Coordinate files the server reads (cryo/picks.py). */
+export const PICK_EXTENSIONS = [".star", ".box", ".cbox", ".cs"];
+
+export function isPicksFile(name: string): boolean {
+  return PICK_EXTENSIONS.includes(extension(name));
+}
+
+/** What programs add to the name of a micrograph along its processing, as on the server. */
+const NAME_SUFFIXES = [
+  "_patch_aligned_doseweighted", "_rigid_aligned_doseweighted", "_patch_aligned", "_rigid_aligned",
+  "_doseweighted", "_fractions", "_frames", "_movie", "_autopick", "_manualpick", "_eer", "_dw",
+];
+
+/** What two names of the same micrograph have in common (see micrograph_key on the server). */
+export function micrographKey(name: string): string {
+  let stem = name.replace(/\\/g, "/").split("/").pop() ?? "";
+  if (stem.includes(".")) stem = stem.slice(0, stem.lastIndexOf("."));
+  stem = stem.replace(/^\d{15,}_/, "").toLowerCase();
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const suffix of NAME_SUFFIXES) {
+      if (stem.endsWith(suffix) && stem.length > suffix.length) {
+        stem = stem.slice(0, -suffix.length);
+        changed = true;
+      }
+    }
+  }
+  return stem;
+}
+
+/** The coordinate files of a listing that are about the image `path`: same micrograph name. */
+export function pickCandidates(entries: DirEntry[], path: string): DirEntry[] {
+  const key = micrographKey(path);
+  return entries.filter((e) => e.kind === "file" && isPicksFile(e.name) && micrographKey(e.name) === key);
+}
+
+/** Diameter of the circles, in image pixels: the user's, else the boxes of the file, else a
+ *  twenty-fifth of the image width. */
+export function pickDiameter(cryo: CryoSettings, picks: PicksResponse | null, imageWidth: number): number {
+  if (cryo.picksDiameter && cryo.picksDiameter > 0) return cryo.picksDiameter;
+  if (picks?.box && picks.box > 0) return picks.box;
+  return Math.max(8, Math.round(imageWidth / 25));
+}
+
+export interface PickOverlay {
+  /** Centres in image pixels, as drawn: x0, y0, x1, y1… */
+  points: Float32Array;
+  diameter: number;
+}
+
+/** The particles to draw: those above the score asked for, rows counted from the top or,
+ *  flipped, from the bottom of an image `imageHeight` pixels high. */
+export function pickOverlay(picks: PicksResponse, cryo: CryoSettings, imageWidth: number, imageHeight: number): PickOverlay {
+  const min = picks.score && cryo.picksMinScore !== null ? cryo.picksMinScore : null;
+  const points = new Float32Array(picks.count * 2);
+  let n = 0;
+  for (let k = 0; k < picks.count; k++) {
+    if (min !== null && (picks.score?.[k] ?? 0) < min) continue;
+    points[n++] = picks.x[k] ?? 0;
+    points[n++] = cryo.picksFlipY ? imageHeight - (picks.y[k] ?? 0) : (picks.y[k] ?? 0);
+  }
+  return { points: points.subarray(0, n), diameter: pickDiameter(cryo, picks, imageWidth) };
+}
+
+/** Lowest and highest score of the particles, or null when the file has none. */
+export function scoreRange(picks: PicksResponse | null): [number, number] | null {
+  if (!picks?.score || picks.score.length === 0) return null;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const s of picks.score) {
+    if (s < lo) lo = s;
+    if (s > hi) hi = s;
+  }
+  return hi > lo ? [lo, hi] : null;
 }
 
 // ── power spectrum ───────────────────────────────────────────────────────────
