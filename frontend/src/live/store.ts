@@ -1,7 +1,7 @@
 /** Live mode, pure logic: following a session by its changes, laying out the grid of tiles,
  *  wording durations and sizes, and the link that designates a session. */
 
-import type { LiveItem } from "../api/types";
+import type { AlertCondition, LiveItem } from "../api/types";
 
 /** Exposures known so far, by id. */
 export type ItemMap = ReadonlyMap<number, LiveItem>;
@@ -105,6 +105,23 @@ export function itemDetails(item: LiveItem): string {
   if (typeof dose === "number") parts.push(`${dose.toFixed(1)} e⁻/Å²`);
   if (typeof mdoc?.tilt_angle === "number") parts.push(`${mdoc.tilt_angle.toFixed(1)}°`);
   return parts.join(" · ");
+}
+
+/** What each alert condition is called in the interface. */
+export const ALERT_LABELS: Record<AlertCondition, string> = {
+  no_image: "plus d'image",
+  disk: "disque presque plein",
+  rate_drop: "débit en chute",
+  scanner: "surveillance en échec",
+};
+
+/** A threshold as typed in a field: empty is "not watched", anything else must be a number
+ *  within the bounds the server accepts. Returns undefined for what cannot be sent. */
+export function parseThreshold(text: string, min: number, max: number): number | null | undefined {
+  const trimmed = text.trim().replace(",", ".");
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= min && value <= max ? value : undefined;
 }
 
 /** The session designated by the address: "#live=<directory>" ("#live" alone: none chosen yet).

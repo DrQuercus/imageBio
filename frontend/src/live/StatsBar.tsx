@@ -46,7 +46,7 @@ export function StatsBar({ summary, receivedAt }: Props) {
         <span className="stat-value accent" data-testid="stat-rate">{summary.rate.last_5_min}</span>
         <span className="stat-sub">images/h sur 5 min · {summary.rate.last_hour} dans l'heure</span>
       </div>
-      <div className="stat">
+      <div className={`stat${summary.alerts.includes("no_image") || summary.alerts.includes("rate_drop") ? " alerting" : ""}`}>
         <span className="stat-label">Dernière image</span>
         <span className="stat-value small" data-testid="stat-last">
           <span className={`beacon ${state}`} />
@@ -54,7 +54,7 @@ export function StatsBar({ summary, receivedAt }: Props) {
         </span>
         <span className="stat-sub">{summary.last ? clock(summary.last.time) : "aucune"}</span>
       </div>
-      <div className="stat">
+      <div className={`stat${summary.alerts.includes("disk") ? " alerting" : ""}`}>
         <span className="stat-label">Disque</span>
         {disk && disk.percent !== null ? (
           <>

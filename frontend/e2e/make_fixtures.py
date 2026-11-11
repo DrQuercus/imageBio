@@ -58,6 +58,8 @@ def main(out: Path) -> None:
     shutil.rmtree(out / "state", ignore_errors=True)  # no watch left over from a previous run
     (out / "imagebio.toml").write_text(
         f'[live]\nstate_dir = "{out / "state"}"\ninterval = 1\nmin_stable = 2\n\n'
+        # alerts go to a receiver that the Live tests start on this port
+        '[[alerts.channels]]\nname = "essai"\nkind = "webhook"\nurl = "http://127.0.0.1:8766/hook"\n\n'
         f'[[roots]]\nname = "demo"\npath = "{demo}"\n'
     )
     write_session(demo / "epu_session")

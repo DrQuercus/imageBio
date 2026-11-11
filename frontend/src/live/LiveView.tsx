@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "../api/client";
 import type { LiveHistory, LiveSummary, LiveWatch, Me } from "../api/types";
 import { FileBrowser } from "../components/FileBrowser";
+import { AlertsPanel } from "./AlertsPanel";
 import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
@@ -149,6 +150,7 @@ export function LiveView({ dir, onViewer }: Props) {
             </div>
           ))}
         </section>
+        {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
         <div className="live-browser">
           <FileBrowser current={null} onOpen={onViewer} onError={onError} onDirectory={setBrowsed} />
           <button className="watch-here" disabled={!browsed} onClick={() => open(browsed)} data-testid="watch-here">

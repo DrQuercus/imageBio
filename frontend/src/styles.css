@@ -261,3 +261,11 @@ progress.disk.stalled { accent-color: var(--red); }
 .tile-info { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; padding: 3px 5px; background: rgba(5, 8, 12, 0.78); font: 10px var(--mono); color: var(--dim); text-align: left; white-space: nowrap; overflow: hidden; }
 .tile-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; direction: rtl; }
 .tile-flag { color: var(--amber); }
+.stat.alerting { border-color: var(--red); }
+.kind { color: var(--dim); }
+.threshold { display: grid; grid-template-columns: 1fr 52px auto; align-items: center; gap: 6px; margin-top: 5px; color: var(--dim); font-size: 12px; }
+.threshold input { width: 52px; font-family: var(--mono); }
+.threshold.invalid input { border-color: var(--red); }
+.test-results { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--dim); }
+.test-results .warn { color: var(--amber); }
+.app.live .left > .panel { flex: none; }

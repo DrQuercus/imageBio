@@ -227,6 +227,36 @@ export interface LiveSummary {
   rate: { last_5_min: number; last_hour: number };
   last: { name: string; time: number; completed_at: number | null } | null;
   disk: { total: number; free: number; percent: number | null } | null;
+  /** Conditions an alert is firing for at the moment. */
+  alerts: AlertCondition[];
+}
+
+export type AlertCondition = "no_image" | "disk" | "rate_drop" | "scanner";
+
+/** What a user wants to be told about a session; a threshold at null is not watched. */
+export interface AlertRules {
+  /** Names of the channels notices go to, among those the server offers. */
+  channels: string[];
+  /** Minutes without a new image. */
+  no_image_min: number | null;
+  /** Free disk space, percent. */
+  disk_free_pct: number | null;
+  /** Rate over five minutes as a percentage of the hourly rate. */
+  rate_drop_pct: number | null;
+}
+
+export interface LiveAlerts {
+  rules: AlertRules;
+  set_at: number | null;
+  /** Channels configured on the server: names and kinds, never addresses. */
+  channels: { name: string; kind: "ntfy" | "webhook" | "email" }[];
+  firing: { condition: AlertCondition; since: number; notified: boolean; error: string | null }[];
+}
+
+export interface AlertTestResult {
+  channel: string;
+  delivered: boolean;
+  error: string | null;
 }
 
 export interface LiveHistory {

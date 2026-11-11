@@ -846,3 +846,36 @@ def test_a_test_notice_tells_which_channels_work(alerting: World) -> None:
     assert alerting.client.post(url, headers=ALICE).status_code == 200
     assert alerting.client.post(url, headers=BOB).status_code == 404
     assert alerting.client.post(url, headers={**ALICE, "Sec-Fetch-Site": "cross-site"}).status_code == 403
+
+
+def test_alerts_are_judged_by_the_background_scanner_too(tmp_path: Path) -> None:
+    """The real loop: a scanning thread, and a clock that jumps two minutes ahead."""
+    tree = build_tree(tmp_path / "data")
+    session = tree.base / "public/session"
+    session.mkdir()
+    sent: list[tuple[str, Notice]] = []
+
+    class Recorder:
+        def send(self, channel: AlertChannel, notice: Notice) -> None:
+            sent.append((channel.name, notice))
+
+    shift = [0.0]
+    with make_client(
+        tree, state_dir=tmp_path / "state", live_interval_s=0.5, alert_channels=CHANNELS[:1]
+    ) as client:
+        live = client.app.state.live
+        live.notifier = Recorder()
+        live.clock = lambda: time.time() + shift[0]
+        watch = client.post(WATCHES, params={"path": "public/session"}).json()["id"]
+        assert (
+            client.put(f"{WATCHES}/{watch}/alerts", params={"channels": "phone", "no_image": 1}).status_code
+            == 200
+        )
+        time.sleep(1.5)  # a few cycles: nothing to say yet
+        assert sent == []
+        shift[0] = 120.0
+        deadline = time.monotonic() + 10
+        while not sent and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert [(c, n.condition, n.firing) for c, n in sent] == [("phone", "no_image", True)]
+        assert client.get(f"{WATCHES}/{watch}").json()["alerts"] == ["no_image"]

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { LiveItem } from "../src/api/types";
 import {
+  ALERT_LABELS,
   formatAgo,
   formatBytes,
   formatLiveLink,
@@ -11,6 +12,7 @@ import {
   mergeItems,
   orderItems,
   parseLiveLink,
+  parseThreshold,
   tilePosition,
 } from "../src/live/store";
 
@@ -153,5 +155,26 @@ describe("acquisition histogram", () => {
     expect(bars.start).toBe(380 * 60);
     expect(bars.values[0]).toBe(380);
     expect(bars.values[119]).toBe(499);
+  });
+});
+
+describe("alert thresholds as typed", () => {
+  it("reads numbers, with a comma or a point", () => {
+    expect(parseThreshold("10", 1, 1440)).toBe(10);
+    expect(parseThreshold(" 2,5 ", 0.1, 50)).toBe(2.5);
+    expect(parseThreshold("0.1", 0.1, 50)).toBe(0.1);
+  });
+
+  it("takes an empty field as 'not watched'", () => {
+    expect(parseThreshold("", 1, 1440)).toBeNull();
+    expect(parseThreshold("   ", 1, 1440)).toBeNull();
+  });
+
+  it("refuses what the server would refuse", () => {
+    for (const text of ["0", "1441", "soon", "-5", "1e999", "NaN"]) expect(parseThreshold(text, 1, 1440)).toBeUndefined();
+  });
+
+  it("names every condition", () => {
+    expect(Object.keys(ALERT_LABELS).sort()).toEqual(["disk", "no_image", "rate_drop", "scanner"]);
   });
 });

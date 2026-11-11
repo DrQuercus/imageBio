@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as path from "node:path";
 import { type Debug, trackRefused } from "./helpers";
 
@@ -144,4 +145,54 @@ test("a session is chosen in the browser, listed, and stopped", async ({ page })
   await page.goto("/#live=demo%2Fnowhere");
   await expect(page.getByTestId("error")).toContainText("not found");
   await expect(page.getByTestId("live-empty")).toBeVisible();
+});
+
+test("alerts are set per session, kept, and can be tried", async ({ page }) => {
+  // the place the test server sends its alerts to (see make_fixtures.py)
+  const received: { url: string; body: Record<string, unknown> }[] = [];
+  const receiver = http.createServer((request, response) => {
+    let text = "";
+    request.on("data", (chunk) => (text += chunk));
+    request.on("end", () => {
+      received.push({ url: request.url ?? "", body: JSON.parse(text) });
+      response.writeHead(200).end();
+    });
+  });
+  await new Promise<void>((resolve) => receiver.listen(8766, "127.0.0.1", resolve));
+  try {
+    const refused = trackRefused(page);
+    await page.goto(LINK);
+    const panel = page.getByTestId("alerts");
+    await expect(panel).toContainText("essai (webhook)");
+    await expect(page.getByTestId("alerts-test")).toBeDisabled(); // nothing saved yet: nowhere to send
+    await page.getByTestId("alert-channel-essai").check();
+    await page.getByTestId("alert-no-image").fill("0"); // under a minute: not a threshold the server takes
+    await expect(page.getByTestId("alerts-save")).toBeDisabled();
+    await page.getByTestId("alert-no-image").fill("30");
+    await page.getByTestId("alert-disk").fill("2,5");
+    await page.getByTestId("alerts-save").click();
+    await expect(page.getByTestId("alerts-saved")).toBeVisible();
+
+    await page.getByTestId("alerts-test").click();
+    await expect(page.getByTestId("alerts-test-results")).toHaveText("essai : envoyé");
+    expect(received).toHaveLength(1);
+    expect(received[0]!.url).toBe("/hook");
+    expect(received[0]!.body).toMatchObject({ source: "imagebio", condition: "test", title: "imageBio : essai des alertes", session: SESSION });
+
+    await page.reload(); // the rules belong to the watch, on the server
+    await expect(page.getByTestId("alert-channel-essai")).toBeChecked();
+    await expect(page.getByTestId("alert-no-image")).toHaveValue("30");
+    await expect(page.getByTestId("alert-disk")).toHaveValue("2.5");
+    await expect(page.getByTestId("alert-rate")).toHaveValue("");
+    await expect(page.getByTestId("alerts-firing")).toHaveCount(0); // half an hour is not up
+
+    await page.getByTestId("alert-channel-essai").uncheck();
+    await page.getByTestId("alerts-save").click();
+    await expect(page.getByTestId("alerts-saved")).toBeVisible();
+    await expect(page.getByTestId("alerts-test")).toBeDisabled();
+    await expect(page.getByTestId("error")).toHaveCount(0);
+    expect(refused).toEqual([]);
+  } finally {
+    await new Promise((resolve) => receiver.close(resolve));
+  }
 });

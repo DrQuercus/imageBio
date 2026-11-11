@@ -5,7 +5,10 @@ import type {
   DatasetInfoResponse,
   DirListing,
   Dtype,
+  AlertRules,
+  AlertTestResult,
   GainCheck,
+  LiveAlerts,
   LiveHistory,
   LivePage,
   LiveSummary,
@@ -48,7 +51,9 @@ export function buildQuery(params: Params, options?: ReaderOptions): string {
   return q.toString();
 }
 
-async function request(url: string, signal?: AbortSignal, method: "GET" | "POST" | "DELETE" = "GET"): Promise<Response> {
+type Method = "GET" | "POST" | "PUT" | "DELETE";
+
+async function request(url: string, signal?: AbortSignal, method: Method = "GET"): Promise<Response> {
   const response = await fetch(url, { method, signal, headers: { Accept: "application/json, application/octet-stream" } });
   if (response.ok) return response;
   let code = "http_error";
@@ -66,7 +71,7 @@ async function request(url: string, signal?: AbortSignal, method: "GET" | "POST"
   throw new ApiError(response.status, code, message);
 }
 
-async function getJson<T>(url: string, signal?: AbortSignal, method: "GET" | "POST" | "DELETE" = "GET"): Promise<T> {
+async function getJson<T>(url: string, signal?: AbortSignal, method: Method = "GET"): Promise<T> {
   return (await (await request(url, signal, method)).json()) as T;
 }
 
@@ -181,6 +186,25 @@ export const api = {
 
     history: (id: number, bucket: number, signal?: AbortSignal) =>
       getJson<LiveHistory>(`/api/live/watches/${id}/history?${buildQuery({ bucket })}`, signal),
+
+    alerts: (id: number, signal?: AbortSignal) => getJson<LiveAlerts>(`/api/live/watches/${id}/alerts`, signal),
+
+    /** Replace the alert rules of a watch; thresholds left at null are not watched. */
+    setAlerts: (id: number, rules: AlertRules, signal?: AbortSignal) =>
+      getJson<LiveAlerts>(
+        `/api/live/watches/${id}/alerts?${buildQuery({
+          channels: rules.channels.join(","),
+          no_image: rules.no_image_min ?? undefined,
+          disk_free: rules.disk_free_pct ?? undefined,
+          rate_drop: rules.rate_drop_pct ?? undefined,
+        })}`,
+        signal,
+        "PUT",
+      ),
+
+    /** Send a test notice to the channels of a watch. */
+    testAlerts: (id: number, signal?: AbortSignal) =>
+      getJson<{ results: AlertTestResult[] }>(`/api/live/watches/${id}/alerts/test`, signal, "POST").then((r) => r.results),
 
     /** Address of the thumbnail of a file, for an <img>. */
     thumbUrl: (path: string, size = 256) => `/api/live/thumb?${buildQuery({ path, size })}`,
