@@ -3,10 +3,17 @@
 ``auth_mode = "none"`` is the standalone mode (one local user, loopback only). In ``"proxy"``
 mode an authenticating reverse proxy is the only client and passes the identity in headers; the
 server is bound so that nobody else can reach it (see :class:`imagebio.core.config.Settings`).
+
+"Nobody else" stops at the machine: a loopback address, or the address of a container, can
+still be reached by every account of the computer it is on. Where such accounts exist, the
+proxy and the server share a secret (environment variable ``IMAGEBIO_PROXY_SECRET``) that the
+proxy adds to every request (header ``X-Imagebio-Proxy-Secret``): without it nothing is
+believed, and nothing is served but the open routes.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 from collections.abc import Awaitable, Callable, MutableMapping
@@ -18,7 +25,18 @@ from imagebio.core.config import Settings, is_loopback_host
 from imagebio.core.errors import ImageBioError
 from imagebio.fs.roots import LOCAL_USER, User
 
-__all__ = ["AuthenticationRequired", "SecurityMiddleware", "current_user"]
+__all__ = [
+    "MIN_PROXY_SECRET",
+    "PROXY_SECRET_HEADER",
+    "PROXY_SECRET_VARIABLE",
+    "AuthenticationRequired",
+    "SecurityMiddleware",
+    "current_user",
+]
+
+PROXY_SECRET_VARIABLE: Final = "IMAGEBIO_PROXY_SECRET"  # noqa: S105 - the name of a variable
+PROXY_SECRET_HEADER: Final = "X-Imagebio-Proxy-Secret"  # noqa: S105 - the name of a header
+MIN_PROXY_SECRET: Final = 24  # characters: it is generated, never typed
 
 _LOOPBACK_NAMES: Final = frozenset({"localhost", "127.0.0.1", "[::1]"})
 _NAME: Final = re.compile(r"[^\x00-\x1f\x7f,]{1,256}")
@@ -33,6 +51,7 @@ _SECURITY_HEADERS: Final = (
 _OPEN_PATHS: Final = frozenset({"/healthz"})
 _SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
 _DEFAULT_PORTS: Final = {"http": "80", "https": "443"}
+_SECRET_HEADER: Final = PROXY_SECRET_HEADER.lower().encode()
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -109,8 +128,11 @@ class SecurityMiddleware:
         app: Callable[[Scope, Receive, Send], Awaitable[None]],
         settings: Settings,
         metrics_token: str | None = None,
+        proxy_secret: str | None = None,
     ) -> None:
         self.app = app
+        #: What the proxy must present with every request (proxy mode only); None: nothing.
+        self.proxy_secret = proxy_secret.encode() if proxy_secret and settings.auth_mode == "proxy" else None
         loopback = is_loopback_host(settings.host)
         self.allowed = (_LOOPBACK_NAMES | settings.allowed_hosts) if loopback else settings.allowed_hosts
         self.enforce = loopback or bool(settings.allowed_hosts)
@@ -132,12 +154,12 @@ class SecurityMiddleware:
                 message["headers"] = headers
             await send(message)
 
-        async def refuse(code: str, message: str) -> None:
+        async def refuse(code: str, message: str, status: int = 403) -> None:
             body = json.dumps({"error": {"code": code, "message": message}}).encode()
             await send_with_headers(
                 {
                     "type": "http.response.start",
-                    "status": 403,
+                    "status": status,
                     "headers": [
                         (b"content-type", b"application/json"),
                         (b"content-length", str(len(body)).encode()),
@@ -151,6 +173,13 @@ class SecurityMiddleware:
         if self.enforce and scope["path"] not in self.open_paths and not known_host:
             await refuse("forbidden_host", "forbidden host")
             return
+        if self.proxy_secret is not None and scope["path"] not in self.open_paths:
+            # not from the proxy: neither its identity headers nor what it says of the outside
+            # can be believed
+            given = [value for name, value in scope["headers"] if name == _SECRET_HEADER]
+            if len(given) != 1 or not hmac.compare_digest(given[0], self.proxy_secret):
+                await refuse("authentication_required", "authentication required", 401)
+                return
         if scope["method"] not in _SAFE_METHODS and not self._same_site(scope, hosts):
             await refuse("cross_site_request", "cross-site request refused")
             return

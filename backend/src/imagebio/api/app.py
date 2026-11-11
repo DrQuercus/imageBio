@@ -45,9 +45,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from imagebio import __version__
 from imagebio.api.live import register_live_routes
 from imagebio.api.metrics import CONTENT_TYPE, TOKEN_VARIABLE, render_metrics
-from imagebio.api.security import SecurityMiddleware, current_user
+from imagebio.api.security import (
+    MIN_PROXY_SECRET,
+    PROXY_SECRET_VARIABLE,
+    SecurityMiddleware,
+    current_user,
+)
 from imagebio.core.cache import options_key
-from imagebio.core.config import Settings
+from imagebio.core.config import ConfigError, Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError
 from imagebio.core.model import FileId, json_safe
 from imagebio.cryo.classes import model_star_name, read_classes
@@ -204,7 +209,14 @@ def create_app(
     app.state.live = live
     app.state.roots = roots
     metrics_token = os.environ.get(TOKEN_VARIABLE) or None
-    app.add_middleware(SecurityMiddleware, settings=settings, metrics_token=metrics_token)
+    proxy_secret = os.environ.get(PROXY_SECRET_VARIABLE) or None
+    if proxy_secret is not None and settings.auth_mode == "proxy" and len(proxy_secret) < MIN_PROXY_SECRET:
+        raise ConfigError(
+            f"{PROXY_SECRET_VARIABLE} is too short: at least {MIN_PROXY_SECRET} characters, generated"
+        )
+    app.add_middleware(
+        SecurityMiddleware, settings=settings, metrics_token=metrics_token, proxy_secret=proxy_secret
+    )
 
     # ── errors: JSON, no internals ───────────────────────────────────────────
     @app.exception_handler(ImageBioError)

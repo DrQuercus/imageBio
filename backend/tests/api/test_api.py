@@ -14,6 +14,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from fixtures.api import ALICE, BOB, Tree, build_tree, decode, make_client
+from imagebio.api.security import PROXY_SECRET_HEADER, PROXY_SECRET_VARIABLE
+from imagebio.core.config import ConfigError
 from imagebio.core.model import Dataset
 from imagebio.io.registry import Reader, Registry, default_registry
 from imagebio.proc.binning import bin_mean
@@ -224,6 +226,52 @@ def test_proxy_identity_is_required_and_unambiguous(proxied):
     ]
     assert proxied.get("/api/me", headers=groups_twice).status_code == 401
     assert proxied.get("/api/me", headers={"x-forwarded-user": "carol"}).json()["groups"] == []
+
+
+def test_only_the_proxy_is_believed_when_it_shares_a_secret(tree: Tree, monkeypatch: pytest.MonkeyPatch):
+    """A loopback address or a container can be reached by every account of its machine: with
+    a secret shared with the proxy, identity headers from anybody else are worth nothing."""
+    secret = "s3cret-generated-for-the-proxy-0123456789"
+    monkeypatch.setenv(PROXY_SECRET_VARIABLE, secret)
+    with make_client(tree, auth_mode="proxy", metrics=True) as client:
+        from_proxy = {**ALICE, PROXY_SECRET_HEADER: secret}
+        assert client.get("/api/me", headers=from_proxy).json()["user"] == "alice"
+        assert client.get(PLANE, params={"path": "cryo/movie.mrc"}, headers=from_proxy).status_code == 200
+        for headers in (
+            ALICE,  # somebody on the machine who names a user
+            {**ALICE, PROXY_SECRET_HEADER: "s3cret-generated-for-the-proxy-012345678"},
+            {**ALICE, PROXY_SECRET_HEADER: ""},
+            [*ALICE.items(), (PROXY_SECRET_HEADER, "guess"), (PROXY_SECRET_HEADER, secret)],
+        ):
+            for url, params in (
+                ("/api/me", {}),
+                (PLANE, {"path": "cryo/movie.mrc"}),
+                ("/", {}),
+                ("/metrics", {}),
+            ):
+                r = client.get(url, params=params, headers=headers)
+                assert r.status_code == 401 and r.json()["error"]["code"] == "authentication_required"
+                assert secret not in r.text
+            assert (
+                client.post("/api/live/watches", params={"path": "cryo"}, headers=headers).status_code == 401
+            )
+        assert client.get("/healthz").status_code == 200  # still open: it says nothing
+        # with the secret the request reaches the route, whose own rule then applies (the test
+        # client is not this computer)
+        assert client.get("/metrics", headers={PROXY_SECRET_HEADER: secret}).status_code == 403
+    # the secret is the proxy's: in standalone mode there is no proxy, and it is not asked for
+    with make_client(tree) as standalone:
+        assert standalone.get("/api/me").status_code == 200
+    # a scraper with the metrics token asks the server directly, without going through the proxy
+    monkeypatch.setenv("IMAGEBIO_METRICS_TOKEN", "t0ken")
+    with make_client(tree, auth_mode="proxy", metrics=True) as client:
+        assert client.get("/metrics", headers={"Authorization": "Bearer t0ken"}).status_code == 200
+        assert client.get("/metrics", headers={PROXY_SECRET_HEADER: secret}).status_code == 401
+    # a secret one could type is refused when the server starts
+    monkeypatch.setenv(PROXY_SECRET_VARIABLE, "short")
+    with pytest.raises(ConfigError, match="IMAGEBIO_PROXY_SECRET is too short"):
+        make_client(tree, auth_mode="proxy")
+    make_client(tree)  # no proxy: not looked at
 
 
 def test_groups_decide_which_roots_are_readable(proxied, tree: Tree):

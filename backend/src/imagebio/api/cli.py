@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from imagebio import __version__
+from imagebio.api.security import PROXY_SECRET_VARIABLE
 from imagebio.core.config import AlertChannel, ConfigError, Settings
 from imagebio.core.errors import ImageBioError
 
@@ -161,20 +163,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps(dataset.info.to_json(), indent=2, ensure_ascii=False))
             return 0
         settings = _settings(args)
+        from imagebio.api.app import create_app
+
+        app = create_app(settings)
     except (ConfigError, ImageBioError) as e:
         print(f"imagebio: {e}", file=sys.stderr)
         return 2
 
     import uvicorn
 
-    from imagebio.api.app import create_app
-
-    app = create_app(settings)
     roots = ", ".join(r.name for r in settings.roots) or "none"
-    print(
-        f"imageBio {__version__} on http://{settings.host}:{settings.port}  "
-        f"(auth: {settings.auth_mode}; roots: {roots})"
-    )
+    auth: str = settings.auth_mode
+    if auth == "proxy":  # whether anybody who reaches the port is believed, or only the proxy
+        auth += " with" if os.environ.get(PROXY_SECRET_VARIABLE) else " without"
+        auth += " a shared secret"
+    print(f"imageBio {__version__} on http://{settings.host}:{settings.port}  (auth: {auth}; roots: {roots})")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", server_header=False)
     return 0
 
