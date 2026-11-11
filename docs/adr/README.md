@@ -11,3 +11,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [005](005-authentification.md) | Authentification déléguée au reverse proxy, écoute en local | Proposée (à confirmer) |
 | [006](006-traitements-cote-serveur.md) | Traitements du mode Cryo côté serveur, dans un ordre fixe | Acceptée |
 | [007](007-live.md) | Mode Live : scrutation par dossier, index SQLite, suivi par numéro de séquence | Acceptée |
+| [008](008-pointes-et-galeries.md) | Pointés et galeries : lus par le serveur, jamais retournés d'office | Acceptée |

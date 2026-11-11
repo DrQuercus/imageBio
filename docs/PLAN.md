@@ -372,9 +372,9 @@ Critères d'acceptation :
 - Les alertes partent en moins de 2 cycles de scrutation.
 - **Le serveur Node est éteint.**
 
-**Avancement de M3 (11 novembre 2026) : cœur et alertes faits et relus, premières métriques d'image faites.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend un essai sur une vraie session. La conception est dans l'[ADR 007](adr/007-live.md).
+**Avancement de M3 (11 novembre 2026) : fait, sauf l'essai sur une vraie session.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend cet essai. La conception est dans l'[ADR 007](adr/007-live.md).
 
-Fait (211 tests côté backend pour le Live, 22 tests unitaires et 6 tests de bout en bout côté interface) :
+Fait (222 tests côté backend pour le Live, 30 tests unitaires et 6 tests de bout en bout côté interface) :
 - **Scrutateur indexé dans SQLite** (`live/scanner.py`, `live/index.py`) : un dossier n'est relu que si sa date a changé ; seuls les fichiers pas encore complets sont suivis un par un ; passage complet toutes les 10 minutes ; un passage est une transaction.
 - **Test de complétude** (`live/completeness.py`) : taille stable sur deux passages espacés de 10 s, contrôle d'intégrité du format, et `.xml` d'EPU présent pour une acquisition EPU.
 - **Parseurs** EPU XML (`cryo/epu.py`) et mdoc SerialEM/Tomo5 (`cryo/mdoc.py`) : taille de pixel, dose, défocus visé, horodatage, position de platine, référence de gain EER.
@@ -399,12 +399,13 @@ Critères d'acceptation :
 
 - **Mesures sur chaque image** (`live/metrics.py`) : coups moyens et écart-type sans les pixels chauds, et **rapport de l'anneau de glace** (puissance entre 3,40 et 3,95 Å rapportée aux bandes voisines, sur le périodogramme moyenné du champ central). Elles sont faites après chaque passage, dans un budget de temps, et arrivent à l'interface comme n'importe quel changement. L'interface affiche sur chaque tuile la **glace relative** ln(I₀/I), où I₀ est le niveau des images les plus claires de la session, marque la glace cristalline (rapport au-dessus de 1,2) et les images dix fois plus sombres que les autres, et résume les 50 dernières images dans une carte. Environ 0,3 s par image 4K.
 
+- **Épaisseur de glace étalonnée** : chaque surveillance peut recevoir les coups moyens d'un trou vide (I₀) et un libre parcours moyen en nm (le serveur peut en porter un par défaut, `[live] mean_free_path_nm`). L'épaisseur est alors donnée en nanomètres, et une image aussi claire que le trou est marquée « trou vide ». Sans I₀, la glace reste relative aux images les plus claires de la session et rien n'est appelé trou vide.
+- **Tri et filtres de la grille** : par heure, glace, anneau de glace, défocus, dose ou dérive ; images marquées ou sans marque ; et les **vues d'ensemble d'EPU** (trous, carrés, atlas) dans la même grille.
+- **Dérive** (`[live] drift = true`, désactivée par défaut) : déplacement du spécimen entre la moyenne des quatre premières frames du film et celle des quatre dernières, par corrélation croisée. Le motif fixe du détecteur, qui tirerait la mesure vers zéro, est retiré ; sans rien à suivre, aucune valeur n'est donnée. Précision de quelques dixièmes de pixel binné sur des spécimens synthétiques : c'est un regard grossier sur le mouvement d'ensemble, pas une correction de mouvement.
+
 Reste à faire dans M3 :
-- **Épaisseur de glace en nanomètres** : il manque le libre parcours moyen du microscope (300 à 400 nm, à étalonner) et un I₀ mesuré dans un trou vide. La glace relative affichée est à multiplier par ce libre parcours.
-- **Indicateur de trou vide** : sans I₀ étalonné, une image très claire peut être un trou vide ou la glace la plus fine de la session ; rien n'est affiché plutôt qu'une marque fausse.
-- **Dérive entre demi-sommes** : elle demande de lire les frames du film (plusieurs centaines de Mo par exposition) ; pas faite.
-- Visibilité des anneaux de Thon, saturation.
-- Filtres et tri dans la grille (par défocus, par dose, par glace), vues des carrés et de l'atlas, graphes cumulés.
+- **L'essai sur une vraie session**, puis l'extinction du serveur Node.
+- Visibilité des anneaux de Thon, saturation ; carte d'un carré avec les trous acquis ; graphes cumulés. Ces points iront mieux avec M7, qui apporte le CTF.
 
 Écarts par rapport au plan :
 - **Pas de WebSocket** : l'interface demande toutes les trois secondes ce qui a changé depuis le dernier numéro de séquence qu'elle connaît. Ce sont les mêmes deltas, sans connexion longue à faire passer par le reverse proxy (ADR 007).
@@ -415,6 +416,7 @@ Reste à faire dans M3 :
 - **Non essayé sur une vraie session.** Les XML d'EPU, les mdoc et l'arborescence viennent de la documentation ; un essai sur un dossier de session réel (même terminé) est le premier à faire. Le comportement sur NFS ou SMB (cache d'attributs, dates des dossiers) n'a pas été mesuré : tout a tourné sur disque local.
 - **Alertes non essayées contre de vrais services.** L'envoi vers ntfy suit sa forme JSON documentée et a été vérifié contre un récepteur local, pas contre ntfy.sh ; l'e-mail contre un faux relais. Le bouton « Tester » du panneau est fait pour cette vérification, une fois le canal configuré. Pas d'alerte « le Live lui-même est arrêté » : elle demande un témoin extérieur au serveur.
 - **Le message d'alerte part chez un tiers** quand le canal est un service public (ntfy.sh) : il contient le chemin logique de la session et le nombre d'images. C'est l'administrateur qui choisit les canaux.
+- **La dérive lit des frames** : huit par film (quelques centaines de Mo pour un film 4K), d'où l'option. Elle suppose un spécimen qui se voit à basse résolution et n'a pas été confrontée à de vrais films ; sur des films EER très peu dosés par frame, elle peut ne rien donner.
 - **Mesures limitées pour une session ouverte après coup** : chaque mesure lit l'image en entier. Toutes les images qui arrivent pendant la surveillance sont mesurées ; d'une session trouvée déjà écrite, seulement les 200 plus récentes. `[live] metrics = false` coupe les mesures.
 - **Le rapport de l'anneau de glace n'est donné que si le champ fait au moins 512 pixels de côté et le pixel au plus 1,5 Å.** En dessous, les bandes contiennent trop peu de points du spectre : sur du bruit pur, le rapport varie de 20 % sur une image de 64 pixels, et une image sur cinq passait pour de la glace cristalline (trouvé par un test de bout en bout). Le seuil de 1,2 vient des usages de cryoSPARC et n'a pas été confronté à de vraies images.
 - **Débit en chute** : la règle ne s'applique qu'au-dessus de 60 images dans l'heure. En dessous, cinq minutes contiennent trop peu d'images pour distinguer une chute du hasard ; la règle « plus d'image depuis N minutes » est celle des sessions lentes.
@@ -448,9 +450,9 @@ Reste à faire dans M3 :
 - Gain du passe-bas de 20 Å = 0,5 ± 0,03.
 - La moyenne des frames 3 à 7 est égale à la moyenne numpy de ces frames.
 
-**Avancement de M4 (10 novembre 2026) : première tranche faite.** Les quatre critères d'acceptation passent ; les pointés et les galeries restent à faire. La décision de conception est dans l'[ADR 006](adr/006-traitements-cote-serveur.md).
+**Avancement de M4 (11 novembre 2026) : fait, sauf la somme pondérée par la dose.** Les quatre critères d'acceptation passent. Les décisions de conception sont dans l'[ADR 006](adr/006-traitements-cote-serveur.md) et l'[ADR 008](adr/008-pointes-et-galeries.md).
 
-Fait (874 tests côté backend pour M1, M2 et M4, 48 tests unitaires et 18 tests de bout en bout côté interface) :
+Fait (1148 tests côté backend en tout, dont 202 pour le mode Cryo ; 86 tests unitaires et 28 tests de bout en bout côté interface, tous modes confondus) :
 - **Filtres en Å** (`proc/fourier.py`) : passe-bas, passe-haut et passe-bande gaussiens, gain ½ à la coupure. L'image est prolongée en miroir avant la transformée, ce qui corrige le mélange des bords de l'ancien CryoViewer (CV-18). Le passe-haut conserve la moyenne ; les pixels non carrés sont pris en compte ; les NaN et Inf sont remis en place après le filtre.
 - **Moyenne de frames** sur une plage, accumulée en `float64`.
 - **Spectre de puissance** : périodogramme moyenné sur des tuiles de 512 pixels, moyenne radiale. Dans l'interface : anneaux de résolution en Å, anneau de la glace à 3,7 Å, résolution sous le curseur, agrandissement du centre.
@@ -470,10 +472,14 @@ Critères d'acceptation :
 
 Temps mesurés sur une image 4096 × 4096 (un cœur) : passe-bas 0,7 s, spectre de puissance 0,6 s, application du gain avec 9 000 pixels défectueux 0,06 s, vérification de l'orientation 1,7 s (faite une fois par couple film et gain).
 
+- **Pointés** (`cryo/picks.py`, `cryo/star.py`) : les coordonnées de particules des fichiers STAR de RELION (un fichier par micrographie, ou le `particles.star` d'un jeu entier, filtré sur l'image affichée), `.box` d'EMAN, `.cbox` de crYOLO (ses deux formes) et `.cs` de cryoSPARC sont superposées à l'image en cercles à leur taille réelle. Le fichier se choisit dans la liste de gauche, ou est proposé quand il porte le nom de l'image. Seuil de score, diamètre, et **retournement de Y à la main** : rien n'est retourné d'office.
+- **Galerie d'une pile** (touche G) : tous les plans côte à côte, pour les particules extraites, les sections d'un volume et les **moyennes de classes 2D**. Pour celles de RELION (`*_classes.mrcs`), la part des particules et la résolution de chaque classe sont lues dans le fichier `_model.star` voisin, et les classes sont triées par population.
+- **Binning dans Fourier** (« Réduction dans Fourier » du panneau Cryo) : les vues réduites gardent les basses fréquences de la transformée au lieu de moyenner des blocs. Pas de repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. 0,4 s pour un plan 4K, mis en cache.
+- **Liste de défauts des fichiers `.gain`** (tag 65100) : elle est maintenant comptée et signalée dans le panneau, au lieu d'être ignorée en silence. Elle n'est pas appliquée (voir plus bas).
+
 Reste à faire dans M4 :
-- Superposition des pointés (STAR, `.cs`, `.box`, `.cbox`) ; galeries de particules et de classes 2D.
-- Somme pondérée par la dose (elle demande des frames alignées) ; binning dans Fourier (le binning reste une moyenne de blocs).
-- La liste de défauts du tag 65100 des fichiers `.gain` n'est pas lue : seuls les pixels de gain nul sont traités comme défauts.
+- **Somme pondérée par la dose** : elle n'a de sens que sur des frames alignées. Elle viendra avec MotionCor3 (M7), qui la calcule.
+- **Appliquer la liste de défauts** d'un fichier `.gain` : son format n'est pas documenté, et un utilisateur de Falcon 4i rapporte une liste vide. Il faut un vrai fichier pour écrire le lecteur.
 
 Écarts et limites :
 - **La moyenne de frames est une fenêtre glissante** (N frames à partir de la frame courante) plutôt qu'une plage fixe. Elle couvre le cas « frames 3 à 7 » et permet de lire un film en moyenne glissante.
@@ -481,6 +487,8 @@ Reste à faire dans M4 :
 - **Recherche du gain** : fichiers dont le nom contient « gain », dans le dossier du film et le dossier parent, parmi les 1 000 premières entrées. Quand le film EER nomme sa référence dans ses métadonnées (`eerGainReference`), ce fichier est proposé en premier. Un gain rangé ailleurs se désigne par le lien (`gain=<chemin logique>`) ; la recherche à partir du XML d'EPU viendra avec le parseur de M3.
 - **Regroupement par dose** : il demande la dose par fraction (métadonnées du film) et la taille de pixel, que l'EER ne contient pas et qu'il faut donc saisir.
 - **Un gain n'est conservé d'un fichier au suivant** que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
+- **Conventions des pointés non vérifiées sur de vrais fichiers.** Une coordonnée (x, y) est prise comme la colonne x et la ligne y de l'image telle qu'elle est enregistrée, la ligne 0 en haut. Certains programmes comptent les lignes depuis le bas ou retournent les images à l'import : le bouton « Retourner Y » est là pour cela. Les noms de micrographies sont rapprochés en retirant ce que les programmes y ajoutent (`_fractions`, `_patch_aligned_doseweighted`, l'identifiant de cryoSPARC en tête) ; la liste est courte et se complétera à l'usage.
+- **Un `particles.star` est relu à chaque image** (une lecture ligne à ligne, environ une seconde par million de particules). Un index par micrographie sera à ajouter si cela gêne.
 - **Aucun essai sur de vraies données.** Les conventions (gain `.gain` multiplicatif, sans retournement) viennent de l'étude et de RELION ; elles sont à confirmer sur un film et un gain du Falcon du labo. C'est le premier essai à faire.
 - **L'ancien CryoViewer peut être éteint** : les deux fonctions qui le retenaient (passe-bas en Å, moyenne de frames) sont dans imageBio. À faire après un essai sur vos fichiers.
 - **Relecture indépendante du backend Cryo** (un agent neuf, sur `proc/fourier.py`, `cryo/gain.py`, la chaîne de traitement et les routes). Les nombres, les clés de cache, l'autorisation du chemin de gain et la tenue sous 16 threads ont été vérifiés et trouvés corrects. Cinq défauts ont été trouvés et corrigés, chacun avec son test de régression :
@@ -655,7 +663,7 @@ imageBio/
 
 **Premier message suggéré pour la prochaine session (fin de M3 et de M4, ou M5) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. Termine le jalon M3 : épaisseur de glace étalonnée, dérive, tri et filtres de la grille, puis l'essai sur une vraie session. Ou, si c'est la priorité : la suite de M4 (pointés STAR, `.cs`, `.box`, galeries de particules), ou M5 (cœur ImageJ). Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3, 4 et 8, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. M3 et M4 sont faits : corrige ce que l'essai sur de vraies données a montré (session EPU, film et gain du Falcon, fichiers de pointés), puis attaque M7 (MotionCor3 et CTFFIND5 remontés dans le Live) si la décision 6 du §8 est de laisser ImageJ de côté, sinon M5. Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 
@@ -668,3 +676,4 @@ Elles bloquent peu, mais il vaut mieux les trancher avant M1.
 3. **Serveur cible :** machine, GPU, montage des données (NFS ou SMB ? le surveillant tourne-t-il sur le serveur de fichiers lui-même ?). Ces réponses fixent la stratégie de scrutation de Live.
 4. **Logiciel d'acquisition :** EPU seulement, ou aussi SerialEM/Tomo5 ? Quels détecteurs (Falcon 4i/EER, K3) ? Des sessions réelles anonymisées (quelques XML, un EER, un gain) seraient précieuses pour les tests.
 5. **Priorité M2 ou M3 :** qu'est-ce qui fait le plus mal au quotidien, la visionneuse ou le suivi en direct ?
+6. **Périmètre : faut-il encore le cœur ImageJ (M5 et M6) ?** Question posée le 11 novembre 2026, une fois M3 et M4 faits. Recommandation : **non**. M5 et M6 pèsent 9 à 13 sessions, la moitié de ce qui reste, pour refaire ce que Fiji fait déjà, avec l'obligation de retrouver ses résultats à 1e-6 près. Ce qui fait mal au quotidien est le cryo et le suivi en direct, et ils sont là. À garder de ces deux jalons : un bouton « Ouvrir dans Fiji » (TIFF calibré ou macro qui ouvre le chemin du NAS), et les lecteurs de formats à la demande (DM4, par exemple). Le temps gagné irait à M7 (MotionCor3 et CTFFIND5 remontés dans le Live : résolution du fit CTF, défocus, dérive), puis à M8 (déploiement et pilote). La feuille de route du §4 n'est pas réécrite tant que ce n'est pas tranché.

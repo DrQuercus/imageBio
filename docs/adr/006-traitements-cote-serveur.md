@@ -15,6 +15,7 @@ Le mode Cryo ajoute des opérations qui changent la valeur des pixels : moyenne 
 5. **La référence de gain est désignée par un chemin logique** et autorisée comme n'importe quel fichier, à chaque requête.
 6. **L'orientation du gain n'est jamais devinée en silence.** Le serveur la vérifie à la demande et rend ses mesures ; l'interface montre le résultat et l'utilisateur applique la correction.
 7. **Le spectre de puissance est calculé sur l'image non filtrée** (après moyenne et gain) : filtré, il ne montrerait que l'enveloppe du filtre.
+8. **Le binning peut se faire dans Fourier** (`fbin=true`, ajouté à la fin de M4) : le plan entier est réduit une fois en gardant les basses fréquences de sa transformée, et les régions sont découpées dans ce résultat, pour que les tuiles de détail coïncident avec la vue d'ensemble. Une région doit donc commencer sur un multiple du bin. Le paramètre fait partie de la clé du traitement ; le plan en pleine résolution, lui, n'est gardé qu'une fois en cache, quel que soit le binning demandé. L'image est prise comme périodique : pas de prolongement en miroir ici, contrairement aux filtres.
 
 ## Conséquences
 
