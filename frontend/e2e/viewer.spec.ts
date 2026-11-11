@@ -260,3 +260,26 @@ test("the planes of a stack side by side, and the classes of RELION with their s
   expect(refused).toEqual([]);
 });
 
+test("the image on screen is handed to Fiji as a calibrated TIFF", async ({ page }) => {
+  await openFile(page, "demo/gradient.mrc");
+  await expect(page.getByTestId("fiji-stack")).toHaveCount(0); // one plane: nothing more to offer
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByTestId("fiji-plane").click()]);
+  expect(download.suggestedFilename()).toBe("gradient.tif");
+  const href = await page.getByTestId("fiji-plane").getAttribute("href");
+  const response = await page.request.get(href!);
+  expect(response.status()).toBe(200);
+  expect(response.headers()["content-type"]).toBe("image/tiff");
+  const body = await response.body();
+  expect(body.subarray(0, 4).toString("latin1")).toBe("II*\u0000"); // a little-endian TIFF
+  expect(body.toString("latin1")).toContain("unit=nm"); // 1.5 Å per pixel, as ImageJ wants it
+
+  // a stack: the plane on screen, named after it, or the whole file
+  await openFile(page, "demo/hyper.tif", "&t=1&z=2");
+  await expect(page.getByTestId("fiji-plane")).toHaveAttribute("href", /[?&]t=1&c=0&z=2/);
+  const [plane] = await Promise.all([page.waitForEvent("download"), page.getByTestId("fiji-plane").click()]);
+  expect(plane.suggestedFilename()).toBe("hyper_t2_z3_c1.tif");
+  const [stack] = await Promise.all([page.waitForEvent("download"), page.getByTestId("fiji-stack").click()]);
+  expect(stack.suggestedFilename()).toBe("hyper.tif");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+

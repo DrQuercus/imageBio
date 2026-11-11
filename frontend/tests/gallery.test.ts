@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ClassInfo } from "../src/api/types";
-import { classLabel, galleryAxis, galleryOrder, isClassAverages } from "../src/viewer/gallery";
+import { classLabel, galleryAxis, galleryOrder, isClassAverages, MAX_EXPORT_BYTES, stackBytes } from "../src/viewer/gallery";
 
 const shape = (t: number, z: number) => ({ shape: { x: 64, y: 64, t, z, c: 1 }, rgb: false });
 
@@ -32,6 +32,13 @@ describe("the gallery of a stack", () => {
     expect(classLabel({ index: 0, distribution: 0.034, resolution: 12 })).toBe("3.4 % · 12.0 Å");
     expect(classLabel({ index: 0, distribution: 0, resolution: null })).toBe("0.0 %");
     expect(classLabel(undefined)).toBe("");
+  });
+
+  it("knows how much a whole stack weighs, to offer its export or not", () => {
+    expect(stackBytes({ shape: { x: 64, y: 48, t: 5, z: 1, c: 1 }, dtype: "float32" })).toBe(64 * 48 * 5 * 4);
+    expect(stackBytes({ shape: { x: 30, y: 20, t: 2, z: 3, c: 2 }, dtype: "uint16" })).toBe(30 * 20 * 12 * 2);
+    expect(stackBytes({ shape: { x: 10, y: 10, t: 1, z: 1, c: 1 }, dtype: "uint8" })).toBe(100);
+    expect(stackBytes({ shape: { x: 4096, y: 4096, t: 40, z: 1, c: 1 }, dtype: "uint16" })).toBeGreaterThan(MAX_EXPORT_BYTES);
   });
 
   it("knows the class averages of RELION by their name", () => {

@@ -171,6 +171,12 @@ export const api = {
     signal?: AbortSignal,
   ) => getJson<GainCheck>(`/api/cryo/gain/check?${buildQuery({ path, ...gain }, options)}`, signal),
 
+  /** Address of an ImageJ TIFF to open in Fiji: the plane as shown, or the whole stack. */
+  exportUrl: (path: string, index: PlaneIndex, options: ReaderOptions, proc: Processing, scope: "plane" | "stack") =>
+    scope === "stack"
+      ? `/api/datasets/export?${buildQuery({ path, scope }, options)}`
+      : `/api/datasets/export?${buildQuery({ path, ...index, ...proc }, options)}`,
+
   /** Address of the small picture of one plane (a tile of the gallery of a stack). */
   thumbUrl: (path: string, index: { t?: number; z?: number }, size: number, options: ReaderOptions) =>
     `/api/datasets/thumb?${buildQuery({ path, ...index, size }, options)}`,

@@ -55,6 +55,7 @@ from imagebio.io.registry import Registry, default_registry
 from imagebio.live.service import LiveService
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.proc.fourier import radial_profile
+from imagebio.service.export import export_file_name, export_plane, export_stack
 from imagebio.service.planes import MAX_BIN, GainSpec, PlaneService, Processing
 
 __all__ = ["create_app"]
@@ -473,6 +474,45 @@ def create_app(
         }
         return Response(
             json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
+
+    @app.get("/api/datasets/export")
+    def dataset_export(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        t: int = Query(0, ge=0),
+        c: int = Query(0, ge=0),
+        z: int = Query(0, ge=0),
+        scope: str = Query("plane", pattern="^(plane|stack)$"),
+        proc: Processing = Depends(processing_of),
+    ) -> Response:
+        """An ImageJ TIFF to open in Fiji, with the calibration: the plane ``(t, c, z)`` as the
+        viewer shows it (``scope=plane``, after the processing asked for), or every plane of
+        the file as stored (``scope=stack``)."""
+        options = _check_query(request, _STATS_PARAMS | {"scope"})
+        resolved = file_of(request, path)
+        if scope == "stack":
+            data = export_stack(service, resolved.real, options=options)
+            suffix = ""
+        else:
+            data = export_plane(service, resolved.real, t, c, z, options=options, proc=proc)
+            info, _ = service.info(resolved.real, options)
+            parts = [
+                f"_{axis}{value + 1}"
+                for axis, value, size in (("t", t, info.size_t), ("z", z, info.size_z))
+                if size > 1
+            ]
+            if info.size_c > 1 and not info.rgb:
+                parts.append(f"_c{c + 1}")
+            suffix = "".join(parts)
+        name = export_file_name(resolved.logical, suffix)
+        return Response(
+            data,
+            media_type="image/tiff",
+            headers={
+                "Content-Disposition": f'attachment; filename="{name}"',
+                "Cache-Control": "private, no-store",
+            },
         )
 
     @app.get("/api/datasets/thumb")

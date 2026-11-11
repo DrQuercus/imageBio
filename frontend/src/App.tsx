@@ -8,7 +8,7 @@ import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
 import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
 import { Gallery } from "./viewer/Gallery";
-import { galleryAxis, type GallerySort, isClassAverages } from "./viewer/gallery";
+import { galleryAxis, type GallerySort, isClassAverages, MAX_EXPORT_BYTES, stackBytes } from "./viewer/gallery";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
@@ -357,6 +357,20 @@ export function App({ onLive }: { onLive: () => void }) {
           </div>
         )}
         <span className="spacer" />
+        {response && info && (
+          <div className="group">
+            <a className="button" data-testid="fiji-plane" download title="Télécharger le plan affiché, tel qu'il est traité, en TIFF ImageJ avec sa taille de pixel : il s'ouvre dans Fiji"
+              href={api.exportUrl(response.path, index, shownOptions, fileApix === null && userApix ? { ...proc, apix: userApix } : proc, "plane")}>
+              Ouvrir dans Fiji
+            </a>
+            {axis && stackBytes(info) <= MAX_EXPORT_BYTES && (
+              <a className="button" data-testid="fiji-stack" download title="Télécharger tous les plans du fichier, tels qu'ils sont enregistrés, en une pile ImageJ"
+                href={api.exportUrl(response.path, index, shownOptions, {}, "stack")}>
+                Pile
+              </a>
+            )}
+          </div>
+        )}
         {path && <button onClick={copyLink} data-testid="copy-link">{copied ? "Lien copié" : "Copier le lien"}</button>}
         {me && me.auth_mode !== "none" && <span className="user">{me.user}</span>}
       </header>

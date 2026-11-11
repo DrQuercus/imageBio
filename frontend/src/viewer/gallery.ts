@@ -30,6 +30,15 @@ export function classLabel(info: ClassInfo | undefined): string {
   return info.resolution !== null ? `${share} · ${info.resolution.toFixed(1)} Å` : share;
 }
 
+/** Bytes a whole stack takes once read; the server exports it to Fiji in one file up to
+ *  MAX_EXPORT_BYTES (service/export.py), beyond which the file itself is to be opened. */
+export const MAX_EXPORT_BYTES = 2 ** 30;
+
+export function stackBytes(info: Pick<DatasetInfo, "shape" | "dtype">): number {
+  const bits = Number(/(\d+)$/.exec(info.dtype)?.[1] ?? 8);
+  return info.shape.x * info.shape.y * info.shape.t * info.shape.z * info.shape.c * (bits / 8);
+}
+
 /** Whether a file name is that of RELION class averages, which a model file describes. */
 export function isClassAverages(path: string): boolean {
   return path.toLowerCase().endsWith("_classes.mrcs");
