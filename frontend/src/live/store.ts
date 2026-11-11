@@ -160,11 +160,76 @@ export function imageFlags(item: LiveItem, reference: number | null, calibrated 
   return flags;
 }
 
+/** The CTF of an image: the fit of the program the server ran on it when there is one (it
+ *  knows astigmatism), else the quick estimate made on every image. */
+export interface ShownCtf {
+  defocus: number;
+  /** Resolution (Å) up to which the rings follow; a program may not give it. */
+  fit: number | null;
+  /** Astigmatism (µm); null: not measured (the quick estimate does not). */
+  astigmatism: number | null;
+  source: "program" | "estimate";
+}
+
+export function ctfOf(item: LiveItem): ShownCtf | null {
+  const fitted = item.processing?.ctf;
+  if (fitted && !("error" in fitted)) {
+    return { defocus: fitted.defocus, fit: fitted.fit ?? null, astigmatism: fitted.astigmatism, source: "program" };
+  }
+  const quick = item.metrics?.ctf;
+  return quick ? { defocus: quick.defocus, fit: quick.fit, astigmatism: null, source: "estimate" } : null;
+}
+
+/** How far the specimen moved during the exposure: the path a motion correction followed
+ *  frame by frame when the server ran one, else the shift between the first and the last
+ *  frames measured on the movie. */
+export interface ShownDrift {
+  value: number;
+  unit: "A" | "px";
+  /** True: a path, summed over all the frames; false: one shift, from start to end. */
+  path: boolean;
+}
+
+export function driftOf(item: LiveItem): ShownDrift | null {
+  const motion = item.processing?.motion;
+  if (motion && !("error" in motion)) return { value: motion.total, unit: motion.unit, path: true };
+  const m = item.metrics;
+  return m && typeof m.drift === "number" ? { value: m.drift, unit: m.drift_unit === "A" ? "A" : "px", path: false } : null;
+}
+
+const STEP_NAMES = { motion: "Alignement du film", ctf: "CTF" } as const;
+
+/** What the programs of the server gave for an image, one per line; a step that failed says
+ *  why, in the words of the server. */
+export function programLines(item: LiveItem): string[] {
+  const p = item.processing;
+  if (!p) return [];
+  const lines: string[] = [];
+  if (p.error) lines.push(`Programmes : ${p.error}`);
+  if (p.motion) {
+    if ("error" in p.motion) lines.push(`${STEP_NAMES.motion} : ${p.motion.error}`);
+    else {
+      const unit = p.motion.unit === "A" ? "Å" : "px";
+      lines.push(`Mouvement sur ${p.motion.frames} frames : ${p.motion.total.toFixed(1)} ${unit}, dont ${p.motion.early.toFixed(1)} au début`);
+    }
+  }
+  if (p.ctf) {
+    if ("error" in p.ctf) lines.push(`${STEP_NAMES.ctf} : ${p.ctf.error}`);
+    else {
+      const fit = typeof p.ctf.fit === "number" ? `, ajusté jusqu'à ${p.ctf.fit.toFixed(1)} Å` : "";
+      lines.push(`CTF ajusté : défocus ${p.ctf.defocus_u.toFixed(2)} et ${p.ctf.defocus_v.toFixed(2)} µm, astigmatisme ${p.ctf.astigmatism.toFixed(3)} µm${fit}`);
+      if (typeof p.ctf.thickness === "number") lines.push(`Épaisseur d'après le CTF : ${Math.round(p.ctf.thickness)} nm`);
+    }
+  }
+  return lines;
+}
+
 /** The measurements of an image, one per line, for the tooltip of its tile. */
 export function metricsLines(item: LiveItem, reference: number | null, mfp: number | null = null): string[] {
   const m = item.metrics;
-  if (!m) return [];
-  if (typeof m.mean !== "number") return ["Image illisible : pas de mesure"];
+  const programs = programLines(item);
+  if (!m) return programs;
+  if (typeof m.mean !== "number") return ["Image illisible : pas de mesure", ...programs];
   const lines = [`Coups moyens : ${m.mean.toFixed(m.mean < 100 ? 2 : 0)}${m.estimated ? " (estimés sur les premières frames)" : ""}`];
   const ice = relativeIce(item, reference);
   if (ice !== null) lines.push(`Glace relative : ${ice.toFixed(2)} (ln I₀/I)`);
@@ -177,7 +242,7 @@ export function metricsLines(item: LiveItem, reference: number | null, mfp: numb
     lines.push(`Anneaux de Thon retrouvés jusqu'à ${m.ctf.fit.toFixed(1)} Å`);
   }
   if (typeof m.drift === "number") lines.push(`Dérive entre le début et la fin : ${m.drift.toFixed(1)} ${m.drift_unit === "A" ? "Å" : "px"}`);
-  return lines;
+  return [...lines, ...programs];
 }
 
 // ── order and choice of the tiles ────────────────────────────────────────────
@@ -205,9 +270,9 @@ export function sortValue(item: LiveItem, key: SortKey, reference: number | null
     case "ring":
       return item.metrics?.ice_ring ?? null;
     case "fit":
-      return item.metrics?.ctf?.fit ?? null;
+      return ctfOf(item)?.fit ?? null;
     case "focus":
-      return item.metrics?.ctf?.defocus ?? null;
+      return ctfOf(item)?.defocus ?? null;
     case "defocus": {
       const d = item.meta.epu?.applied_defocus ?? item.meta.mdoc?.defocus;
       return typeof d === "number" ? Math.abs(d) : null;
@@ -217,7 +282,7 @@ export function sortValue(item: LiveItem, key: SortKey, reference: number | null
       return typeof d === "number" ? d : null;
     }
     case "drift":
-      return item.metrics?.drift ?? null;
+      return driftOf(item)?.value ?? null;
   }
 }
 
@@ -250,8 +315,9 @@ export function rejections(item: LiveItem, rules: QualityRules, reference: numbe
   const m = item.metrics;
   if (!m) return [];
   const why: string[] = [];
-  if (rules.fit_max !== null && m.ctf && m.ctf.fit > rules.fit_max) {
-    why.push(`anneaux de Thon jusqu'à ${m.ctf.fit.toFixed(1)} Å seulement (seuil ${rules.fit_max})`);
+  const ctf = ctfOf(item);
+  if (rules.fit_max !== null && ctf && ctf.fit !== null && ctf.fit > rules.fit_max) {
+    why.push(`anneaux de Thon jusqu'à ${ctf.fit.toFixed(1)} Å seulement (seuil ${rules.fit_max})`);
   }
   const ice = relativeIce(item, reference);
   if (rules.ice_max !== null && ice !== null && ice > rules.ice_max) {
@@ -260,11 +326,12 @@ export function rejections(item: LiveItem, rules: QualityRules, reference: numbe
   if (rules.ring_max !== null && typeof m.ice_ring === "number" && m.ice_ring > rules.ring_max) {
     why.push(`anneau de glace ${m.ice_ring.toFixed(2)} (seuil ${rules.ring_max})`);
   }
-  if (rules.drift_max !== null && typeof m.drift === "number" && m.drift_unit === "A" && m.drift > rules.drift_max) {
-    why.push(`dérive ${m.drift.toFixed(1)} Å (seuil ${rules.drift_max})`);
+  const drift = driftOf(item);
+  if (rules.drift_max !== null && drift && drift.unit === "A" && drift.value > rules.drift_max) {
+    why.push(`${drift.path ? "mouvement" : "dérive"} ${drift.value.toFixed(1)} Å (seuil ${rules.drift_max})`);
   }
-  if (m.ctf && ((rules.defocus_min !== null && m.ctf.defocus < rules.defocus_min) || (rules.defocus_max !== null && m.ctf.defocus > rules.defocus_max))) {
-    why.push(`défocus ${m.ctf.defocus.toFixed(2)} µm hors de ${rules.defocus_min ?? "…"} à ${rules.defocus_max ?? "…"}`);
+  if (ctf && ((rules.defocus_min !== null && ctf.defocus < rules.defocus_min) || (rules.defocus_max !== null && ctf.defocus > rules.defocus_max))) {
+    why.push(`défocus ${ctf.defocus.toFixed(2)} µm hors de ${rules.defocus_min ?? "…"} à ${rules.defocus_max ?? "…"}`);
   }
   return why;
 }

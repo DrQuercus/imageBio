@@ -13,6 +13,7 @@ import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
 import { IcePanel } from "./IcePanel";
+import { ProcessingPanel } from "./ProcessingPanel";
 import { QualityPanel } from "./QualityPanel";
 import { StageMap } from "./StageMap";
 import {
@@ -203,6 +204,7 @@ export function LiveView({ dir, onViewer }: Props) {
         {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
         {watch && summary && <IcePanel watchId={watch.id} ice={summary.ice} onError={onError} />}
         {watch && summary && <QualityPanel watchId={watch.id} rules={rules} mfp={mfp} onError={onError} />}
+        {watch && summary && <ProcessingPanel key={watch.id} watchId={watch.id} state={summary.processing} onError={onError} />}
         <div className="live-browser">
           <FileBrowser current={null} onOpen={onViewer} onError={onError} onDirectory={setBrowsed} />
           <button className="watch-here" disabled={!browsed} onClick={() => open(browsed)} data-testid="watch-here">

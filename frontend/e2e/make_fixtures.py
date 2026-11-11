@@ -7,6 +7,7 @@ mode would give, and a live monitor that scans every second so that tests need n
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import time
@@ -20,6 +21,7 @@ from PIL import Image
 # the synthetic EER writer of the backend tests (it does not use the reader under test)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend" / "tests"))
 from fixtures.eer import write_eer  # noqa: E402
+from fixtures.programs import ctf_step  # noqa: E402
 
 from imagebio.live.simulator import MicroscopeSim, SimSettings  # noqa: E402
 
@@ -56,8 +58,14 @@ def main(out: Path) -> None:
     demo = out / "demo"
     (demo / "session").mkdir(parents=True, exist_ok=True)
     shutil.rmtree(out / "state", ignore_errors=True)  # no watch left over from a previous run
+    # a program that stands for CTFFIND (the one of the backend tests): asked its questions on
+    # standard input, it writes a fit whose defocus follows the mean of the image it was given
+    (out / "programs").mkdir(exist_ok=True)
+    ctf = ctf_step(out / "programs")
     (out / "imagebio.toml").write_text(
         f'[live]\nstate_dir = "{out / "state"}"\ninterval = 1\nmin_stable = 2\n\n'
+        f"[processing.ctf]\nargv = {json.dumps(list(ctf.argv))}\nstdin = {json.dumps(list(ctf.stdin))}\n"
+        f'result = "{ctf.result}"\nparser = "{ctf.parser}"\ntimeout = 30\n\n'
         # alerts go to a receiver that the Live tests start on this port
         '[[alerts.channels]]\nname = "essai"\nkind = "webhook"\nurl = "http://127.0.0.1:8766/hook"\n\n'
         f'[[roots]]\nname = "demo"\npath = "{demo}"\n'

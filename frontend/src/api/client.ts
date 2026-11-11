@@ -24,6 +24,7 @@ import type {
   PlaneStats,
   QualityRules,
   Processing,
+  ProcessingState,
   ReaderOptions,
   Region,
   Spectrum,
@@ -229,6 +230,10 @@ export const api = {
         signal,
         "PUT",
       ),
+
+    /** Ask for, or stop asking for, the programs of the server on what arrives in a watch. */
+    setProcessing: (id: number, on: boolean, signal?: AbortSignal) =>
+      getJson<ProcessingState>(`/api/live/watches/${id}/processing?${buildQuery({ on })}`, signal, "PUT"),
 
     /** The counts of an empty hole and the mean free path (nm) of a watch; null forgets one. */
     setIce: (id: number, i0: number | null, mfp: number | null, signal?: AbortSignal) =>

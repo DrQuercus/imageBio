@@ -211,6 +211,58 @@ export interface LiveItem {
   /** Measured on the pixels, a moment after the image is complete. null: not measured (yet);
    *  empty: the image could not be read. */
   metrics: ImageMetrics | null;
+  /** What the programs declared on the server gave (motion correction, CTF), when the user of
+   *  a watch asked for them. null: not run (yet). */
+  processing: ProgramResults | null;
+}
+
+/** A step that gave no result says why, in a few words. */
+export interface ProgramError {
+  error: string;
+}
+
+/** Frame shifts of a motion correction, summed up: path of the specimen over the movie, over
+ *  its first frames, largest step between two frames ("A": ångströms, "px": pixels). */
+export interface MotionResult {
+  total: number;
+  early: number;
+  max_step: number;
+  frames: number;
+  unit: "A" | "px";
+}
+
+/** The fit of a CTF program: defocus along both axes and their mean (µm), astigmatism (µm) and
+ *  its angle (°), resolution (Å) up to which the rings were fitted. */
+export interface CtfFit {
+  defocus: number;
+  defocus_u: number;
+  defocus_v: number;
+  astigmatism: number;
+  angle?: number;
+  phase?: number;
+  cc?: number;
+  fit?: number;
+  tilt?: number;
+  /** Sample thickness, nm (CTFFIND 5). */
+  thickness?: number;
+}
+
+export interface ProgramResults {
+  motion?: MotionResult | ProgramError;
+  ctf?: CtfFit | ProgramError;
+  seconds?: number;
+  /** The programs could not be run at all. */
+  error?: string;
+}
+
+/** Whether the server has programs to run on the exposures, whether this watch asked for
+ *  them, and how far they are. */
+export interface ProcessingState {
+  available: boolean;
+  steps: ("motion" | "ctf")[];
+  on: boolean;
+  done: number;
+  waiting: number;
 }
 
 /** A quick estimate of the CTF of a plane (GET /api/datasets/ctf). Astigmatism is not measured. */
@@ -320,6 +372,7 @@ export interface LiveSummary {
   ice: IceReference;
   /** Acceptance thresholds of the watch; null: not judged. */
   quality: QualityRules;
+  processing: ProcessingState;
 }
 
 /** What the user of a watch calls a good image (live/quality.py). */

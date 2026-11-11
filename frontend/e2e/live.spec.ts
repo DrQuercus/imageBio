@@ -302,3 +302,33 @@ test("images are measured: ice against the session, and a mark on crystalline ic
   await expect(page.getByTestId("tile").first()).toBeVisible();
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
+
+test("the programs of the server run on what arrives, once the session asks for them", async ({ page }) => {
+  await page.goto(LINK);
+  // the test server declares one program, which stands for CTFFIND (see make_fixtures.py)
+  await expect(page.getByTestId("processing")).toContainText("ajustement du CTF");
+  const toggle = page.getByTestId("processing-on");
+  await expect(toggle).not.toBeChecked(); // nothing runs unless asked for
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const name = `FoilHole_29999997_Data_39999997_997_${stamp}`;
+  writeExposure(name).finish();
+  const tile = page.locator(`[data-testid="tile"][data-name="${name}"]`);
+  await expect(tile).toHaveAttribute("data-state", "complete", { timeout: 20_000 });
+  // the fit of the program: both defocus values, the astigmatism, how far the rings were fitted
+  // (the stand-in answers 0.04 µm of astigmatism and four pixels: 3.3 Å at 0.83 Å per pixel)
+  await expect(tile).toHaveAttribute("title", /CTF ajusté : défocus \d+\.\d\d et \d+\.\d\d µm, astigmatisme 0\.040 µm, ajusté jusqu'à 3\.3 Å/, {
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId("processing-count")).toHaveText(/^\d+ images? traitées?/);
+
+  // the choice belongs to the session and is kept by the server
+  await page.reload();
+  await expect(page.getByTestId("processing-on")).toBeChecked();
+  await page.getByTestId("processing-on").uncheck();
+  await expect(page.getByTestId("processing-on")).not.toBeChecked();
+  await page.reload();
+  await expect(page.getByTestId("processing-on")).not.toBeChecked();
+});

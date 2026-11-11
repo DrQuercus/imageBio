@@ -7,7 +7,9 @@ import {
   formatLiveLink,
   freshness,
   arrangeItems,
+  ctfOf,
   DARK_ABOVE,
+  driftOf,
   filterItems,
   fitStage,
   gridLayout,
@@ -24,6 +26,7 @@ import {
   orderItems,
   parseLiveLink,
   parseThreshold,
+  programLines,
   qualitySummary,
   rejections,
   relativeIce,
@@ -53,6 +56,7 @@ function item(id: number, patch: Partial<LiveItem> = {}): LiveItem {
     members: { image: "complete" },
     meta: {},
     metrics: null,
+    processing: null,
     ...patch,
   };
 }
@@ -355,6 +359,64 @@ describe("the map of the acquisitions", () => {
     expect(fitStage(points, 40, 300, 24)).toEqual({ xy: [], scale: 0 }); // no room
     const one = fitStage(stagePoints([at(1, 7, 7)]), 400, 300); // a single point: in the middle
     expect(one.xy).toEqual([[200, 150]]);
+  });
+});
+
+describe("what the programs of the server gave", () => {
+  const fitted = { defocus: 1.85, defocus_u: 1.87, defocus_v: 1.83, astigmatism: 0.04, angle: 30, cc: 0.15, fit: 3.4 };
+  const moved = { total: 12.34, early: 4.5, max_step: 2.1, frames: 40, unit: "A" as const };
+  const quick = { mean: 30, ctf: { defocus: 1.7, fit: 4.2, score: 12 }, drift: 3, drift_unit: "A" as const };
+
+  it("prefers the fit of a program to the quick estimate, and falls back on it", () => {
+    expect(ctfOf(item(1))).toBeNull();
+    expect(ctfOf(item(1, { metrics: quick }))).toEqual({ defocus: 1.7, fit: 4.2, astigmatism: null, source: "estimate" });
+    expect(ctfOf(item(1, { metrics: quick, processing: { ctf: fitted } }))).toEqual({ defocus: 1.85, fit: 3.4, astigmatism: 0.04, source: "program" });
+    // a program that failed leaves the estimate in place
+    expect(ctfOf(item(1, { metrics: quick, processing: { ctf: { error: "the program ended with status 1" } } }))?.source).toBe("estimate");
+    // a fit without the resolution it reached still gives a defocus
+    expect(ctfOf(item(1, { processing: { ctf: { ...fitted, fit: undefined } } }))).toMatchObject({ defocus: 1.85, fit: null });
+  });
+
+  it("takes the path followed by the alignment for the motion, else the shift measured on the movie", () => {
+    expect(driftOf(item(1))).toBeNull();
+    expect(driftOf(item(1, { metrics: quick }))).toEqual({ value: 3, unit: "A", path: false });
+    expect(driftOf(item(1, { metrics: quick, processing: { motion: moved } }))).toEqual({ value: 12.34, unit: "A", path: true });
+    expect(driftOf(item(1, { metrics: quick, processing: { motion: { error: "no" } } }))).toEqual({ value: 3, unit: "A", path: false });
+    expect(driftOf(item(1, { metrics: { mean: 3, drift: 2 } }))?.unit).toBe("px"); // no unit given: pixels
+  });
+
+  it("sorts and judges on them", () => {
+    const both = item(1, { metrics: quick, processing: { ctf: fitted, motion: moved } });
+    expect(sortValue(both, "fit", null)).toBe(3.4);
+    expect(sortValue(both, "focus", null)).toBe(1.85);
+    expect(sortValue(both, "drift", null)).toBe(12.34);
+    // the estimate alone would be rejected at 4 Å; the fit of the program reaches 3.4 Å
+    expect(verdict(item(2, { metrics: quick }), { ...NO_RULES, fit_max: 4 }, null)).toBe("rejected");
+    expect(verdict(both, { ...NO_RULES, fit_max: 4 }, null)).toBe("accepted");
+    expect(rejections(both, { ...NO_RULES, drift_max: 10 }, null)).toEqual(["mouvement 12.3 Å (seuil 10)"]);
+    expect(rejections(item(2, { metrics: quick }), { ...NO_RULES, drift_max: 2 }, null)).toEqual(["dérive 3.0 Å (seuil 2)"]);
+    expect(rejections(both, { ...NO_RULES, defocus_max: 1.8 }, null)).toEqual(["défocus 1.85 µm hors de … à 1.8"]);
+  });
+
+  it("says in the tooltip what each program gave, or why it gave nothing", () => {
+    expect(programLines(item(1))).toEqual([]);
+    expect(programLines(item(1, { processing: { motion: moved, ctf: fitted, seconds: 12 } }))).toEqual([
+      "Mouvement sur 40 frames : 12.3 Å, dont 4.5 au début",
+      "CTF ajusté : défocus 1.87 et 1.83 µm, astigmatisme 0.040 µm, ajusté jusqu'à 3.4 Å",
+    ]);
+    expect(
+      programLines(item(1, { processing: { motion: { error: "the program was stopped after 600 s" }, ctf: { ...fitted, fit: undefined, thickness: 42.4 } } })),
+    ).toEqual([
+      "Alignement du film : the program was stopped after 600 s",
+      "CTF ajusté : défocus 1.87 et 1.83 µm, astigmatisme 0.040 µm",
+      "Épaisseur d'après le CTF : 42 nm",
+    ]);
+    expect(programLines(item(1, { processing: { error: "the programs could not be run" } }))).toEqual(["Programmes : the programs could not be run"]);
+    // after the measurements of the image, and alone when the image was not measured
+    expect(metricsLines(item(1, { metrics: quick, processing: { motion: { ...moved, unit: "px" } } }), null).at(-1)).toBe(
+      "Mouvement sur 40 frames : 12.3 px, dont 4.5 au début",
+    );
+    expect(metricsLines(item(1, { processing: { ctf: { error: "no" } } }), null)).toEqual(["CTF : no"]);
   });
 });
 
