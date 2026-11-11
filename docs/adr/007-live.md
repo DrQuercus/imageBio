@@ -18,6 +18,8 @@ L'ancien CryoViewer Live surveillait un motif de fichiers avec chokidar : un `st
 8. **Le temps est un argument** du scrutateur (`cycle(now)`), jamais lu dans l'horloge : les tests rejouent des heures d'acquisition en secondes avec un microscope simulé (`live/simulator.py`) qui sait quand chaque fichier a réellement reçu son dernier octet.
 9. **Les requêtes qui modifient** (démarrer, arrêter une surveillance) sont refusées quand un autre site les envoie (`Origin`, `Sec-Fetch-Site`) : l'identité vient du proxy, pas d'un secret de la page.
 
+10. **Alertes : des canaux nommés par l'administrateur, des règles par surveillance.** Les adresses (sujet ntfy, webhook, relais de messagerie) sont dans la configuration du serveur ; l'utilisateur choisit un canal par son nom et ne peut pas faire écrire le serveur ailleurs. Les règles sont jugées juste après chaque passage du scrutateur. Chaque condition est une petite machine à états conservée dans l'index : un message quand elle commence, un quand elle cesse, rien entre les deux, et rien de répété après un redémarrage.
+
 ## Conséquences
 
 - Indexer 50 100 fichiers d'une session terminée coûte un listing par dossier et un `stat` par fichier du seul dossier récent (0,9 s sur disque local) ; un passage au repos coûte un `stat` par dossier (10 ms pour 102 dossiers).
@@ -26,7 +28,11 @@ L'ancien CryoViewer Live surveillait un motif de fichiers avec chokidar : un `st
 - Les expositions *non vérifiées* d'une vieille session peuvent contenir un fichier resté tronqué : il est signalé à l'ouverture, pas à l'indexation.
 - Le débit affiché ne compte que ce qui est arrivé pendant la surveillance : une session ouverte après coup n'a pas de « débit ».
 
+- Une alerte part au plus un passage après le franchissement de son seuil. Le silence se compte sur l'horloge de ce serveur (le moment où le scrutateur a accepté la dernière image), pas sur celle du microscope.
+
 ## Alternatives écartées
+
+- **Laisser l'utilisateur saisir l'adresse de ses alertes** : le serveur enverrait alors des requêtes vers une adresse choisie par un utilisateur, y compris à l'intérieur du réseau du labo.
 
 - **inotify / fanotify** : aveugles aux écritures venues d'autres clients NFS ou SMB. Utilisables seulement si le serveur tourne sur le serveur de fichiers lui-même ; ce pourra être une optimisation, pas le fonctionnement de base.
 - **Un `stat` par fichier à chaque passage** (chokidar) : 17 000 appels par seconde pour 50 000 fichiers à 3 s d'intervalle.

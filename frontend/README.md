@@ -46,6 +46,7 @@ Le bouton **Live** de la barre du haut ouvre le suivi d'une session d'acquisitio
 - **Graphe** des acquisitions par minute : les arrêts de la collecte se voient d'un coup d'œil.
 - **Grille de vignettes**, la plus récente d'abord. Seules les tuiles visibles existent dans la page : une session de 50 000 images défile comme une de 50. Une image en cours d'écriture est montrée en pointillés, avec la raison, et n'a pas de vignette tant qu'elle n'est pas complète. « Non vérifié » marque les images indexées depuis un dossier au repos, sans contrôle du fichier.
 - **Un clic sur une tuile** ouvre l'image dans la visionneuse ; le bouton Live y ramène à la session.
+- **Alertes**, dans le panneau de gauche : cocher les canaux proposés par le serveur, saisir un ou plusieurs seuils (minutes sans image, pourcentage d'espace libre, pourcentage du débit horaire), enregistrer. « Tester » envoie un message d'essai et dit quels canaux l'ont pris. Les règles appartiennent à la surveillance : elles sont gardées par le serveur. Une alerte en cours entoure de rouge la carte concernée.
 
 La page demande toutes les trois secondes ce qui a changé depuis le dernier changement qu'elle connaît.
 
@@ -88,6 +89,7 @@ src/
   live/store.ts               mode Live : fusion des changements, grille virtuelle, libellés (fonctions pures)
   live/LiveView.tsx           mode Live : sessions suivies, boucle de suivi, mise en page
   live/ImageGrid.tsx, StatsBar.tsx, RateGraph.tsx   grille de vignettes, cartes d'état, graphe
+  live/AlertsPanel.tsx        règles d'alerte de la session
   Root.tsx                    choix du mode d'après l'adresse (visionneuse ou Live)
   components/                 navigateur de fichiers, contraste, pile, panneau Cryo, informations
   state/url.ts                état de la vue dans l'adresse
@@ -113,7 +115,7 @@ npm run build && npm run e2e
 Les tests de bout en bout lancent le vrai backend sur des fichiers générés par `e2e/make_fixtures.py`, dont les valeurs sont prévisibles à partir de la position du pixel.
 
 - `e2e/viewer.spec.ts` vérifie les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte.
-- `e2e/live.spec.ts` vérifie le mode Live sur une session de 120 expositions écrite par le microscope simulé : affichage immédiat, tuiles limitées à ce qui est visible, image écrite en deux moitiés qui reste « en cours » entre les deux, aller-retour avec la visionneuse, démarrage et arrêt d'une surveillance.
+- `e2e/live.spec.ts` vérifie le mode Live sur une session de 120 expositions écrite par le microscope simulé : affichage immédiat, tuiles limitées à ce qui est visible, image écrite en deux moitiés qui reste « en cours » entre les deux, aller-retour avec la visionneuse, démarrage et arrêt d'une surveillance, réglage d'une alerte et message d'essai reçu par un récepteur local.
 - `e2e/cryo.spec.ts` vérifie le mode Cryo sur des fichiers dont la réponse est connue : un réseau de période 10 Å (passe-bas, pic du spectre sur l'anneau de 10 Å), une pile en escalier (moyenne des frames 3 à 7), un film EER (regroupement des fractions) et un détecteur synthétique dont le gain est enregistré tête en bas (détection et correction).
 
 La page interdit `eval` et les scripts en ligne (Content-Security-Policy). Dans un test Playwright, passez une fonction à `page.waitForFunction`, pas une chaîne.

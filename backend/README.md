@@ -37,6 +37,20 @@ state_dir = "/var/lib/imagebio"            # index des sessions suivies et vigne
 interval = 5                               # secondes entre deux passages sur un dossier surveillé
 min_stable = 10                            # un fichier doit garder sa taille ce temps pour être complet
 
+[[alerts.channels]]                        # où le mode Live peut envoyer ses alertes
+name = "telephone"                         # le nom que les utilisateurs choisissent
+kind = "ntfy"                              # "ntfy", "webhook" ou "email"
+url = "https://ntfy.sh/un-sujet-difficile-a-deviner"
+
+[[alerts.channels]]
+name = "equipe"
+kind = "email"
+to = ["cryoem@lab.example"]
+
+[alerts.smtp]                              # seulement pour les canaux "email"
+host = "smtp.lab.example"
+from = "imagebio@lab.example"
+
 [[roots]]
 name = "glacios"                           # premier élément des chemins vus par les clients
 path = "/srv/glacios"
@@ -92,6 +106,10 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `GET /api/live/watches/{id}/items?since=&limit=&category=` | Expositions qui ont changé depuis le numéro de séquence `since` |
 | `GET /api/live/watches/{id}/history?bucket=` | Acquisitions par tranche de temps |
 | `GET /api/live/thumb?path=&size=` | Vignette JPEG d'un fichier, binnée par moyenne |
+| `GET /api/live/alerts/channels` | Canaux d'alerte configurés : noms et types, jamais les adresses |
+| `GET /api/live/watches/{id}/alerts` | Règles d'alerte de la surveillance et conditions en cours |
+| `PUT /api/live/watches/{id}/alerts?channels=&no_image=&disk_free=&rate_drop=` | Remplacer les règles : canaux (noms séparés par des virgules), minutes sans image, pourcentage d'espace libre, pourcentage du débit horaire |
+| `POST /api/live/watches/{id}/alerts/test` | Envoyer un message d'essai aux canaux de la surveillance |
 
 - **Scrutation.** Un dossier n'est relu que si sa date de modification a changé ; seuls les fichiers pas encore complets sont regardés un par un. Une session de 50 000 fichiers coûte un `stat` par dossier à chaque passage.
 - **Complétude.** Un fichier est complet quand sa taille et sa date n'ont pas changé sur deux passages espacés de `min_stable`, qu'il passe le contrôle d'intégrité de son format, et, pour une acquisition EPU, que son `.xml` est là. Une image dont l'écriture fait une pause reste « en cours ».
@@ -100,6 +118,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Session ancienne.** À la première indexation, les dossiers au repos depuis plus de 15 minutes sont indexés sans regarder leurs fichiers ; leurs expositions ont `verified: false`.
 - **Par utilisateur.** Une surveillance appartient à celui qui l'a créée ; le dossier est autorisé de nouveau à chaque requête. Huit surveillances actives au plus par utilisateur.
 - **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
+- **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
 
 ## Traitements du mode Cryo
 
@@ -148,6 +167,7 @@ src/imagebio/
   live/scanner.py    scrutateur d'un dossier surveillé (un passage = une transaction)
   live/service.py    surveillances par utilisateur, scrutateurs partagés, résumé, vignettes
   live/thumbs.py     vignettes binnées par moyenne
+  live/alerts.py     règles d'alerte, jugement, envoi (ntfy, webhook, e-mail)
   live/simulator.py  microscope simulé (tests et démonstration)
   fs/roots.py        chemins logiques et confinement dans les racines
   service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques
