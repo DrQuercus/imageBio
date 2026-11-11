@@ -21,6 +21,7 @@ from imagebio.core.errors import InvalidRequestError, NotFoundError
 from imagebio.core.model import json_safe
 from imagebio.fs.roots import MAX_PATH_LENGTH, RootSet
 from imagebio.live.alerts import AlertRules
+from imagebio.live.quality import QualityRules
 from imagebio.live.service import CATEGORIES, MAX_ITEMS, LiveService, WatchInfo
 from imagebio.live.thumbs import MAX_PX, MIN_PX
 
@@ -150,6 +151,24 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         names = tuple(c.strip() for c in channels.split(",") if c.strip())
         rules = AlertRules(names, no_image, disk_free, rate_drop)
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
+
+    @app.put("/api/live/watches/{watch_id}/quality")
+    def live_watch_quality_set(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        fit: float | None = Query(None),
+        ice: float | None = Query(None),
+        ring: float | None = Query(None),
+        drift: float | None = Query(None),
+        defocus_min: float | None = Query(None),
+        defocus_max: float | None = Query(None),
+    ) -> Response:
+        """Replace the acceptance thresholds of a watch: resolution of the CTF fit (Å),
+        relative ice, ice-ring ratio, drift (Å), bounds of the measured defocus (µm). What is
+        left out is not judged. The thresholds come back in the summary of the watch."""
+        _only(request, frozenset({"fit", "ice", "ring", "drift", "defocus_min", "defocus_max"}))
+        rules = QualityRules(fit, ice, ring, drift, defocus_min, defocus_max)
+        return _json(live.set_quality(own_watch(request, watch_id), rules))
 
     @app.put("/api/live/watches/{watch_id}/ice")
     def live_watch_ice_set(

@@ -207,7 +207,9 @@ class Scanner:
         # goes through a symbolic link, and is not followed
         self._root = self._fs.realpath(os.fspath(root))
         #: Measurements waiting for the next cycle: (exposure, primary file, size, date, metrics).
-        self._measured: list[tuple[int, str, int | None, int | None, dict[str, Any]]] = []
+        self._measured: list[
+            tuple[int, str, int | None, int | None, dict[str, Any], dict[str, Any] | None]
+        ] = []
         self._load()
 
     # ── memory, rebuilt from the index ───────────────────────────────────────
@@ -305,12 +307,22 @@ class Scanner:
 
     # ── measurements made on the images, by somebody else ────────────────────
     def add_metrics(
-        self, exposure_id: int, primary: str, size: int | None, mtime_ns: int | None, metrics: dict[str, Any]
+        self,
+        exposure_id: int,
+        primary: str,
+        size: int | None,
+        mtime_ns: int | None,
+        metrics: dict[str, Any],
+        meta: dict[str, Any] | None = None,
     ) -> None:
         """Hand over what was measured on the file ``primary`` of an exposure, as it was
         (``size``, ``mtime_ns``) when it was read. It enters the index at the next cycle, with a
-        new sequence number, unless the file changed meanwhile."""
-        self._measured.append((exposure_id, primary, size, mtime_ns, metrics))
+        new sequence number, unless the file changed meanwhile.
+
+        ``meta``: metadata read on the same occasion for an exposure that had none (an image
+        found already written, indexed without its files being opened). What the scanner read
+        itself is never replaced by it."""
+        self._measured.append((exposure_id, primary, size, mtime_ns, metrics, meta))
 
     @property
     def measuring(self) -> frozenset[int]:
@@ -318,7 +330,7 @@ class Scanner:
         return frozenset(m[0] for m in self._measured)
 
     def _apply_metrics(self, db: sqlite3.Connection) -> None:
-        for exposure_id, primary, size, mtime_ns, metrics in self._measured:
+        for exposure_id, primary, size, mtime_ns, metrics, meta in self._measured:
             mean = metrics.get("mean")
             done = db.execute(
                 "UPDATE exposures SET metrics = ?, mean_counts = ?, seq = ? WHERE id = ? AND root_id = ? "
@@ -336,6 +348,21 @@ class Scanner:
             )
             if done.rowcount:
                 self._seq += 1
+                if meta:
+                    row = db.execute(
+                        "SELECT meta, time_source FROM exposures WHERE id = ?", (exposure_id,)
+                    ).fetchone()
+                    merged = {**meta, **json.loads(row["meta"])}
+                    db.execute(
+                        "UPDATE exposures SET meta = ? WHERE id = ?",
+                        (json.dumps(merged, allow_nan=False), exposure_id),
+                    )
+                    when = meta.get("epu", {}).get("acquired_at")
+                    if isinstance(when, int | float) and row["time_source"] != "xml":
+                        db.execute(
+                            "UPDATE exposures SET time = ?, time_source = 'xml' WHERE id = ?",
+                            (float(when), exposure_id),
+                        )
 
     # ── a cycle ──────────────────────────────────────────────────────────────
     def cycle(self, now: float) -> CycleReport:

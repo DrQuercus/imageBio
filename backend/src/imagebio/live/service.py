@@ -27,6 +27,7 @@ from typing import Any, Final
 from imagebio.core.config import Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
+from imagebio.cryo.epu import read_epu_xml
 from imagebio.io.registry import Registry
 from imagebio.live.alerts import (
     CONDITIONS,
@@ -42,6 +43,7 @@ from imagebio.live.alerts import (
 )
 from imagebio.live.index import Index
 from imagebio.live.metrics import Microscope, measure, measure_drift
+from imagebio.live.quality import QualityRules
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -284,6 +286,26 @@ class LiveService:
                 self._measure(scanner, root_id, path)
         return reports
 
+    def _late_metadata(self, root: Path, row: sqlite3.Row) -> dict[str, Any] | None:
+        """The EPU metadata of an exposure that was indexed without its files being opened (a
+        session found already written): read now that the image is, for the same images."""
+        xml = (
+            self.index.connection()
+            .execute(
+                "SELECT name FROM files WHERE exposure_id = ? AND role = 'xml' AND state = 'complete' "
+                "ORDER BY name LIMIT 1",
+                (row["id"],),
+            )
+            .fetchone()
+        )
+        if xml is None:
+            return None
+        try:
+            found = read_epu_xml(root.joinpath(*[p for p in row["rel"].split("/") if p], xml["name"]))
+        except (ImageBioError, OSError, ValueError):
+            return None
+        return {"epu": found.to_json()}
+
     def _drift(self, root: Path, row: sqlite3.Row) -> dict[str, Any]:
         """The drift of the movie of an exposure that arrived (``live/metrics.py``); nothing
         when it has no complete movie, or when the movie cannot be read."""
@@ -353,7 +375,11 @@ class LiveService:
         while not (stop is not None and stop.is_set()):
             rows = self._unmeasured(root_id, scanner.measuring)
             for row in rows:
-                epu = json.loads(row["meta"]).get("epu", {})
+                epu = json.loads(row["meta"]).get("epu")
+                late = None
+                if epu is None:  # found already written: its metadata file was never opened
+                    late = self._late_metadata(root, row)
+                    epu = late["epu"] if late else {}
                 apix = epu.get("pixel_size")
                 microscope = None
                 if self._settings.live_ctf:  # the voltage the acquisition itself gives comes first
@@ -376,7 +402,9 @@ class LiveService:
                     metrics = {}
                 if metrics and self._settings.live_drift and row["arrived"]:
                     metrics.update(self._drift(root, row))
-                scanner.add_metrics(row["id"], row["primary_name"], row["size"], row["mtime_ns"], metrics)
+                scanner.add_metrics(
+                    row["id"], row["primary_name"], row["size"], row["mtime_ns"], metrics, late
+                )
                 done += 1
                 if time.perf_counter() - started >= self.measure_budget_s or (
                     stop is not None and stop.is_set()
@@ -548,6 +576,7 @@ class LiveService:
             },
             "alerts": [c for c, state in self._alert_states(db, watch.id).items() if state.told],
             "ice": self._ice(db, watch),
+            "quality": self.quality(watch),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
@@ -586,6 +615,19 @@ class LiveService:
             "mfp_nm": mfp if mfp is not None else self._settings.live_mfp_nm,
             "mfp_own": mfp,
         }
+
+    def quality(self, watch: WatchInfo) -> dict[str, Any]:
+        """The acceptance thresholds of a watch; a threshold that is not set is None."""
+        row = self.index.connection().execute("SELECT quality FROM watches WHERE id = ?", (watch.id,))
+        return QualityRules.from_json(row.fetchone()[0]).to_json()
+
+    def set_quality(self, watch: WatchInfo, rules: QualityRules) -> dict[str, Any]:
+        with self.index.write() as db:
+            db.execute(
+                "UPDATE watches SET quality = ? WHERE id = ?",
+                (json.dumps(rules.to_json()) if rules != QualityRules() else None, watch.id),
+            )
+        return rules.to_json()
 
     def set_ice(self, watch: WatchInfo, i0: float | None, mfp_nm: float | None) -> dict[str, Any]:
         """Set, or forget (None), the counts of an empty hole and the mean free path of a watch."""

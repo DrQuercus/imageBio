@@ -196,7 +196,14 @@ export interface LiveItem {
   note: string | null;
   members: Partial<Record<"image" | "movie" | "preview" | "xml" | "mdoc", MemberState>>;
   meta: {
-    epu?: { pixel_size?: number; dose?: number; applied_defocus?: number; [key: string]: unknown };
+    epu?: {
+      pixel_size?: number;
+      dose?: number;
+      applied_defocus?: number;
+      /** Stage position, µm. */
+      stage?: { x?: number; y?: number };
+      [key: string]: unknown;
+    };
     mdoc?: { tilt_angle?: number; dose?: number; defocus?: number; [key: string]: unknown };
     image?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
     movie?: { x: number; y: number; frames: number; dtype: string; pixel_size: number | null };
@@ -311,6 +318,22 @@ export interface LiveSummary {
   /** Images measured so far, and the mean counts of the brightest of them (the thinnest ice of
    *  the session, or none at all): what the others are compared to. null: too few yet. */
   ice: IceReference;
+  /** Acceptance thresholds of the watch; null: not judged. */
+  quality: QualityRules;
+}
+
+/** What the user of a watch calls a good image (live/quality.py). */
+export interface QualityRules {
+  /** Thon rings must be found at least this far (Å). */
+  fit_max: number | null;
+  /** Relative ice, ln(I₀/I), not to be exceeded. */
+  ice_max: number | null;
+  ring_max: number | null;
+  /** Drift between the first and last frames, Å. */
+  drift_max: number | null;
+  /** Bounds of the measured defocus, µm. */
+  defocus_min: number | null;
+  defocus_max: number | null;
 }
 
 /** What the ice of a session is measured against (see relativeIce in live/store.ts). */

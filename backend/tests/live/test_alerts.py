@@ -465,7 +465,7 @@ _V2_ALERT_STATES = (
 )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
 def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
@@ -483,8 +483,11 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
         db.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
     index.close()
     old = sqlite3.connect(path)  # what the earlier versions looked like
-    # 4 and before: no calibration of the ice thickness
-    old.executescript("ALTER TABLE watches DROP COLUMN ice_i0; ALTER TABLE watches DROP COLUMN ice_mfp_nm;")
+    old.executescript("ALTER TABLE watches DROP COLUMN quality;")  # 5 and before: no acceptance thresholds
+    if version <= 4:  # no calibration of the ice thickness
+        old.executescript(
+            "ALTER TABLE watches DROP COLUMN ice_i0; ALTER TABLE watches DROP COLUMN ice_mfp_nm;"
+        )
     if version <= 3:  # images were not measured
         old.executescript(
             "DROP INDEX exposures_unmeasured; DROP INDEX exposures_mean; "
@@ -508,13 +511,22 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "5"
+        == "6"
     )
     row = db.execute(
-        "SELECT user, logical, active, alerts, alerts_at, seen_at, ice_i0, ice_mfp_nm FROM watches"
+        "SELECT user, logical, active, alerts, alerts_at, seen_at, ice_i0, ice_mfp_nm, quality FROM watches"
     ).fetchone()
     rules = (None, None) if version == 1 else ('{"channels": ["phone"]}', 3.0)
-    assert tuple(row) == ("alice", "cryo/session", 1, *rules, None, None, None)  # what was there is kept
+    assert tuple(row) == (
+        "alice",
+        "cryo/session",
+        1,
+        *rules,
+        None,
+        None,
+        None,
+        None,
+    )  # what was there is kept
     # the states of version 2 cannot say which channel was told: they start again
     assert db.execute("SELECT COUNT(*) FROM alert_states").fetchone()[0] == 0
     columns = {r["name"] for r in db.execute("PRAGMA table_info(alert_states)")}

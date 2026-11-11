@@ -6,6 +6,8 @@ interface Props {
   summary: LiveSummary;
   /** Relative ice of the last measured images (store.ts, iceSummary); null: nothing to say yet. */
   ice: { median: number; ring: number; count: number } | null;
+  /** Images the acceptance thresholds accepted and rejected; null: none judged. */
+  quality: { accepted: number; rejected: number } | null;
   /** performance.now() when the summary arrived: the server's clock is carried forward from it. */
   receivedAt: number;
 }
@@ -14,7 +16,7 @@ const clock = (seconds: number) =>
   new Date(seconds * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
 /** The session at a glance: how many images, how fast, since when nothing came, disk left. */
-export function StatsBar({ summary, ice, receivedAt }: Props) {
+export function StatsBar({ summary, ice, quality, receivedAt }: Props) {
   const [, tick] = useState(0);
   useEffect(() => {
     const id = window.setInterval(() => tick((n) => n + 1), 1000);
@@ -69,6 +71,17 @@ export function StatsBar({ summary, ice, receivedAt }: Props) {
               : "pas encore mesurée"}
         </span>
       </div>
+      {quality && (
+        <div className="stat" title="Images qui passent les seuils d'acceptation de la session, parmi celles qui ont été mesurées">
+          <span className="stat-label">Acceptées</span>
+          <span className="stat-value small" data-testid="stat-quality">
+            {Math.round((100 * quality.accepted) / (quality.accepted + quality.rejected))} %
+          </span>
+          <span className="stat-sub" data-testid="stat-quality-sub">
+            {quality.rejected} rejetée{quality.rejected > 1 ? "s" : ""} sur {quality.accepted + quality.rejected}
+          </span>
+        </div>
+      )}
       <div className={`stat${summary.alerts.includes("disk") ? " alerting" : ""}`}>
         <span className="stat-label">Disque</span>
         {disk && disk.percent !== null ? (

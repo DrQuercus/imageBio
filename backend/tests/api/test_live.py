@@ -977,6 +977,57 @@ def test_ice_thickness_is_calibrated_per_watch(world: World) -> None:
     assert evil.status_code == 403
 
 
+def test_acceptance_thresholds_are_kept_per_watch(world: World) -> None:
+    alice = world.watch("public/shared", ALICE)
+    bob = world.watch("public/shared", BOB)
+    none = {
+        "fit_max": None,
+        "ice_max": None,
+        "ring_max": None,
+        "drift_max": None,
+        "defocus_min": None,
+        "defocus_max": None,
+    }
+    assert world.summary(alice, ALICE)["quality"] == none
+    url = f"{WATCHES}/{alice}/quality"
+    r = world.client.put(
+        url, params={"fit": 5, "ice": 1.2, "ring": 1.2, "defocus_min": 0.8, "defocus_max": 2.5}, headers=ALICE
+    )
+    assert r.status_code == 200
+    rules = {
+        "fit_max": 5.0,
+        "ice_max": 1.2,
+        "ring_max": 1.2,
+        "drift_max": None,
+        "defocus_min": 0.8,
+        "defocus_max": 2.5,
+    }
+    assert r.json() == rules and world.summary(alice, ALICE)["quality"] == rules
+    assert world.summary(bob, BOB)["quality"] == none  # hers, not his
+    world.restart()
+    assert world.summary(alice, ALICE)["quality"] == rules
+    # what is left out is no longer judged
+    assert world.client.put(url, params={"drift": 8}, headers=ALICE).json() == {**none, "drift_max": 8.0}
+    assert world.client.put(url, headers=ALICE).json() == none
+
+    for params in (
+        {"fit": 0.5},
+        {"fit": "good"},
+        {"ice": 0},
+        {"ring": 0.9},
+        {"drift": -1},
+        {"defocus_min": 3, "defocus_max": 2},
+        {"defocus_max": 80},
+        {"fit": 5, "astigmatism": 1},
+    ):
+        bad = world.client.put(url, params=params, headers=ALICE)
+        assert bad.status_code == 400 and bad.json()["error"]["code"] == "invalid_request", params
+    assert world.summary(alice, ALICE)["quality"] == none  # a refused request changes nothing
+    assert world.client.put(url, params={"fit": 5}, headers=BOB).status_code == 404
+    evil = world.client.put(url, params={"fit": 5}, headers={**ALICE, "Origin": "https://evil.example"})
+    assert evil.status_code == 403
+
+
 def test_the_server_can_know_the_mean_free_path_of_its_microscope(tmp_path: Path) -> None:
     tree = build_tree(tmp_path / "data")
     (tree.base / "public/shared").mkdir()
@@ -1032,6 +1083,43 @@ def test_the_drift_of_movies_is_measured_when_asked_for(tmp_path: Path) -> None:
                 assert "drift" not in item["metrics"]
         finally:
             world.client.__exit__(None, None, None)
+
+
+def test_a_session_found_already_written_gets_its_metadata_when_it_is_measured(world: World) -> None:
+    """Regression: the images of a session opened after the fact are indexed without their
+    files being opened, so they had no dose, no defocus and no stage position: the map of the
+    acquisitions was empty, and so was the first look at a real, finished session."""
+    directory = world.tree.base / "cryo/alice_session"
+    start = BASE - 2 * 86400
+    sim = MicroscopeSim(directory, SimSettings(rate_per_hour=600, pause_probability=0.0, frames=0, seed=3))
+    for second in range(120):  # two days ago, by the simulated microscope's own clock
+        sim.step(start + second)
+    sim.stop()
+    for second in range(120, 200):
+        sim.step(start + second)
+    assert len(sim.exposures) >= 15 and not sim.busy
+    watch = world.watch("cryo/alice_session", ALICE)
+    world.run([], 5)
+    first = world.items(watch, ALICE)["items"]
+    assert len(first) == len(sim.exposures)
+    assert all(i["verified"] is False and "epu" not in i["meta"] for i in first)  # nothing was opened
+
+    world.run([], 40)  # the images are measured: their metadata files are read on the way
+    items = world.items(watch, ALICE)["items"]
+    for item in items:
+        epu = item["meta"]["epu"]
+        assert (
+            37 <= epu["dose"] <= 43
+            and epu["applied_defocus"] < 0
+            and epu["pixel_size"] == pytest.approx(0.83)
+        )
+        assert set(epu["stage"]) >= {"x", "y"} and item["time_source"] == "xml"
+        assert item["metrics"]["mean"] > 0
+    assert len({(i["meta"]["epu"]["stage"]["x"], i["meta"]["epu"]["stage"]["y"]) for i in items}) == len(
+        items
+    )
+    # in acquisition order, by the time the microscope wrote in each file
+    assert [i["name"] for i in sorted(items, key=lambda i: i["time"])] == sim.exposures
 
 
 def test_the_ctf_of_each_image_is_estimated(tmp_path: Path) -> None:

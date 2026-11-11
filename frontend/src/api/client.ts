@@ -22,6 +22,7 @@ import type {
   PlaneArray,
   PlaneIndex,
   PlaneStats,
+  QualityRules,
   Processing,
   ReaderOptions,
   Region,
@@ -213,6 +214,21 @@ export const api = {
     /** Exposures that changed since sequence number `since`. */
     items: (id: number, since: number, limit: number, signal?: AbortSignal, category?: string) =>
       getJson<LivePage>(`/api/live/watches/${id}/items?${buildQuery({ since, limit, category })}`, signal),
+
+    /** Replace the acceptance thresholds of a watch; a null threshold is not judged. */
+    setQuality: (id: number, rules: QualityRules, signal?: AbortSignal) =>
+      getJson<QualityRules>(
+        `/api/live/watches/${id}/quality?${buildQuery({
+          fit: rules.fit_max ?? undefined,
+          ice: rules.ice_max ?? undefined,
+          ring: rules.ring_max ?? undefined,
+          drift: rules.drift_max ?? undefined,
+          defocus_min: rules.defocus_min ?? undefined,
+          defocus_max: rules.defocus_max ?? undefined,
+        })}`,
+        signal,
+        "PUT",
+      ),
 
     /** The counts of an empty hole and the mean free path (nm) of a watch; null forgets one. */
     setIce: (id: number, i0: number | null, mfp: number | null, signal?: AbortSignal) =>

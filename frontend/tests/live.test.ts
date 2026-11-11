@@ -9,7 +9,9 @@ import {
   arrangeItems,
   DARK_ABOVE,
   filterItems,
+  fitStage,
   gridLayout,
+  hasRules,
   historyBars,
   iceLabel,
   iceSummary,
@@ -18,12 +20,17 @@ import {
   itemDetails,
   mergeItems,
   metricsLines,
+  NO_RULES,
   orderItems,
   parseLiveLink,
   parseThreshold,
+  qualitySummary,
+  rejections,
   relativeIce,
   sortValue,
+  stagePoints,
   tilePosition,
+  verdict,
 } from "../src/live/store";
 
 function item(id: number, patch: Partial<LiveItem> = {}): LiveItem {
@@ -269,6 +276,85 @@ describe("what was measured on an image", () => {
     expect(lastThree?.count).toBe(3);
     expect(lastThree?.median).toBeCloseTo(2, 12);
     expect(lastThree?.ring).toBeCloseTo(2 / 3, 12);
+  });
+});
+
+describe("acceptance thresholds", () => {
+  const image = (id: number, metrics: LiveItem["metrics"]) => item(id, { metrics });
+  const good = image(1, { mean: 40, ice_ring: 1.0, ctf: { defocus: 1.5, fit: 3.8, score: 12 }, drift: 2, drift_unit: "A" });
+
+  it("judges nothing without a threshold, nor an image that was not measured", () => {
+    expect(hasRules(NO_RULES)).toBe(false);
+    expect(verdict(good, NO_RULES, 50)).toBeNull();
+    const rules = { ...NO_RULES, fit_max: 5 };
+    expect(hasRules(rules)).toBe(true);
+    expect(verdict(good, rules, 50)).toBe("accepted");
+    expect(verdict(item(2), rules, 50)).toBeNull(); // not measured yet
+    expect(verdict(image(3, {}), rules, 50)).toBeNull(); // could not be read
+    expect(verdict(item(4, { state: "incoming", metrics: { mean: 1 } }), rules, 50)).toBeNull();
+  });
+
+  it("rejects an image for each threshold it is beyond, and says why", () => {
+    const rules = { fit_max: 5, ice_max: 1, ring_max: 1.2, drift_max: 8, defocus_min: 0.8, defocus_max: 2.5 };
+    expect(rejections(good, rules, 50)).toEqual([]);
+    const bad = image(2, { mean: 10, ice_ring: 1.9, ctf: { defocus: 3.4, fit: 6.24, score: 9 }, drift: 12.3, drift_unit: "A" });
+    expect(rejections(bad, rules, 50)).toEqual([
+      "anneaux de Thon jusqu'à 6.2 Å seulement (seuil 5)",
+      "glace 1.61 (seuil 1)",
+      "anneau de glace 1.90 (seuil 1.2)",
+      "dérive 12.3 Å (seuil 8)",
+      "défocus 3.40 µm hors de 0.8 à 2.5",
+    ]);
+    expect(verdict(bad, rules, 50)).toBe("rejected");
+    // at a threshold: accepted
+    const edge = image(3, { mean: 50 / Math.E, ice_ring: 1.2, ctf: { defocus: 2.5, fit: 5, score: 9 }, drift: 8, drift_unit: "A" });
+    expect(rejections(edge, rules, 50)).toEqual([]);
+    expect(rejections(image(4, { mean: 40, ctf: { defocus: 0.5, fit: 4, score: 9 } }), { ...NO_RULES, defocus_min: 0.8 }, 50)).toEqual([
+      "défocus 0.50 µm hors de 0.8 à …",
+    ]);
+  });
+
+  it("does not hold against an image a measurement it does not have", () => {
+    const rules = { fit_max: 5, ice_max: 1, ring_max: 1.2, drift_max: 8, defocus_min: 0.8, defocus_max: 2.5 };
+    const bare = image(1, { mean: 40 }); // no rings found, a small image, no movie
+    expect(rejections(bare, rules, 50)).toEqual([]);
+    expect(verdict(bare, rules, 50)).toBe("accepted");
+    expect(rejections(image(2, { mean: 1 }), rules, null)).toEqual([]); // no reference: the ice is not judged
+    // a drift in pixels cannot be compared with a threshold in ångströms
+    expect(rejections(image(3, { mean: 40, drift: 50, drift_unit: "px" }), rules, 50)).toEqual([]);
+  });
+
+  it("counts the accepted and the rejected, and filters on the verdict", () => {
+    const rules = { ...NO_RULES, ring_max: 1.2 };
+    const session = [good, image(2, { mean: 40, ice_ring: 1.5 }), image(3, { mean: 40, ice_ring: 3 }), item(4)];
+    expect(qualitySummary(session, rules, 50)).toEqual({ accepted: 1, rejected: 2 });
+    expect(qualitySummary(session, NO_RULES, 50)).toBeNull();
+    expect(qualitySummary([item(4)], rules, 50)).toBeNull();
+    expect(filterItems(session, "rejected", 50, false, rules).map((i) => i.id)).toEqual([2, 3]);
+    expect(filterItems(session, "accepted", 50, false, rules).map((i) => i.id)).toEqual([1]);
+    expect(filterItems(session, "accepted", 50, false)).toEqual([]); // no thresholds: nothing is "accepted"
+  });
+});
+
+describe("the map of the acquisitions", () => {
+  const at = (id: number, x?: number, y?: number) => item(id, { meta: { epu: { stage: { x, y } } } });
+
+  it("keeps the images whose stage position is known", () => {
+    const points = stagePoints([at(1, 10, 20), item(2), at(3, 5), at(4, Number.NaN, 2), at(5, -30, 40)]);
+    expect(points.map((p) => [p.item.id, p.x, p.y])).toEqual([[1, 10, 20], [5, -30, 40]]);
+  });
+
+  it("draws them at one scale on both axes, the y axis of the stage pointing up", () => {
+    const points = stagePoints([at(1, 0, 0), at(2, 100, 0), at(3, 100, 50)]);
+    const { xy, scale } = fitStage(points, 448, 248, 24); // 400 x 200 pixels for 100 x 50 µm
+    expect(scale).toBe(4); // pixels per µm: the larger span fills the width
+    expect(xy).toEqual([[24, 224], [424, 224], [424, 24]]); // (0, 0) at the bottom left
+    // a tall drawing: the same scale, centred
+    expect(fitStage(points, 248, 448, 24).xy[0]).toEqual([24, 274]);
+    expect(fitStage([], 400, 300)).toEqual({ xy: [], scale: 0 });
+    expect(fitStage(points, 40, 300, 24)).toEqual({ xy: [], scale: 0 }); // no room
+    const one = fitStage(stagePoints([at(1, 7, 7)]), 400, 300); // a single point: in the middle
+    expect(one.xy).toEqual([[200, 150]]);
   });
 });
 

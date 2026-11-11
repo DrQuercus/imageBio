@@ -22,7 +22,7 @@ from typing import Final
 
 __all__ = ["SCHEMA_VERSION", "Index"]
 
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
 _BUSY_TIMEOUT_S = 30.0
 
@@ -35,6 +35,7 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     2: ("DROP TABLE IF EXISTS alert_states", "ALTER TABLE watches ADD COLUMN seen_at REAL"),
     3: ("ALTER TABLE exposures ADD COLUMN metrics TEXT", "ALTER TABLE exposures ADD COLUMN mean_counts REAL"),
     4: ("ALTER TABLE watches ADD COLUMN ice_i0 REAL", "ALTER TABLE watches ADD COLUMN ice_mfp_nm REAL"),
+    5: ("ALTER TABLE watches ADD COLUMN quality TEXT",),
 }
 
 _SCHEMA: Final = """
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS watches (
     seen_at    REAL,                     -- last time its user was allowed to look at it
     ice_i0     REAL,                     -- mean counts of an empty hole, given by the user; NULL: not known
     ice_mfp_nm REAL,                     -- mean free path for the ice thickness, nm; NULL: the server's
+    quality    TEXT,                     -- JSON acceptance thresholds (live/quality.py), NULL: none
     UNIQUE (user, logical)
 );
 

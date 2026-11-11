@@ -1,7 +1,7 @@
 /** Live mode, pure logic: following a session by its changes, laying out the grid of tiles,
  *  wording durations and sizes, and the link that designates a session. */
 
-import type { AlertCondition, LiveItem } from "../api/types";
+import type { AlertCondition, LiveItem, QualityRules } from "../api/types";
 
 /** Exposures known so far, by id. */
 export type ItemMap = ReadonlyMap<number, LiveItem>;
@@ -236,23 +236,131 @@ export function arrangeItems(items: LiveItem[], key: SortKey, descending: boolea
   return [...valued.map((v) => v[2]), ...rest];
 }
 
-export type ItemFilter = "all" | "flagged" | "clean";
+// ── acceptance: what the user of the session calls a good image ───────────────
+
+export const NO_RULES: QualityRules = { fit_max: null, ice_max: null, ring_max: null, drift_max: null, defocus_min: null, defocus_max: null };
+
+export function hasRules(rules: QualityRules): boolean {
+  return Object.values(rules).some((v) => v !== null);
+}
+
+/** Why an image is rejected: one sentence per threshold it is beyond. A measurement the image
+ *  does not have is not held against it. */
+export function rejections(item: LiveItem, rules: QualityRules, reference: number | null): string[] {
+  const m = item.metrics;
+  if (!m) return [];
+  const why: string[] = [];
+  if (rules.fit_max !== null && m.ctf && m.ctf.fit > rules.fit_max) {
+    why.push(`anneaux de Thon jusqu'à ${m.ctf.fit.toFixed(1)} Å seulement (seuil ${rules.fit_max})`);
+  }
+  const ice = relativeIce(item, reference);
+  if (rules.ice_max !== null && ice !== null && ice > rules.ice_max) {
+    why.push(`glace ${ice.toFixed(2)} (seuil ${rules.ice_max})`);
+  }
+  if (rules.ring_max !== null && typeof m.ice_ring === "number" && m.ice_ring > rules.ring_max) {
+    why.push(`anneau de glace ${m.ice_ring.toFixed(2)} (seuil ${rules.ring_max})`);
+  }
+  if (rules.drift_max !== null && typeof m.drift === "number" && m.drift_unit === "A" && m.drift > rules.drift_max) {
+    why.push(`dérive ${m.drift.toFixed(1)} Å (seuil ${rules.drift_max})`);
+  }
+  if (m.ctf && ((rules.defocus_min !== null && m.ctf.defocus < rules.defocus_min) || (rules.defocus_max !== null && m.ctf.defocus > rules.defocus_max))) {
+    why.push(`défocus ${m.ctf.defocus.toFixed(2)} µm hors de ${rules.defocus_min ?? "…"} à ${rules.defocus_max ?? "…"}`);
+  }
+  return why;
+}
+
+export type Verdict = "accepted" | "rejected";
+
+/** The verdict on an image; null: nothing to judge it on (no threshold, or not measured yet). */
+export function verdict(item: LiveItem, rules: QualityRules, reference: number | null): Verdict | null {
+  if (item.state !== "complete" || typeof item.metrics?.mean !== "number" || !hasRules(rules)) return null;
+  return rejections(item, rules, reference).length ? "rejected" : "accepted";
+}
+
+/** How many images were accepted and rejected; null when nothing was judged. */
+export function qualitySummary(items: LiveItem[], rules: QualityRules, reference: number | null): { accepted: number; rejected: number } | null {
+  let accepted = 0;
+  let rejected = 0;
+  for (const item of items) {
+    const v = verdict(item, rules, reference);
+    if (v === "accepted") accepted += 1;
+    else if (v === "rejected") rejected += 1;
+  }
+  return accepted + rejected ? { accepted, rejected } : null;
+}
+
+export type ItemFilter = "all" | "flagged" | "clean" | "accepted" | "rejected";
 
 export const FILTER_LABELS: Record<ItemFilter, string> = {
   all: "Toutes",
   flagged: "Marquées",
   clean: "Sans marque",
+  accepted: "Acceptées",
+  rejected: "Rejetées",
 };
 
-/** The images a filter keeps: those with a mark (crystalline ice, very dark, empty hole), or
- *  those that were measured and have none. */
-export function filterItems(items: LiveItem[], filter: ItemFilter, reference: number | null, calibrated: boolean): LiveItem[] {
+/** The images a filter keeps: those with a mark (crystalline ice, very dark, empty hole), those
+ *  that were measured and have none, or those the thresholds accept or reject. */
+export function filterItems(
+  items: LiveItem[],
+  filter: ItemFilter,
+  reference: number | null,
+  calibrated: boolean,
+  rules: QualityRules = NO_RULES,
+): LiveItem[] {
   if (filter === "all") return items;
+  if (filter === "accepted" || filter === "rejected") return items.filter((item) => verdict(item, rules, reference) === filter);
   return items.filter((item) => {
     if (item.state !== "complete") return false;
     const marked = imageFlags(item, reference, calibrated).length > 0;
     return filter === "flagged" ? marked : !marked && typeof item.metrics?.mean === "number";
   });
+}
+
+// ── map of the acquisitions ──────────────────────────────────────────────────
+
+export interface StagePoint {
+  item: LiveItem;
+  /** Stage position, µm. */
+  x: number;
+  y: number;
+}
+
+/** The images whose stage position is known (EPU writes it with each image). */
+export function stagePoints(items: LiveItem[]): StagePoint[] {
+  const points: StagePoint[] = [];
+  for (const item of items) {
+    const stage = item.meta.epu?.stage;
+    if (stage && typeof stage.x === "number" && typeof stage.y === "number" && Number.isFinite(stage.x) && Number.isFinite(stage.y)) {
+      points.push({ item, x: stage.x, y: stage.y });
+    }
+  }
+  return points;
+}
+
+/** Where the points go in a drawing of `width` x `height` pixels: same scale on both axes,
+ *  `pad` pixels of margin, the stage's y axis pointing up. Also the length in µm of a scale
+ *  bar and its length in pixels. */
+export function fitStage(points: StagePoint[], width: number, height: number, pad = 24): { xy: [number, number][]; scale: number } {
+  if (!points.length || width <= 2 * pad || height <= 2 * pad) return { xy: [], scale: 0 };
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let y0 = Infinity;
+  let y1 = -Infinity;
+  for (const p of points) {
+    x0 = Math.min(x0, p.x);
+    x1 = Math.max(x1, p.x);
+    y0 = Math.min(y0, p.y);
+    y1 = Math.max(y1, p.y);
+  }
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  if (dx === 0 && dy === 0) return { xy: points.map(() => [width / 2, height / 2]), scale: 0 }; // one place
+  // pixels per µm: the tighter of the two axes decides
+  const scale = Math.min(dx > 0 ? (width - 2 * pad) / dx : Infinity, dy > 0 ? (height - 2 * pad) / dy : Infinity);
+  const left = (width - dx * scale) / 2;
+  const top = (height - dy * scale) / 2;
+  return { xy: points.map((p) => [left + (p.x - x0) * scale, top + (y1 - p.y) * scale]), scale };
 }
 
 /** What the grid can show: the acquisitions, or the overview images EPU takes on the way. */

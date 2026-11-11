@@ -13,6 +13,8 @@ import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
 import { IcePanel } from "./IcePanel";
+import { QualityPanel } from "./QualityPanel";
+import { StageMap } from "./StageMap";
 import {
   arrangeItems,
   CATEGORY_VIEWS,
@@ -24,7 +26,9 @@ import {
   type ItemFilter,
   type ItemMap,
   mergeItems,
+  NO_RULES,
   orderItems,
+  qualitySummary,
   SORT_LABELS,
   type SortKey,
 } from "./store";
@@ -54,6 +58,7 @@ export function LiveView({ dir, onViewer }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("time");
   const [filter, setFilter] = useState<ItemFilter>("all");
   const [category, setCategory] = useState<CategoryView>("data");
+  const [mapOn, setMapOn] = useState(false);
   const [tile, setTile] = useState(180);
   const onError = useCallback((m: string) => setError(m), []);
 
@@ -130,9 +135,13 @@ export function LiveView({ dir, onViewer }: Props) {
   const calibrated = summary?.ice.calibrated ?? false;
   const mfp = summary?.ice.mfp_nm ?? null;
   const ice = useMemo(() => iceSummary(ordered, reference), [ordered, reference]);
+  const rulesKey = JSON.stringify(summary?.quality ?? NO_RULES);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const rules = useMemo(() => summary?.quality ?? NO_RULES, [rulesKey]);
+  const quality = useMemo(() => qualitySummary(ordered, rules, reference), [ordered, rules, reference]);
   const shown = useMemo(
-    () => arrangeItems(filterItems(ordered, filter, reference, calibrated), sortKey, newestFirst, reference),
-    [ordered, filter, sortKey, newestFirst, reference, calibrated],
+    () => arrangeItems(filterItems(ordered, filter, reference, calibrated, rules), sortKey, newestFirst, reference),
+    [ordered, filter, sortKey, newestFirst, reference, calibrated, rules],
   );
   const open = (path: string | null) => {
     window.location.hash = formatLiveLink(path);
@@ -193,6 +202,7 @@ export function LiveView({ dir, onViewer }: Props) {
         </section>
         {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
         {watch && summary && <IcePanel watchId={watch.id} ice={summary.ice} onError={onError} />}
+        {watch && summary && <QualityPanel watchId={watch.id} rules={rules} mfp={mfp} onError={onError} />}
         <div className="live-browser">
           <FileBrowser current={null} onOpen={onViewer} onError={onError} onDirectory={setBrowsed} />
           <button className="watch-here" disabled={!browsed} onClick={() => open(browsed)} data-testid="watch-here">
@@ -210,7 +220,7 @@ export function LiveView({ dir, onViewer }: Props) {
         )}
         {watch && summary ? (
           <>
-            <StatsBar summary={summary} ice={ice} receivedAt={receivedAt.current} />
+            <StatsBar summary={summary} ice={ice} quality={quality} receivedAt={receivedAt.current} />
             <RateGraph history={history} />
             <div className="grid-bar">
               <span data-testid="grid-count">
@@ -235,13 +245,21 @@ export function LiveView({ dir, onViewer }: Props) {
                   <option key={k} value={k}>{FILTER_LABELS[k]}</option>
                 ))}
               </select>
+              <button className={mapOn ? "on" : ""} onClick={() => setMapOn((v) => !v)} data-testid="map-toggle"
+                title="Positions de platine des images montrées, colorées selon les seuils d'acceptation">
+                Carte
+              </button>
               <span className="spacer" />
               <label className="tile-size">
                 Taille
                 <input type="range" min={100} max={320} step={20} value={tile} onChange={(e) => setTile(Number(e.target.value))} aria-label="Taille des vignettes" />
               </label>
             </div>
-            <ImageGrid items={shown} tile={tile} reference={reference} calibrated={calibrated} mfp={mfp} onOpen={onViewer} />
+            {mapOn ? (
+              <StageMap items={shown} rules={rules} reference={reference} onOpen={onViewer} />
+            ) : (
+              <ImageGrid items={shown} tile={tile} reference={reference} calibrated={calibrated} mfp={mfp} rules={rules} onOpen={onViewer} />
+            )}
           </>
         ) : (
           <div className="empty" data-testid="live-empty">

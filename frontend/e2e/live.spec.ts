@@ -263,6 +263,34 @@ test("images are measured: ice against the session, and a mark on crystalline ic
   await expect(page.getByTestId("ice-mode")).toHaveText("Glace relative aux images les plus claires de la session.");
   await expect(page.locator('[data-testid="tile"][data-flags~="empty"]')).toHaveCount(0);
 
+  // acceptance thresholds: crystalline ice is rejected, the tile and the count say so
+  await expect(page.getByTestId("stat-quality")).toHaveCount(0); // nothing is judged without a threshold
+  await page.getByTestId("quality-ring").fill("1.2");
+  await page.getByTestId("quality-save").click();
+  await expect(page.getByTestId("quality-saved")).toBeVisible();
+  await expect(tile).toHaveAttribute("data-verdict", "rejected");
+  await expect(tile).toContainText("rejetée");
+  await expect(tile).toHaveAttribute("title", /Rejetée : anneau de glace \d+\.\d\d \(seuil 1\.2\)/);
+  await expect(page.getByTestId("stat-quality-sub")).toHaveText(/^1 rejetée sur \d+$/);
+  await expect(page.getByTestId("tile").nth(3)).toHaveAttribute("data-verdict", "accepted");
+  await page.getByTestId("grid-filter").selectOption("rejected");
+  await expect(page.getByTestId("tile")).toHaveCount(1);
+  await page.getByTestId("grid-filter").selectOption("all");
+  // the map: one point per image at its stage position, the rejected one in its own colour
+  await page.getByTestId("map-toggle").click();
+  const count = Number(await page.getByTestId("stage-map").getAttribute("data-points"));
+  expect(count).toBeGreaterThan(100);
+  await expect(page.getByTestId("stage-point")).toHaveCount(count);
+  await expect(page.locator('[data-testid="stage-point"][data-verdict="rejected"]')).toHaveCount(1);
+  const places = await page.getByTestId("stage-point").evaluateAll((points) => points.map((p) => `${p.getAttribute("cx")},${p.getAttribute("cy")}`));
+  expect(new Set(places).size).toBeGreaterThan(50); // spread over the grid, not piled up
+  await page.getByTestId("map-toggle").click();
+  await page.getByTestId("quality-ring").fill("0.5"); // not a ratio one can ask for
+  await expect(page.getByTestId("quality-save")).toBeDisabled();
+  await page.getByTestId("quality-ring").fill("");
+  await page.getByTestId("quality-save").click();
+  await expect(tile).toHaveAttribute("data-verdict", "");
+
   // the overview images EPU takes on the way are another view of the same session
   const squares = page.waitForResponse((r) => r.url().includes("/items?") && r.url().includes("category=gridsquare") && r.ok());
   await page.getByTestId("grid-category").selectOption("gridsquare");
