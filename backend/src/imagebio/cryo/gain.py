@@ -18,8 +18,11 @@ Sources: ``docs/research/cryoem-live.md`` (section 1, gain).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
+from xml.etree import ElementTree
 
 import numpy as np
 import numpy.typing as npt
@@ -35,6 +38,7 @@ __all__ = [
     "check_orientation",
     "fit_gain",
     "flatness",
+    "listed_defects",
     "orient",
     "prepare_gain",
 ]
@@ -285,3 +289,47 @@ def check_orientation(image: Plane, gain: Gain, *, tile: int = _TILE) -> Orienta
         ratio = 1.0
     plain = np.where(finite, data, np.float32(level))
     return OrientationCheck(tuple(scores), best, ratio, ratio >= _CONFIDENT_RATIO, flatness(plain, tile))
+
+
+# ── the defect list of a Falcon gain reference ────────────────────────────────
+
+_DEFECT_TAG: Final = 65100
+_MAX_DEFECT_XML: Final = 4 * 2**20
+_TIFF_MAGIC: Final = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+_DTD: Final = re.compile(rb"<!(DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+def listed_defects(path: Path) -> int | None:
+    """Number of entries of the defect list a ``.gain`` file carries in TIFF tag 65100 (the
+    columns, rows, areas and pixels the camera knows to be bad), 0 for an empty list, None
+    when the file has none or it cannot be read.
+
+    The list is **not applied**: its layout is not documented and no real file was at hand to
+    check a reader against. Counting it lets the interface say so instead of ignoring it in
+    silence; pixels whose gain is zero are corrected as before.
+    """
+    import tifffile
+
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) not in _TIFF_MAGIC:
+                return None
+        with tifffile.TiffFile(path) as tif:
+            page = tif.pages[0]
+            tag = page.tags.get(_DEFECT_TAG) if isinstance(page, tifffile.TiffPage) else None
+            value = tag.value if tag is not None else None
+    except (OSError, ValueError, IndexError, KeyError, tifffile.TiffFileError):
+        return None
+    if isinstance(value, str):
+        value = value.encode("utf-8", "replace")
+    if not isinstance(value, bytes) or not value.strip(b"\x00 \r\n\t") or len(value) > _MAX_DEFECT_XML:
+        return None
+    if _DTD.search(value):
+        return None  # a document type could pull in anything: not parsed
+    try:
+        root = ElementTree.fromstring(value.strip(b"\x00"))  # noqa: S314 - no DTD, size bounded
+    except ElementTree.ParseError:
+        return None
+    # leaves that say something: an element with text, or with attributes and no children
+    leaves = (e for e in root.iter() if e is not root and len(e) == 0)
+    return sum(1 for e in leaves if (e.text or "").strip() or e.attrib)

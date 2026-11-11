@@ -235,6 +235,11 @@ function GainSection({ path, etag, options, cryo, onChange, named }: GainProps) 
             image de coups à inverser (champ plat)
           </label>
           {status}
+          {check && !failure && (check.listed_defects ?? 0) > 0 && (
+            <div className="note warn" data-testid="gain-listed-defects">
+              Cette référence porte une liste de {check.listed_defects} défaut{check.listed_defects! > 1 ? "s" : ""} du détecteur qui n'est pas appliquée : seuls les pixels de gain nul sont corrigés.
+            </div>
+          )}
         </>
       )}
     </>
@@ -350,6 +355,11 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
           </div>
         </>
       )}
+
+      <label className="check" title="Les vues réduites (image entière, zoom arrière) gardent les basses fréquences de la transformée de Fourier au lieu de moyenner des blocs de pixels : aucun repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. Une transformée par plan : plus lent.">
+        <input type="checkbox" checked={cryo.fourierBin} data-testid="fourier-bin" onChange={(e) => onChange({ fourierBin: e.target.checked })} />
+        Réduction dans Fourier
+      </label>
 
       <GainSection path={path} etag={etag} options={options} cryo={cryo} onChange={onChange} named={namedGain} />
       <PicksSection path={path} width={info.shape.x} cryo={cryo} onChange={onChange} picks={picks} failure={picksError} />

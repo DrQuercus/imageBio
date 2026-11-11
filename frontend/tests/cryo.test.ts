@@ -87,8 +87,13 @@ describe("processing requested from the server", () => {
   });
 
   it("gives different keys to different processings", () => {
-    const keys = [{}, { t_end: 6 }, { lp: 6 }, { hp: 6 }, { lp: 6, apix: 1 }, { lp: 6, apix: 2 }].map(processingKey);
+    const keys = [{}, { t_end: 6 }, { lp: 6 }, { hp: 6 }, { lp: 6, apix: 1 }, { lp: 6, apix: 2 }, { fbin: true }, { lp: 6, fbin: true }].map(processingKey);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("asks for the reduction in Fourier space when it is chosen", () => {
+    expect(processingOf({ ...NO_CRYO, fourierBin: true }, 0, 1, null, false)).toEqual({ fbin: true });
+    expect(processingOf({ ...filtered, fourierBin: true }, 2, 40, 0.83, true)).toEqual({ t_end: 6, lp: 20, hp: 400, fbin: true });
   });
 });
 

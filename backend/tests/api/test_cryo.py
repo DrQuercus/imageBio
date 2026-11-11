@@ -44,6 +44,67 @@ def client(tree: Tree):
         yield c
 
 
+def naive_fourier_crop(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """The low frequencies of the whole complex transform, cut out around its centre. Along an
+    axis reduced to an even size, the frequencies +n/2 and -n/2 of the image both become the
+    Nyquist frequency of the result: it gets half of each."""
+    spectrum = np.fft.fftshift(np.fft.fft2(a.astype(np.float64)))
+    for axis, size in enumerate(shape):
+        n = spectrum.shape[axis]
+        centre = n // 2
+        kept = np.take(spectrum, np.arange(centre - size // 2, centre - size // 2 + size), axis=axis)
+        if size % 2 == 0 and size < n:
+            first = [slice(None)] * 2
+            first[axis] = 0  # the frequency -size/2
+            kept[tuple(first)] = 0.5 * (kept[tuple(first)] + np.take(spectrum, centre + size // 2, axis=axis))
+        spectrum = kept
+    out = np.fft.ifft2(np.fft.ifftshift(spectrum))
+    assert np.abs(out.imag).max() < 1e-9 * max(1.0, np.abs(out.real).max())  # a real image again
+    return out.real * (shape[0] * shape[1]) / a.size
+
+
+def test_a_plane_can_be_binned_in_fourier_space(client, tree: Tree):
+    frames = tree.frames  # type: ignore[attr-defined]
+    path = {"path": "public/frames.mrc", "t": 3}
+    whole = client.get(PLANE, params={**path, "bin": 4, "fbin": "true"})
+    assert whole.status_code == 200 and whole.headers["x-dtype"] == "float32"
+    assert whole.headers["x-shape"] == "24,32" and whole.headers["x-bin"] == "4"
+    reference = naive_fourier_crop(frames[3], (24, 32))
+    np.testing.assert_allclose(decode(whole), reference, atol=2e-3)
+    blocks = client.get(PLANE, params={**path, "bin": 4})
+    assert whole.headers["etag"] != blocks.headers["etag"]  # another answer for a cache
+    assert np.abs(decode(whole) - decode(blocks)).max() > 0.5  # and another image: not block means
+
+    # a region is cut out of the plane reduced as a whole: tiles agree with the overview
+    region = client.get(PLANE, params={**path, "bin": 4, "fbin": "true", "x": 32, "y": 16, "w": 64, "h": 40})
+    assert region.headers["x-shape"] == "10,16" and region.headers["x-region"] == "32,16,64,40"
+    np.testing.assert_array_equal(decode(region), decode(whole)[4:14, 8:24])
+    edge = client.get(PLANE, params={**path, "bin": 4, "fbin": "true", "x": 96, "y": 64, "w": 32, "h": 32})
+    np.testing.assert_array_equal(decode(edge), decode(whole)[16:24, 24:32])
+    off = client.get(PLANE, params={**path, "bin": 4, "fbin": "true", "x": 30, "y": 16, "w": 64, "h": 40})
+    assert off.status_code == 400 and "multiple of the bin" in off.json()["error"]["message"]
+
+    # after the other steps: mean of frames, then filter, then the reduction
+    mean = frames[2:7].astype(np.float64).mean(axis=0).astype(np.float32)
+    averaged = client.get(
+        PLANE, params={"path": "public/frames.mrc", "t": 2, "t_end": 6, "bin": 2, "fbin": "true"}
+    )
+    np.testing.assert_allclose(decode(averaged), naive_fourier_crop(mean, (48, 64)), atol=2e-3)
+    filtered = client.get(PLANE, params={**path, "lp": 10, "bin": 2, "fbin": "true"})
+    expected = fourier_filter(frames[3], apix_x=1.25, lowpass=10)
+    np.testing.assert_allclose(decode(filtered), naive_fourier_crop(expected, (48, 64)), atol=2e-3)
+
+    # at full resolution there is nothing to reduce: the stored values, as without it
+    full = client.get(PLANE, params={**path, "fbin": "true"})
+    np.testing.assert_array_equal(decode(full), frames[3])
+    # the statistics are those of the plane itself, whatever the way it is shown
+    assert (
+        client.get(STATS, params={**path, "fbin": "true"}).json()["mean"]
+        == client.get(STATS, params=path).json()["mean"]
+    )
+    assert client.get(PLANE, params={**path, "bin": 4, "fbin": "perhaps"}).status_code == 400
+
+
 def test_mean_of_frames_3_to_7_equals_the_numpy_mean(client, tree: Tree):
     frames = tree.frames  # type: ignore[attr-defined]
     r = client.get(PLANE, params={"path": "public/frames.mrc", "t": 2, "t_end": 6})  # frames 3..7, 1-based
@@ -252,6 +313,7 @@ def test_a_flipped_gain_is_detected(client, detector):
     assert body["confident"] is True and body["improves"] is True
     assert body["ratio"] > 1.05
     assert body["frames"] == 20 and body["defects"] == 1
+    assert body["listed_defects"] is None  # this reference carries no defect list
     assert body["gain_shape"] == {"x": 128, "y": 128}
     scores = [o["score"] for o in body["orientations"]]
     assert len(scores) == 8 and min(scores) == scores[6]

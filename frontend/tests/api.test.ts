@@ -60,7 +60,7 @@ describe("links", () => {
       apix: 0.83,
       cryo: {
         lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true,
-        picks: "cryo/job 5/particles.star", picksFlipY: true, picksDiameter: 180, picksMinScore: -0.25,
+        fourierBin: true, picks: "cryo/job 5/particles.star", picksFlipY: true, picksDiameter: 180, picksMinScore: -0.25,
       },
       gallery: true,
     };

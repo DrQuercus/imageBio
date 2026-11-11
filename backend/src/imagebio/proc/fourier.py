@@ -16,7 +16,7 @@ import numpy.typing as npt
 from imagebio.core.errors import InvalidRequestError
 from imagebio.core.model import Plane
 
-__all__ = ["fourier_filter", "next_fast_len", "power_spectrum", "radial_profile"]
+__all__ = ["fourier_crop", "fourier_filter", "next_fast_len", "power_spectrum", "radial_profile"]
 
 _LN2 = math.log(2.0)
 _MAX_TILES = 400
@@ -142,6 +142,43 @@ def fourier_filter(
     if not all_finite:
         out[~finite] = np.asarray(a, dtype=np.float32)[~finite]
     return np.ascontiguousarray(out)
+
+
+def fourier_crop(a: Plane, shape: tuple[int, int]) -> Plane:
+    """``a`` resampled to ``shape`` (rows, columns, no larger than its own) by keeping the low
+    frequencies of its Fourier transform: what "Fourier binning" or "Fourier cropping" means.
+
+    Unlike a mean of blocks, this keeps every detail coarser than the new pixel at its full
+    contrast and removes exactly what the new sampling cannot hold (no aliasing). The mean is
+    kept. When a side of ``shape`` is even, the two frequencies of opposite sign that become
+    its Nyquist frequency are averaged. The image is taken as periodic: its opposite edges
+    meet, which shows as faint ripples along the borders of an image with a strong gradient.
+    NaN and Inf pixels are replaced by the mean of the others (they would spread everywhere).
+    Returns float32.
+    """
+    if a.ndim != 2:
+        raise InvalidRequestError("fourier_crop expects a 2-D plane")
+    h, w = a.shape
+    oh, ow = shape
+    if not (1 <= oh <= h and 1 <= ow <= w):
+        raise InvalidRequestError("fourier_crop can only make an image smaller")
+    data = np.asarray(a, dtype=np.float32)
+    finite = np.isfinite(data)
+    if not finite.all():
+        fill = float(data[finite].mean(dtype=np.float64)) if finite.any() else 0.0
+        data = np.where(finite, data, np.float32(fill))
+    if (oh, ow) == (h, w):
+        return np.ascontiguousarray(data)
+    spectrum = np.fft.rfft2(data)
+    top, bottom, columns = (oh + 1) // 2, oh // 2, ow // 2 + 1
+    kept = np.empty((oh, columns), spectrum.dtype)
+    kept[:top] = spectrum[:top, :columns]  # frequencies 0, 1, …
+    if bottom:
+        kept[top:] = spectrum[h - bottom :, :columns]  # … and -bottom, …, -1
+        if oh % 2 == 0 and oh < h:  # +oh/2 and -oh/2 are the same frequency of the result
+            kept[top] = 0.5 * (spectrum[h - bottom, :columns] + spectrum[bottom, :columns])
+    out = np.fft.irfft2(kept, s=(oh, ow)) * ((oh * ow) / (h * w))
+    return np.ascontiguousarray(out.astype(np.float32))
 
 
 def _starts(length: int, tile: int, step: int) -> list[int]:

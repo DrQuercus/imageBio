@@ -13,7 +13,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from collections.abc import Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
@@ -23,10 +23,18 @@ from imagebio.core.cache import ByteLRU, DatasetPool, options_key
 from imagebio.core.config import Settings
 from imagebio.core.errors import InvalidRequestError
 from imagebio.core.model import Calibration, DatasetInfo, FileId, Plane
-from imagebio.cryo.gain import OrientationCheck, apply_gain, check_orientation, fit_gain, orient, prepare_gain
+from imagebio.cryo.gain import (
+    OrientationCheck,
+    apply_gain,
+    check_orientation,
+    fit_gain,
+    listed_defects,
+    orient,
+    prepare_gain,
+)
 from imagebio.io.registry import Registry, default_registry
 from imagebio.proc.binning import bin_mean, binned_shape, crop
-from imagebio.proc.fourier import fourier_filter, power_spectrum
+from imagebio.proc.fourier import fourier_crop, fourier_filter, power_spectrum
 from imagebio.proc.stats import PlaneStats, plane_stats
 
 __all__ = ["MAX_BIN", "GainCheck", "GainSpec", "PlaneResult", "PlaneService", "Processing"]
@@ -69,6 +77,9 @@ class Processing:
     multiplied by a gain reference and its defective pixels are filled. ``lowpass`` and
     ``highpass``: resolution filters in Å. ``apix``: Å per pixel given by the user, for files
     that do not store their pixel size (it takes precedence over the file's value).
+
+    ``fourier_bin`` is about the binning that follows: the plane is reduced by keeping the low
+    frequencies of its Fourier transform instead of averaging blocks of pixels.
     """
 
     t_end: int | None = None
@@ -76,6 +87,7 @@ class Processing:
     highpass: float | None = None
     apix: float | None = None
     gain: GainSpec | None = None
+    fourier_bin: bool = False
 
     @property
     def identity(self) -> bool:
@@ -86,10 +98,22 @@ class Processing:
         """The same frames and gain, without the resolution filters."""
         return Processing(t_end=self.t_end, gain=self.gain)
 
+    @property
+    def full_resolution(self) -> Processing:
+        """What is done to the plane itself, whatever the way it is binned afterwards."""
+        return replace(self, fourier_bin=False) if self.fourier_bin else self
+
     def key(self) -> tuple[Any, ...]:
         filtered = self.lowpass is not None or self.highpass is not None
         gain = self.gain.key() if self.gain is not None else None
-        return (self.t_end, self.lowpass, self.highpass, self.apix if filtered else None, gain)
+        return (
+            self.t_end,
+            self.lowpass,
+            self.highpass,
+            self.apix if filtered else None,
+            gain,
+            self.fourier_bin,
+        )
 
 
 NO_PROCESSING: Final = Processing()
@@ -104,6 +128,8 @@ class GainCheck:
     defects: int  # defective pixels of the reference
     gain_shape: tuple[int, int]
     file_id: FileId
+    #: Entries of the defect list the reference carries without it being applied (None: none).
+    listed_defects: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +209,7 @@ class PlaneService:
         self, dataset: Any, file_id: FileId, okey: str, t: int, c: int, z: int, proc: Processing
     ) -> Plane:
         """The full-resolution plane after ``proc`` (frame average, resolution filters)."""
+        proc = proc.full_resolution  # one plane in the cache, however it is binned afterwards
         if proc.identity:
             return self._raw(dataset, file_id, okey, t, c, z)
         dataset.check_index(t, c, z)
@@ -251,6 +278,21 @@ class PlaneService:
                 )
             if bin == 1 and region == full:
                 array = self._source(dataset, file_id, okey, t, c, z, proc)
+            elif proc.fourier_bin and bin > 1:
+                # the whole plane is reduced once, and regions are cut out of the result
+                if x % bin or y % bin:
+                    raise InvalidRequestError(
+                        "with Fourier binning, a region must start on a multiple of the bin"
+                    )
+                self._check_plane_size(info, bytes_per_pixel=24)  # float32 plane and its transform
+                whole = self._cache.get_or_load(
+                    ("fourier", file_id, okey, t, c, z, proc.key(), bin),
+                    lambda: fourier_crop(
+                        self._source(dataset, file_id, okey, t, c, z, proc),
+                        binned_shape(info.size_y, info.size_x, bin),
+                    ),
+                )
+                array = whole[y // bin : y // bin + out_h, x // bin : x // bin + out_w]
             else:
                 array = self._cache.get_or_load(
                     ("view", file_id, okey, t, c, z, proc.key(), bin, region),
@@ -331,7 +373,12 @@ class PlaneService:
                 image = self._raw(dataset, file_id, okey, 0, 0, 0)
             check = check_orientation(image, reference)
         result = GainCheck(
-            check, frames, int((reference == 0).sum()), (reference.shape[0], reference.shape[1]), file_id
+            check,
+            frames,
+            int((reference == 0).sum()),
+            (reference.shape[0], reference.shape[1]),
+            file_id,
+            listed_defects(Path(gain.file_id.path)),
         )
         with self._stats_lock:
             self._gain_checks[key] = result

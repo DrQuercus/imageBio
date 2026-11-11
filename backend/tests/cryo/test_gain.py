@@ -335,3 +335,36 @@ def test_check_orientation_refuses_what_it_cannot_judge() -> None:
         check_orientation(np.ones((64, 64), np.float32), np.ones((48, 100), np.float32))
     with pytest.raises(InvalidRequestError):
         check_orientation(np.ones((2, 64, 64), np.float32), np.ones((64, 64), np.float32))
+
+
+# ── the defect list a Falcon gain reference carries ───────────────────────────
+
+
+def test_the_defect_list_of_a_gain_file_is_counted_not_ignored(tmp_path) -> None:
+    import tifffile
+
+    from imagebio.cryo.gain import listed_defects
+
+    gain = np.ones((16, 16), np.float32)
+
+    def write(name: str, xml: bytes | None) -> object:
+        tags = [(65100, "s", 0, xml, True)] if xml is not None else None
+        tifffile.imwrite(tmp_path / name, gain, extratags=tags)
+        return tmp_path / name
+
+    full = b'<?xml version="1.0"?><defects><col>1023</col><row>17-18</row><area>0,0,3,3</area><point>5,7</point></defects>'
+    assert listed_defects(write("full.gain", full)) == 4
+    nested = b'<DefectList><Columns><Column index="12"/><Column index="900"/></Columns><Points/></DefectList>'
+    assert listed_defects(write("nested.gain", nested)) == 2
+    # what a Falcon 4i was reported to write: a list with nothing in it
+    assert (
+        listed_defects(write("empty.gain", b"<defects><!-- the defects file is not present --></defects>"))
+        == 0
+    )
+    assert listed_defects(write("none.gain", None)) is None  # no such tag
+    assert listed_defects(write("junk.gain", b"not xml at all <<<")) is None
+    dtd = b'<!DOCTYPE d [<!ENTITY x SYSTEM "file:///etc/passwd">]><defects><col>&x;</col></defects>'
+    assert listed_defects(write("dtd.gain", dtd)) is None  # never parsed
+    (tmp_path / "plain.gain").write_bytes(b"this is not a TIFF file")
+    assert listed_defects(tmp_path / "plain.gain") is None
+    assert listed_defects(tmp_path / "missing.gain") is None

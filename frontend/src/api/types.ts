@@ -120,6 +120,8 @@ export interface Processing {
   gain?: string;
   gain_orient?: number;
   gain_inv?: boolean;
+  /** Reduce the plane by keeping the low frequencies of its transform, not by block means. */
+  fbin?: boolean;
 }
 
 /** Answer of /api/cryo/gain/check: which orientation of a gain flattens a movie best. */
@@ -137,6 +139,9 @@ export interface GainCheck {
   improves: boolean;
   frames: number;
   defects: number;
+  /** Entries of the defect list the reference carries (TIFF tag 65100 of a .gain file), which
+   *  is not applied; null when it has none. */
+  listed_defects: number | null;
   gain_shape: { x: number; y: number };
 }
 

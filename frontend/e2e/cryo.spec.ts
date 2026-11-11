@@ -389,3 +389,24 @@ test("particle coordinates are drawn over the image, from a file about it or abo
   await expect(page.getByTestId("error")).toHaveCount(0);
   expect(refused).toEqual([]);
 });
+
+test("reduced views can be made in Fourier space", async ({ page }) => {
+  const refused = trackRefused(page);
+  await openFile(page, "demo/big.mrc"); // larger than the window: shown reduced
+  await expect(page.getByTestId("level")).not.toHaveText("pleine résolution");
+  const asked = planeWith(page, "fbin=true");
+  await page.getByTestId("fourier-bin").check();
+  expect(await asked).toMatch(/[?&]bin=\d+/); // the overview is asked again, reduced in Fourier space
+  await ready(page, "demo/big.mrc");
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain("fb=1");
+  // zooming in on a part asks for that part the same way, and the server cuts it out of the whole
+  const detail = planeWith(page, "&w=");
+  await page.getByTestId("viewer").hover();
+  await page.mouse.wheel(0, -600);
+  expect(await detail).toContain("fbin=true");
+  await page.getByTestId("fourier-bin").uncheck();
+  await expect.poll(() => page.evaluate(() => window.location.hash)).not.toContain("fb=1");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
+});
+

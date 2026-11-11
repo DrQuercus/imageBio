@@ -262,3 +262,85 @@ def test_fourier_speed_on_a_4k_plane():
     ps = time.perf_counter() - t0
     print(f"\n4K low-pass: {lp * 1000:.0f} ms, power spectrum: {ps * 1000:.0f} ms")
     assert lp < 3.0 and ps < 3.0
+
+
+# ── Fourier cropping ──────────────────────────────────────────────────────────
+
+
+def naive_fourier_crop(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """The low frequencies of the whole complex transform, cut out around its centre. Along an
+    axis reduced to an even size, the frequencies +n/2 and -n/2 of the image both become the
+    Nyquist frequency of the result: it gets half of each."""
+    spectrum = np.fft.fftshift(np.fft.fft2(a.astype(np.float64)))
+    for axis, size in enumerate(shape):
+        n = spectrum.shape[axis]
+        centre = n // 2
+        kept = np.take(spectrum, np.arange(centre - size // 2, centre - size // 2 + size), axis=axis)
+        if size % 2 == 0 and size < n:
+            first = [slice(None)] * 2
+            first[axis] = 0  # the frequency -size/2
+            kept[tuple(first)] = 0.5 * (kept[tuple(first)] + np.take(spectrum, centre + size // 2, axis=axis))
+        spectrum = kept
+    out = np.fft.ifft2(np.fft.ifftshift(spectrum))
+    assert np.abs(out.imag).max() < 1e-9 * max(1.0, np.abs(out.real).max())  # a real image again
+    return out.real * (shape[0] * shape[1]) / a.size
+
+
+@pytest.mark.parametrize(
+    ("shape", "to"),
+    [
+        ((64, 64), (32, 32)),
+        ((64, 96), (16, 24)),
+        ((65, 97), (33, 49)),  # odd to odd
+        ((65, 97), (32, 48)),  # odd to even
+        ((64, 96), (21, 31)),  # even to odd
+        ((50, 70), (50, 35)),  # one axis only
+        ((48, 48), (47, 1)),
+    ],
+)
+def test_fourier_crop_keeps_the_low_frequencies_of_the_transform(shape, to) -> None:
+    from imagebio.proc.fourier import fourier_crop
+
+    rng = np.random.default_rng(31)
+    image = rng.normal(100, 20, shape).astype(np.float32)
+    out = fourier_crop(image, to)
+    assert out.shape == to and out.dtype == np.float32
+    np.testing.assert_allclose(out, naive_fourier_crop(image, to), rtol=0, atol=2e-3)
+    assert float(out.mean(dtype=np.float64)) == pytest.approx(float(image.mean(dtype=np.float64)), abs=1e-3)
+
+
+def test_fourier_crop_keeps_coarse_detail_whole_and_removes_what_cannot_be_sampled() -> None:
+    from imagebio.proc.binning import bin_mean
+    from imagebio.proc.fourier import fourier_crop
+
+    x = np.mgrid[0:240, 0:240][1].astype(np.float64)
+    coarse = np.cos(2 * np.pi * x / 6.0)  # period 6 pixels: 3 pixels once binned by 2, above Nyquist
+    fine = np.cos(2 * np.pi * x / 3.0)  # period 3 pixels: 1.5 once binned, cannot be sampled
+    image = (10 + coarse + fine).astype(np.float32)
+    kept = fourier_crop(image, (120, 120)).astype(np.float64) - 10
+    expected = np.cos(2 * np.pi * np.mgrid[0:120, 0:120][1] / 3.0)  # the coarse wave, on the new grid
+    np.testing.assert_allclose(kept, expected, atol=1e-4)  # full amplitude, the fine wave gone
+    # a mean of blocks loses a part of the coarse wave and folds the fine one back
+    blocks = bin_mean(image, 2).astype(np.float64) - 10
+    assert np.abs(blocks - np.cos(2 * np.pi * (np.mgrid[0:120, 0:120][1] + 0.25) / 3.0)).max() > 0.1
+
+
+def test_fourier_crop_edge_cases() -> None:
+    from imagebio.core.errors import InvalidRequestError
+    from imagebio.proc.fourier import fourier_crop
+
+    rng = np.random.default_rng(32)
+    counts = rng.integers(0, 4000, (40, 60), dtype=np.uint16)
+    same = fourier_crop(counts, (40, 60))
+    np.testing.assert_array_equal(same, counts.astype(np.float32))  # nothing to remove
+    np.testing.assert_allclose(fourier_crop(counts, (1, 1)), [[counts.mean()]], rtol=1e-5)
+    holes = rng.normal(5, 1, (32, 32)).astype(np.float32)
+    holes[3, 4], holes[10, 10] = np.nan, np.inf
+    out = fourier_crop(holes, (16, 16))
+    assert np.isfinite(out).all() and abs(float(out.mean()) - 5) < 0.2
+    assert np.isfinite(fourier_crop(np.full((8, 8), np.nan, np.float32), (4, 4))).all()
+    for bad in ((41, 60), (40, 61), (0, 10), (10, 0)):
+        with pytest.raises(InvalidRequestError):
+            fourier_crop(counts, bad)
+    with pytest.raises(InvalidRequestError):
+        fourier_crop(np.zeros((2, 4, 4), np.float32), (2, 2))  # type: ignore[arg-type]

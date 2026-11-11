@@ -82,6 +82,7 @@ export function parseLink(hash: string): LinkState {
     if (orient !== undefined && Number.isInteger(orient) && orient >= 1 && orient <= 7) cryo.gainOrient = orient;
     if (q.get("gi") === "1") cryo.gainInvert = true;
   }
+  if (q.get("fb") === "1") cryo.fourierBin = true;
   const picks = q.get("picks");
   if (picks) {
     cryo.picks = picks;
@@ -131,6 +132,7 @@ export function formatLink(state: LinkState): string {
       if (cryo.gainOrient) q.set("go", String(cryo.gainOrient));
       if (cryo.gainInvert) q.set("gi", "1");
     }
+    if (cryo.fourierBin) q.set("fb", "1");
     if (cryo.picks) {
       q.set("picks", cryo.picks);
       if (cryo.picksFlipY) q.set("pfy", "1");

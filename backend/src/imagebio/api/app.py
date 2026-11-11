@@ -69,7 +69,7 @@ _FLOAT: Final = re.compile(r"-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
 _COMPRESS_PROBE: Final = 256 * 1024
 _CACHE_CONTROL: Final = "private, no-cache"
 _GAIN_PARAMS: Final = frozenset({"gain", "gain_orient", "gain_inv"})
-_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix"}) | _GAIN_PARAMS
+_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix", "fbin"}) | _GAIN_PARAMS
 _STATS_PARAMS: Final = frozenset({"path", "t", "c", "z"}) | _PROCESSING_PARAMS
 _PLANE_PARAMS: Final = _STATS_PARAMS | {"bin", "x", "y", "w", "h"}
 _SPECTRUM_PARAMS: Final = frozenset({"path", "t", "c", "z", "t_end", "tile"}) | _GAIN_PARAMS
@@ -264,9 +264,10 @@ def create_app(
         lp: float | None = Query(None, gt=0),
         hp: float | None = Query(None, gt=0),
         apix: float | None = Query(None, gt=0),
+        fbin: bool = Query(False),
         gain: GainSpec | None = Depends(gain_of),
     ) -> Processing:
-        return Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix, gain=gain)
+        return Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix, gain=gain, fourier_bin=fbin)
 
     # ── endpoints ────────────────────────────────────────────────────────────
     @app.get("/healthz")
@@ -467,6 +468,7 @@ def create_app(
             **result.check.to_json(current=gain.orientation),
             "frames": result.frames,
             "defects": result.defects,
+            "listed_defects": result.listed_defects,
             "gain_shape": {"y": result.gain_shape[0], "x": result.gain_shape[1]},
         }
         return Response(

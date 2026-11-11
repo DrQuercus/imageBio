@@ -18,6 +18,8 @@ export interface CryoSettings {
   gainOrient: number;
   /** The gain file is a flat-field counts image, to be inverted. */
   gainInvert: boolean;
+  /** Reduced views are made by Fourier cropping instead of means of blocks. */
+  fourierBin: boolean;
   /** Coordinate file drawn over the image (logical path), or null. */
   picks: string | null;
   /** Count the rows of the coordinates from the bottom of the image instead of the top. */
@@ -36,6 +38,7 @@ export const NO_CRYO: CryoSettings = {
   gain: null,
   gainOrient: 0,
   gainInvert: false,
+  fourierBin: false,
   picks: null,
   picksFlipY: false,
   picksDiameter: null,
@@ -116,6 +119,7 @@ export function processingOf(
     if ((proc.lp !== undefined || proc.hp !== undefined) && !apixFromFile) proc.apix = apix;
   }
   Object.assign(proc, gainOf(cryo));
+  if (cryo.fourierBin) proc.fbin = true;
   return proc;
 }
 
@@ -131,7 +135,7 @@ export function gainOf(cryo: CryoSettings): Pick<Processing, "gain" | "gain_orie
 /** Identifies a processing in cache keys. */
 export function processingKey(proc: Processing): string {
   const gain = proc.gain ? `${proc.gain_orient ?? 0}${proc.gain_inv ? "i" : ""}:${proc.gain}` : "";
-  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""};${gain}`;
+  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""};${gain};${proc.fbin ? "f" : ""}`;
 }
 
 /** Directory of a logical path ("root/a/b.eer" gives "root/a"). */
