@@ -6,6 +6,8 @@
 
 ## 0. En bref
 
+> **Mise à jour du 11 novembre 2026.** Le périmètre a été recentré sur le cryo et le suivi en direct : le cœur ImageJ (M5, M6) et le worker ImageJ sont retirés, il reste un export vers Fiji ([ADR 009](adr/009-perimetre-cryo-et-live.md)). Les points 1 à 3 ci-dessous décrivent le projet d'origine ; la feuille de route du §4 est à jour.
+
 1. **L'idée est bonne et la forme est la bonne.** On fait une application web servie depuis un serveur du labo, à côté des données (NAS et GPU). Les utilisateurs l'ouvrent dans un navigateur, sans rien installer. Elle propose trois modes : **Visionneuse/éditeur** (façon ImageJ), **Cryo** et **Live**.
 2. **« Ultime » et « clone d'ImageJ » sont les deux pièges.** ImageJ représente plus de 25 ans de travail. Le projet est réaliste si « ImageJ » veut dire : les ~20 fonctions utilisées tous les jours, très bien faites, plus un pont vers le vrai Fiji (et un worker ImageJ côté serveur) pour tout le reste.
 3. **Stack retenue :**
@@ -499,7 +501,9 @@ Reste à faire dans M4 :
   - la vérification de l'orientation se trompait pour un gain d'échelle très éloignée de 1, et se disait sûre d'elle sur des images parfaitement plates.
   Le frontend, les lecteurs et les modules de M1 et M2 n'ont toujours pas eu de relecture indépendante.
 
-### M5 : cœur ImageJ, partie 1 (5-7 sessions)
+### M5 : cœur ImageJ, partie 1 (retiré du périmètre le 11 novembre 2026)
+
+> **Retiré** (décision 6 du §8, [ADR 009](adr/009-perimetre-cryo-et-live.md)). De ce jalon ne reste que **« Ouvrir dans Fiji »**, fait sous la forme d'un export TIFF ImageJ calibré. Le texte ci-dessous est gardé pour mémoire.
 
 **Livrables :**
 - Hyperstacks : navigation C/Z/T, composite de canaux, vues orthogonales.
@@ -514,7 +518,9 @@ Reste à faire dans M4 :
 - Mesures égales à celles de Fiji à 1e-6 près sur les images de référence (valeurs produites une fois par pyimagej et stockées en JSON).
 - Aller-retour d'un `RoiSet` sans perte dans Fiji.
 
-### M6 : cœur ImageJ, partie 2 + formats du palier 2 (4-6 sessions)
+### M6 : cœur ImageJ, partie 2 + formats du palier 2 (retiré du périmètre le 11 novembre 2026)
+
+> **Retiré** avec M5. Les lecteurs du palier 2 (DM3/DM4, ND2, CZI, LIF, HDF5) s'ajouteront à la demande, un par un. Le texte ci-dessous est gardé pour mémoire.
 
 **Livrables :**
 - Seuils : « Default » d'ImageJ porté depuis le code d'IJ1, plus Otsu, Li, Huang, Triangle, Yen, etc.
@@ -528,18 +534,20 @@ Reste à faire dans M4 :
 - Même seuil et même nombre de particules que Fiji sur les images de référence.
 - Le script enregistré reproduit l'image à l'identique, bit à bit.
 
-### M7 : workers de calcul (4-6 sessions)
+### M7 : qualité des acquisitions dans le Live (périmètre revu le 11 novembre 2026)
+
+Le worker ImageJ et Bio-Formats de la première version de ce jalon est retiré avec M5 et M6 (ADR 009). Reste ce qui sert le cryo et le suivi en direct.
 
 **Livrables :**
-- `workers/imagej` : JVM séparée ; Bio-Formats pour le palier 3 ; exécution de macros IJM, isolée par utilisateur ; cache OME-Zarr.
-- `workers/gpu` : MotionCor3 et CTFFIND5 lancés comme sous-processus. Le fichier `-FmIntFile` est généré à partir de la dose de l'XML ou de l'EER. Résultats remontés dans Live : résolution du fit CTF, défocus, astigmatisme, épaisseur, dérive.
-- Tableaux de bord Live avec seuils d'acceptation et de rejet.
-- Carte de grid square avec les trous acquis colorés selon la qualité.
+- **Estimation du CTF intégrée** : défocus et résolution jusqu'à laquelle les anneaux de Thon sont retrouvés, à partir du spectre de puissance, sans GPU ni programme externe. Dans le mode Cryo (à la demande) et pour chaque image du Live.
+- **Seuils d'acceptation et de rejet** par session (résolution du fit CTF, glace, anneau de glace, dérive, défocus), part d'images acceptées, filtres.
+- **Carte des acquisitions** : positions de platine colorées selon la qualité.
+- **MotionCor3 et CTFFIND5 en sous-processus**, déclarés par l'administrateur : astigmatisme, mouvement corrigé, somme pondérée par la dose. Résultats remontés dans le Live.
 
 **Acceptation :**
-- Un fichier CZI ou LIF de test s'ouvre via le worker.
-- Le plantage d'un worker est isolé : l'application reste disponible.
-- Quotas GPU par utilisateur.
+- Le défocus d'images synthétiques de CTF connu est retrouvé à 2 % près ; une image sans anneaux ne reçoit pas de défocus.
+- Le plantage ou le blocage d'un programme externe est isolé : l'application reste disponible.
+- Un utilisateur ne peut pas accaparer le calcul (quota par utilisateur).
 
 ### M8 : exploitation et déploiement pilote (2-3 sessions)
 
@@ -676,4 +684,4 @@ Elles bloquent peu, mais il vaut mieux les trancher avant M1.
 3. **Serveur cible :** machine, GPU, montage des données (NFS ou SMB ? le surveillant tourne-t-il sur le serveur de fichiers lui-même ?). Ces réponses fixent la stratégie de scrutation de Live.
 4. **Logiciel d'acquisition :** EPU seulement, ou aussi SerialEM/Tomo5 ? Quels détecteurs (Falcon 4i/EER, K3) ? Des sessions réelles anonymisées (quelques XML, un EER, un gain) seraient précieuses pour les tests.
 5. **Priorité M2 ou M3 :** qu'est-ce qui fait le plus mal au quotidien, la visionneuse ou le suivi en direct ?
-6. **Périmètre : faut-il encore le cœur ImageJ (M5 et M6) ?** Question posée le 11 novembre 2026, une fois M3 et M4 faits. Recommandation : **non**. M5 et M6 pèsent 9 à 13 sessions, la moitié de ce qui reste, pour refaire ce que Fiji fait déjà, avec l'obligation de retrouver ses résultats à 1e-6 près. Ce qui fait mal au quotidien est le cryo et le suivi en direct, et ils sont là. À garder de ces deux jalons : un bouton « Ouvrir dans Fiji » (TIFF calibré ou macro qui ouvre le chemin du NAS), et les lecteurs de formats à la demande (DM4, par exemple). Le temps gagné irait à M7 (MotionCor3 et CTFFIND5 remontés dans le Live : résolution du fit CTF, défocus, dérive), puis à M8 (déploiement et pilote). La feuille de route du §4 n'est pas réécrite tant que ce n'est pas tranché.
+6. **Périmètre : faut-il encore le cœur ImageJ (M5 et M6) ?** **Tranché le 11 novembre 2026 : non** ([ADR 009](adr/009-perimetre-cryo-et-live.md)). La raison : M5 et M6 pèsent 9 à 13 sessions, la moitié de ce qui reste, pour refaire ce que Fiji fait déjà, avec l'obligation de retrouver ses résultats à 1e-6 près. Ce qui fait mal au quotidien est le cryo et le suivi en direct, et ils sont là. À garder de ces deux jalons : un bouton « Ouvrir dans Fiji » (TIFF calibré ou macro qui ouvre le chemin du NAS), et les lecteurs de formats à la demande (DM4, par exemple). Le temps gagné va à M7 (qualité des acquisitions dans le Live), revu en conséquence, puis à M8 (déploiement et pilote).

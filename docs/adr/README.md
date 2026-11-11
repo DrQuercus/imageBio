@@ -12,3 +12,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [006](006-traitements-cote-serveur.md) | Traitements du mode Cryo côté serveur, dans un ordre fixe | Acceptée |
 | [007](007-live.md) | Mode Live : scrutation par dossier, index SQLite, suivi par numéro de séquence | Acceptée |
 | [008](008-pointes-et-galeries.md) | Pointés et galeries : lus par le serveur, jamais retournés d'office | Acceptée |
+| [009](009-perimetre-cryo-et-live.md) | Périmètre recentré sur le cryo et le suivi en direct : pas de cœur ImageJ | Acceptée |

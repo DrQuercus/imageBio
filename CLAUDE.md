@@ -1,10 +1,10 @@
 # imageBio: notes for development sessions
 
-Network-deployed scientific image application (web): ImageJ-style viewer/editor + Cryo mode + Live mode (real-time monitoring of a cryo-EM collection).
+Network-deployed scientific image application (web): a viewer, a Cryo mode and a Live mode (real-time monitoring of a cryo-EM collection). The ImageJ-style editor of the first plan was dropped (ADR 009): no ROI manager or measurements; "Ouvrir dans Fiji" exports a calibrated ImageJ TIFF instead.
 
 - **Read first:** `docs/PLAN.md` (target architecture, milestones M0-M8, acceptance criteria), then `docs/audit/AUDIT.md` (verified bugs in the existing code, with line numbers) and `docs/research/` (formats, EER, EPU/SerialEM metadata, live tools).
 - **Existing code:** `legacy/cryoviewer/` (Python) and `legacy/cryoviewer-live/` (Node/React; `npm ci && npm run build`, `node_modules/` and `dist/` are not versioned). Only M0 fixes go in there; the new code lives in `backend/` and `frontend/`.
-- **Stack:** Python backend (FastAPI), React + TypeScript frontend (WebGL2 canvas), ImageJ/Bio-Formats only in `workers/imagej` (separate process, GPL boundary). The core stays MIT.
+- **Stack:** Python backend (FastAPI), React + TypeScript frontend (WebGL2 canvas). The core stays MIT: GPL code (Bio-Formats, should it come back) only in a separate worker process.
 
 ## Non-negotiable rules (from the audit)
 
