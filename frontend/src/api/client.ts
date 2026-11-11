@@ -8,6 +8,7 @@ import type {
   AlertRules,
   AlertTestResult,
   ClassesResponse,
+  CtfResponse,
   GainCheck,
   IceReference,
   LiveAlerts,
@@ -163,6 +164,10 @@ export const api = {
 
   spectrumProfile: (path: string, req: SpectrumRequest, options?: ReaderOptions, signal?: AbortSignal) =>
     getJson<SpectrumProfile>(`/api/datasets/spectrum/profile?${buildQuery({ path, ...req }, options)}`, signal),
+
+  /** The CTF of a plane; `apix` only for a file that does not know its pixel size. */
+  ctf: (path: string, req: SpectrumRequest & { apix?: number }, options?: ReaderOptions, signal?: AbortSignal) =>
+    getJson<CtfResponse>(`/api/datasets/ctf?${buildQuery({ path, ...req }, options)}`, signal),
 
   gainCheck: (
     path: string,

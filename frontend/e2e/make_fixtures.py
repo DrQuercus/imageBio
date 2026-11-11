@@ -106,6 +106,18 @@ def main(out: Path) -> None:
         "_rlnClassDistribution #2\n_rlnEstimatedResolution #3\n" + rows
     )
 
+    # a micrograph of known defocus: white noise seen through the CTF of 1.8 µm at 300 kV
+    # (Cs 2.7 mm, 7 % amplitude contrast, 1.0 Å per pixel), plus shot noise
+    fy = np.fft.fftfreq(1024)[:, None]
+    fx = np.fft.rfftfreq(1024)[None, :]
+    k2 = fx * fx + fy * fy
+    lam = 0.019687
+    chi = np.pi * lam * k2 * (1.8e4 - 0.5 * 2.7e7 * lam * lam * k2)
+    seen = np.fft.rfft2(rng.normal(0, 1, (1024, 1024))) * -np.sin(chi + np.arcsin(0.07)) * np.exp(-20 * k2)
+    thon = np.fft.irfft2(seen, s=(1024, 1024))
+    noisy = 0.35 * thon / thon.std() + rng.normal(0, 1, (1024, 1024))
+    write_mrc(demo / "thon.mrc", noisy.astype(np.float32), 1.0)
+
     y, x = np.mgrid[0:48, 0:64]
 
     # value = 100 * y + x, 1.5 Å per pixel

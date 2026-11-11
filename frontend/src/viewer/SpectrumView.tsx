@@ -3,8 +3,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "../api/client";
-import type { PlaneIndex, Processing, ReaderOptions, Spectrum, SpectrumProfile } from "../api/types";
-import { formatResolution, resolutionAt, type Ring, spectrumRings, spectrumToRgba, spectrumWindow } from "./cryo";
+import type { CtfResponse, PlaneIndex, Processing, ReaderOptions, Spectrum, SpectrumProfile } from "../api/types";
+import { formatResolution, resolutionAt, type Ring, ringRadius, spectrumRings, spectrumToRgba, spectrumWindow } from "./cryo";
 
 interface Props {
   path: string;
@@ -15,17 +15,20 @@ interface Props {
   options: ReaderOptions;
   /** Å per image pixel, or null when unknown: no ring can be placed then. */
   apix: number | null;
+  /** True when that pixel size was typed by the user: the server has to be told. */
+  apixTyped: boolean;
   onError: (message: string) => void;
 }
 
 const ZOOMS = [1, 2, 4];
 const RING_COLOUR = "rgba(255, 179, 64, 0.75)";
 const ICE_COLOUR = "#19c8ff";
+const CTF_COLOUR = "#4dffa6";
 const FONT = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 const ringLabel = (ring: Ring) => (ring.ice ? `glace ${ring.d} Å` : `${ring.d} Å`);
 
-export function SpectrumView({ path, etag, index, proc, options, apix, onError }: Props) {
+export function SpectrumView({ path, etag, index, proc, options, apix, apixTyped, onError }: Props) {
   const boxRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -35,6 +38,8 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
   const [zoom, setZoom] = useState(1);
   const [box, setBox] = useState(0); // side of the square on screen, in CSS pixels
   const [hover, setHover] = useState<number | null>(null); // radius under the cursor, spectrum pixels
+  const [ctfOn, setCtfOn] = useState(false);
+  const [ctf, setCtf] = useState<CtfResponse | null>(null);
   const report = useRef(onError);
   report.current = onError;
   const optionsKey = JSON.stringify(options);
@@ -62,6 +67,25 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
     // options are compared by value
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, etag, optionsKey, index.t, index.c, index.z, tEnd, gain, gainOrient, gainInvert]);
+
+  // ── the CTF, when asked for: defocus and zeros of the plane on screen ──────
+  useEffect(() => {
+    setCtf(null);
+    if (!ctfOn || !apix) return;
+    const controller = new AbortController();
+    const request = { t: index.t, c: index.c, z: index.z, t_end: tEnd, gain, gain_orient: gainOrient, gain_inv: gainInvert, apix: apixTyped ? apix : undefined };
+    api
+      .ctf(path, request, options, controller.signal)
+      .then(setCtf)
+      .catch((e) => !isAbort(e) && report.current(e instanceof Error ? e.message : String(e)));
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctfOn, path, etag, optionsKey, index.t, index.c, index.z, tEnd, gain, gainOrient, gainInvert, apix, apixTyped]);
+  // the zeros of the fit, as far as its rings were found
+  const zeros = useMemo(
+    () => (ctf?.found && ctf.zeros && ctf.fit_resolution ? ctf.zeros.filter((d) => d >= ctf.fit_resolution! * 0.999) : []),
+    [ctf],
+  );
 
   useEffect(() => {
     const el = boxRef.current;
@@ -132,7 +156,21 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
       }
     }
     ctx.setLineDash([]);
-  }, [box, side, rings, zoom]);
+    if (apix && zeros.length) {
+      // where the fitted transfer function vanishes: thin lines, between the bright rings
+      ctx.strokeStyle = CTF_COLOUR;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = 0.8;
+      for (const d of zeros) {
+        const r = ringRadius(side, apix, d) * scale;
+        if (r > box * 0.72) break;
+        ctx.beginPath();
+        ctx.arc(centre, centre, r, -Math.PI / 2, 0); // one quadrant: the spectrum stays readable
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }, [box, side, rings, zoom, zeros, apix]);
 
   // ── rotational average ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -230,6 +268,8 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
               title={`Agrandir le centre ${z} fois`} onClick={() => setZoom(z)}>×{z}</button>
           ))}
         </div>
+        <button className={ctfOn ? "on" : ""} disabled={!apix} data-testid="ctf-toggle" onClick={() => setCtfOn((v) => !v)}
+          title="Estimer le défocus d'après les anneaux de Thon (ajustement rapide, sans astigmatisme)">CTF</button>
       </div>
       <div ref={boxRef} className="spectrum-box" onPointerMove={onImageMove} onPointerLeave={() => setHover(null)}>
         <canvas ref={imageRef} className="spectrum-image" data-testid="spectrum-image" data-side={side || undefined} />
@@ -239,6 +279,15 @@ export function SpectrumView({ path, etag, index, proc, options, apix, onError }
       <div className="spectrum-readout" data-testid="spectrum-readout">{readout}</div>
       <canvas ref={profileRef} className="spectrum-profile" data-testid="spectrum-profile"
         onPointerMove={onProfileMove} onPointerLeave={() => setHover(null)} />
+      {ctfOn && (
+        <div className="spectrum-note" data-testid="ctf-result" data-zeros={zeros.length}>
+          {!ctf
+            ? "Estimation du CTF…"
+            : ctf.found
+              ? `Défocus ${ctf.defocus_um?.toFixed(2)} µm · anneaux retrouvés jusqu'à ${ctf.fit_resolution?.toFixed(1)} Å · ${ctf.kv} kV, Cs ${ctf.cs_mm} mm (sans astigmatisme)`
+              : "Pas d'anneaux de Thon reconnaissables dans ce spectre."}
+        </div>
+      )}
       <div className="spectrum-note" data-testid="spectrum-rings">
         {apix
           ? rings.length

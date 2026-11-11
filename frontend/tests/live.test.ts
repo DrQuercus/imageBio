@@ -195,6 +195,24 @@ describe("what was measured on an image", () => {
     expect(metricsLines(item(1, { metrics: { mean: 20, drift: 3, drift_unit: "px" } }), null)[1]).toBe("Dérive entre le début et la fin : 3.0 px");
   });
 
+  it("tells the defocus measured next to the one asked for, and sorts on the fit", () => {
+    const good = item(1, { meta: { epu: { applied_defocus: -1.5 } }, metrics: { mean: 20, ctf: { defocus: 1.62, fit: 3.84, score: 12 } } });
+    expect(metricsLines(good, null)).toEqual([
+      "Coups moyens : 20.00",
+      "Défocus mesuré : 1.62 µm (visé 1.5)",
+      "Anneaux de Thon retrouvés jusqu'à 3.8 Å",
+    ]);
+    const blind = item(2, { metrics: { mean: 20, ctf: { defocus: 2.4, fit: 7.5, score: 9 } } });
+    expect(metricsLines(blind, null)[1]).toBe("Défocus mesuré : 2.40 µm");
+    const none = item(3, { metrics: { mean: 20 } });
+    expect(sortValue(good, "fit", null)).toBe(3.84);
+    expect(sortValue(good, "focus", null)).toBe(1.62);
+    expect(sortValue(none, "fit", null)).toBeNull();
+    // the best fits first; the image without rings last
+    expect(arrangeItems([none, blind, good], "fit", false, null).map((i) => i.id)).toEqual([1, 2, 3]);
+    expect(arrangeItems([none, blind, good], "focus", true, null).map((i) => i.id)).toEqual([2, 1, 3]);
+  });
+
   it("calls an image an empty hole only against the counts of an empty hole", () => {
     const bright = measured(1, 49); // within 5 % of the reference
     expect(imageFlags(bright, 50, false)).toEqual([]); // the reference is only the brightest of the session

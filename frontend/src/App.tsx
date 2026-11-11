@@ -420,7 +420,7 @@ export function App({ onLive }: { onLive: () => void }) {
           )}
         </div>
         {response && cryoOn && cryo.spectrum && (
-          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={shownOptions} apix={apix} onError={onError} />
+          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={shownOptions} apix={apix} apixTyped={fileApix === null} onError={onError} />
         )}
       </main>
 

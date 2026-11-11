@@ -170,19 +170,27 @@ export function metricsLines(item: LiveItem, reference: number | null, mfp: numb
   if (ice !== null) lines.push(`Glace relative : ${ice.toFixed(2)} (ln I₀/I)`);
   if (ice !== null && mfp) lines.push(`Épaisseur de glace : ${Math.round(ice * mfp)} nm`);
   if (typeof m.ice_ring === "number") lines.push(`Anneau de glace : ${m.ice_ring.toFixed(2)}`);
+  if (m.ctf) {
+    const target = item.meta.epu?.applied_defocus ?? item.meta.mdoc?.defocus;
+    const asked = typeof target === "number" ? ` (visé ${Math.abs(target).toFixed(1)})` : "";
+    lines.push(`Défocus mesuré : ${m.ctf.defocus.toFixed(2)} µm${asked}`);
+    lines.push(`Anneaux de Thon retrouvés jusqu'à ${m.ctf.fit.toFixed(1)} Å`);
+  }
   if (typeof m.drift === "number") lines.push(`Dérive entre le début et la fin : ${m.drift.toFixed(1)} ${m.drift_unit === "A" ? "Å" : "px"}`);
   return lines;
 }
 
 // ── order and choice of the tiles ────────────────────────────────────────────
 
-export type SortKey = "time" | "ice" | "ring" | "defocus" | "dose" | "drift";
+export type SortKey = "time" | "ice" | "ring" | "fit" | "focus" | "defocus" | "dose" | "drift";
 
 export const SORT_LABELS: Record<SortKey, string> = {
   time: "Heure",
   ice: "Glace",
   ring: "Anneau de glace",
-  defocus: "Défocus",
+  fit: "Résolution du CTF",
+  focus: "Défocus mesuré",
+  defocus: "Défocus visé",
   dose: "Dose",
   drift: "Dérive",
 };
@@ -196,6 +204,10 @@ export function sortValue(item: LiveItem, key: SortKey, reference: number | null
       return relativeIce(item, reference);
     case "ring":
       return item.metrics?.ice_ring ?? null;
+    case "fit":
+      return item.metrics?.ctf?.fit ?? null;
+    case "focus":
+      return item.metrics?.ctf?.defocus ?? null;
     case "defocus": {
       const d = item.meta.epu?.applied_defocus ?? item.meta.mdoc?.defocus;
       return typeof d === "number" ? Math.abs(d) : null;

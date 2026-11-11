@@ -206,6 +206,24 @@ export interface LiveItem {
   metrics: ImageMetrics | null;
 }
 
+/** A quick estimate of the CTF of a plane (GET /api/datasets/ctf). Astigmatism is not measured. */
+export interface CtfResponse {
+  /** False when the spectrum shows no Thon rings: the other fields of the fit are then absent. */
+  found: boolean;
+  kv: number;
+  cs_mm: number;
+  amplitude: number;
+  /** µm, positive: underfocus. */
+  defocus_um?: number;
+  /** Resolution (Å) up to which the rings agree with that defocus. */
+  fit_resolution?: number;
+  correlation?: number;
+  score?: number;
+  apix?: number;
+  /** Resolutions (Å) of the zeros of the fit, coarsest first. */
+  zeros?: number[];
+}
+
 /** One class of a 2D classification, from RELION's model file. */
 export interface ClassInfo {
   /** Plane of the class averages, 0-based. */
@@ -254,6 +272,9 @@ export interface ImageMetrics {
    *  ("A": ångströms, "px": pixels of the movie when its pixel size is unknown). */
   drift?: number;
   drift_unit?: "A" | "px";
+  /** Quick CTF estimate, when the image shows Thon rings: defocus (µm, positive underfocus),
+   *  resolution (Å) up to which the rings follow, and how far the match stands above noise. */
+  ctf?: { defocus: number; fit: number; score: number };
 }
 
 export interface LivePage {

@@ -410,3 +410,23 @@ test("reduced views can be made in Fourier space", async ({ page }) => {
   expect(refused).toEqual([]);
 });
 
+test("the defocus is read from the Thon rings, and nothing is claimed without rings", async ({ page }) => {
+  await openFile(page, "demo/thon.mrc"); // made with a defocus of 1.8 µm
+  await page.getByTestId("spectrum-toggle").click();
+  await expect(page.getByTestId("spectrum-image")).toHaveAttribute("data-side", "512");
+  await expect(page.getByTestId("ctf-result")).toHaveCount(0);
+  await page.getByTestId("ctf-toggle").click();
+  await expect(page.getByTestId("ctf-result")).toContainText(/Défocus 1\.(7[7-9]|8[0-3]) µm/);
+  await expect(page.getByTestId("ctf-result")).toContainText(/anneaux retrouvés jusqu'à \d\.\d Å · 300 kV, Cs 2\.7 mm/);
+  expect(Number(await page.getByTestId("ctf-result").getAttribute("data-zeros"))).toBeGreaterThan(5);
+
+  // an image without rings: said so
+  await openFile(page, "demo/gradient.mrc", "&ps=1");
+  await page.getByTestId("ctf-toggle").click();
+  await expect(page.getByTestId("ctf-result")).toHaveText("Pas d'anneaux de Thon reconnaissables dans ce spectre.");
+  // no pixel size, no CTF
+  await openFile(page, "demo/noapix.tif", "&ps=1");
+  await expect(page.getByTestId("ctf-toggle")).toBeDisabled();
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+
