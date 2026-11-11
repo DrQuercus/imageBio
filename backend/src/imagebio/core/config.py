@@ -179,6 +179,9 @@ class Settings:
     live_scan: bool = True
     #: Measure each image of a watched session (mean counts, ice ring): reads every image once.
     live_metrics: bool = True
+    #: Also measure how far each movie drifted between its first and last frames: reads eight
+    #: frames of every movie that arrives. Off unless asked for.
+    live_drift: bool = False
     #: Mean free path of electrons in ice for this microscope (aperture-limited scattering), nm:
     #: ice thickness is then shown in nm. None: relative values only, unless a user gives one.
     live_mfp_nm: float | None = None
@@ -270,7 +273,7 @@ class Settings:
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
         live = section(
-            "live", {"state_dir", "interval", "min_stable", "scan", "metrics", "mean_free_path_nm"}
+            "live", {"state_dir", "interval", "min_stable", "scan", "metrics", "drift", "mean_free_path_nm"}
         )
         alerts = section("alerts", {"smtp", "channels"})
         raw_channels = alerts.get("channels", [])
@@ -341,6 +344,7 @@ class Settings:
             live_min_stable_s=float(live.get("min_stable", defaults.live_min_stable_s)),
             live_scan=bool(live.get("scan", True)),
             live_metrics=bool(live.get("metrics", True)),
+            live_drift=bool(live.get("drift", False)),
             live_mfp_nm=float(live["mean_free_path_nm"]) if "mean_free_path_nm" in live else None,
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),

@@ -41,7 +41,7 @@ from imagebio.live.alerts import (
     step,
 )
 from imagebio.live.index import Index
-from imagebio.live.metrics import measure
+from imagebio.live.metrics import measure, measure_drift
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -234,7 +234,14 @@ class LiveService:
 
     def _scan_until(self, stop: threading.Event, root_id: int, path: Path) -> None:
         try:
-            scanner = Scanner(self.index, root_id, path, self._registry, self._scan_settings)
+            scanner = Scanner(
+                self.index,
+                root_id,
+                path,
+                self._registry,
+                self._scan_settings,
+                remeasure_with_movie=self._settings.live_drift,
+            )
         except Exception:
             log.exception("cannot start the live scanner of root %s", root_id)
             return
@@ -262,7 +269,12 @@ class LiveService:
             scanner = self._manual.get(root_id)
             if scanner is None:
                 scanner = self._manual[root_id] = Scanner(
-                    self.index, root_id, path, self._registry, self._scan_settings
+                    self.index,
+                    root_id,
+                    path,
+                    self._registry,
+                    self._scan_settings,
+                    remeasure_with_movie=self._settings.live_drift,
                 )
             when = self.clock() if now is None else now
             reports[root_id] = scanner.cycle(when)
@@ -272,17 +284,46 @@ class LiveService:
                 self._measure(scanner, root_id, path)
         return reports
 
+    def _drift(self, root: Path, row: sqlite3.Row) -> dict[str, Any]:
+        """The drift of the movie of an exposure that arrived (``live/metrics.py``); nothing
+        when it has no complete movie, or when the movie cannot be read."""
+        name = row["primary_name"]
+        if row["primary_role"] != "movie":
+            movie = (
+                self.index.connection()
+                .execute(
+                    "SELECT name FROM files WHERE exposure_id = ? AND role = 'movie' AND state = 'complete' "
+                    "ORDER BY name LIMIT 1",
+                    (row["id"],),
+                )
+                .fetchone()
+            )
+            if movie is None:
+                return {}
+            name = movie["name"]
+        try:
+            return measure_drift(self._planes, root.joinpath(*[p for p in row["rel"].split("/") if p], name))
+        except (ImageBioError, OSError, ValueError):
+            return {}
+
     # ── measurements on the images ───────────────────────────────────────────
     def _unmeasured(self, root_id: int, skip: frozenset[int]) -> list[sqlite3.Row]:
         """Exposures to measure, newest first: those that arrived while the directory was
         watched, then the most recent of those that were found in it."""
         db = self.index.connection()
         marks = ",".join("?" * len(_ACQUIRED))
+        # with the drift, an exposure waits for its movie to be complete: it is measured once
+        waiting = (
+            "AND NOT EXISTS (SELECT 1 FROM files f WHERE f.exposure_id = e.id AND f.role = 'movie' "
+            "AND f.state = 'pending') "
+            if self._settings.live_drift
+            else ""
+        )
         select = (
-            "SELECT e.id, e.primary_name, e.primary_role, e.size, e.mtime_ns, e.meta, d.rel "  # noqa: S608
+            "SELECT e.id, e.primary_name, e.primary_role, e.size, e.mtime_ns, e.meta, e.arrived, d.rel "  # noqa: S608
             "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
             f"WHERE e.root_id = ? AND e.metrics IS NULL AND e.state = 'complete' AND e.category IN ({marks}) "
-            "AND e.primary_role IN ('image', 'movie') AND e.time IS NOT NULL AND "
+            f"AND e.primary_role IN ('image', 'movie') AND e.time IS NOT NULL {waiting}AND "
         )
         order = " ORDER BY e.time DESC LIMIT ?"
         limit = _MEASURE_BATCH + len(skip)
@@ -323,6 +364,8 @@ class LiveService:
                     )
                 except (ImageBioError, OSError, ValueError):
                     metrics = {}
+                if metrics and self._settings.live_drift and row["arrived"]:
+                    metrics.update(self._drift(root, row))
                 scanner.add_metrics(row["id"], row["primary_name"], row["size"], row["mtime_ns"], metrics)
                 done += 1
                 if time.perf_counter() - started >= self.measure_budget_s or (

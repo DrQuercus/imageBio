@@ -990,6 +990,50 @@ def test_the_server_can_know_the_mean_free_path_of_its_microscope(tmp_path: Path
         world.client.__exit__(None, None, None)
 
 
+def test_the_drift_of_movies_is_measured_when_asked_for(tmp_path: Path) -> None:
+    """Off by default (it reads frames of every movie); on, it is measured once, when the
+    movie of an exposure that arrived is complete, on that movie and not on the image."""
+    rng = np.random.default_rng(31)
+    spectrum = np.fft.rfft2(rng.normal(0, 1, (256, 256)))
+    fy, fx = np.fft.fftfreq(256)[:, None], np.fft.rfftfreq(256)[None, :]
+    field = np.fft.irfft2(spectrum * np.exp(-(fy**2 + fx**2) / (2 * 0.03**2)), s=(256, 256))
+    field /= field.std()
+
+    def moved(k: float) -> np.ndarray:
+        return np.fft.irfft2(np.fft.rfft2(field) * np.exp(-2j * np.pi * fx * k), s=(256, 256))
+
+    movie = np.asarray([rng.poisson(20 * (1 + 0.3 * moved(0.5 * k))) for k in range(8)], np.uint16)
+    for drift_on in (False, True):
+        tree = build_tree(tmp_path / f"data{drift_on}")
+        session = tree.base / "public/shared"
+        session.mkdir()
+        world = World(tree, tmp_path / f"state{drift_on}", live_drift=drift_on)
+        try:
+            watch = world.watch("public/shared", ALICE)
+            world.run([], 5)
+            (session / "a.mrc").write_bytes(mrc_bytes(movie.sum(axis=0).astype(np.float32), 1.5))
+            for path in (session / "a.mrc", session):
+                os.utime(path, (world.now, world.now))
+            world.run([], 30)  # the image is complete; its movie has not arrived yet
+            before = world.items(watch, ALICE)["items"][0]
+            assert before["state"] == "complete" and before["metrics"] is not None
+            assert "drift" not in before["metrics"]
+            (session / "a_Fractions.mrc").write_bytes(mrc_bytes(movie, 1.5, stack=True))
+            for path in (session / "a_Fractions.mrc", session):
+                os.utime(path, (world.now, world.now))
+            world.run([], 40)
+            item = world.items(watch, ALICE)["items"][0]
+            assert item["members"] == {"image": "complete", "movie": "complete"}
+            if drift_on:  # frames 0-3 against 4-7: 4 frames apart, 2 pixels of 1.5 Å
+                assert item["metrics"]["drift_unit"] == "A"
+                assert item["metrics"]["drift"] == pytest.approx(3.0, abs=0.5)
+                assert item["metrics"]["mean"] == before["metrics"]["mean"]  # the image, as before
+            else:
+                assert "drift" not in item["metrics"]
+        finally:
+            world.client.__exit__(None, None, None)
+
+
 def test_measuring_can_be_turned_off(tmp_path: Path) -> None:
     tree = build_tree(tmp_path / "data")
     (tree.base / "public/shared").mkdir()

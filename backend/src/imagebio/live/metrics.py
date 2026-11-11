@@ -23,9 +23,18 @@ import numpy as np
 import numpy.typing as npt
 
 from imagebio.proc.fourier import power_spectrum, radial_profile
-from imagebio.service.planes import PlaneService, Processing
+from imagebio.service.planes import MAX_BIN, PlaneService, Processing
 
-__all__ = ["ICE_BAND", "ICE_SIDES", "ice_ring_ratio", "measure", "measure_plane", "robust_mean_std"]
+__all__ = [
+    "ICE_BAND",
+    "ICE_SIDES",
+    "ice_ring_ratio",
+    "measure",
+    "measure_drift",
+    "measure_plane",
+    "robust_mean_std",
+    "shift_between",
+]
 
 #: Resolutions (Å) between which crystalline ice diffracts.
 ICE_BAND: Final = (3.40, 3.95)
@@ -42,6 +51,11 @@ _FIELD: Final = 2048  # the spectrum is taken on a central field of at most this
 _MIN_FIELD: Final = 512
 _TILE: Final = 512
 _MOVIE_FRAMES: Final = 4  # frames of a movie that are averaged, as for its thumbnail
+_DRIFT_FRAMES: Final = 4  # frames averaged at each end of a movie to see how far it moved
+_DRIFT_SIDE: Final = 1024  # the two averages are binned to about this side before being compared
+_DRIFT_SIGMA: Final = 0.08  # low-pass of the correlation, cycles per binned pixel
+_DRIFT_MIN_RATIO: Final = 1.6  # the correlation peak over the best value away from it
+_DRIFT_PEAK_RADIUS: Final = 10  # pixels around the peak that belong to it
 
 
 def robust_mean_std(plane: npt.NDArray[Any]) -> tuple[float, float] | None:
@@ -126,3 +140,88 @@ def measure(planes: PlaneService, path: Path, role: str, apix: float | None = No
         out["estimated"] = True
         out["frames"] = info.size_t
     return out
+
+
+def shift_between(first: npt.NDArray[Any], last: npt.NDArray[Any]) -> tuple[float, float] | None:
+    """How far the content of ``last`` is displaced from that of ``first``, in pixels
+    (``dy``, ``dx``), from the peak of their cross-correlation; None when no peak stands out
+    (nothing in the images but noise).
+
+    What the two images share without it having moved, the fixed pattern of the detector
+    (pixels a little more or less sensitive than their neighbours), correlates at zero shift
+    exactly and would pull the answer there: the correlation at zero shift is replaced by the
+    mean of its neighbours before the peak is looked for, as motion-correction programs do.
+    The correlation is then smoothed (the specimen is coarse, the noise is not) and the peak
+    is refined to a fraction of a pixel with a parabola through its neighbours.
+    """
+    if first.shape != last.shape or first.ndim != 2 or min(first.shape) < 128:
+        return None  # too small a field to tell a displacement from chance
+    h, w = first.shape
+    window = np.hanning(h)[:, None] * np.hanning(w)[None, :]
+    spectra = []
+    for image in (first, last):
+        data = np.asarray(image, dtype=np.float64)
+        finite = np.isfinite(data)
+        if not finite.any():
+            return None
+        fill = float(data[finite].mean())
+        data = np.where(finite, data, fill) - fill
+        spectra.append(np.fft.rfft2(data * window))
+    correlation = np.fft.irfft2(np.conj(spectra[0]) * spectra[1], s=(h, w))
+    around = [correlation[dy, dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
+    correlation[0, 0] = float(np.mean(around))
+    fy = np.fft.fftfreq(h)[:, None]
+    fx = np.fft.rfftfreq(w)[None, :]
+    smooth = np.exp(-(fy * fy + fx * fx) / (2 * _DRIFT_SIGMA**2))
+    correlation = np.fft.irfft2(np.fft.rfft2(correlation) * smooth, s=(h, w))
+    # the peak is looked for among the shifts a specimen can have drifted by (an eighth of the
+    # field), and must stand clear of everything else there: on noise the best and the second
+    # best are within a quarter of each other, on a real displacement the peak is about twice
+    # the rest
+    centred = np.fft.fftshift(correlation)
+    cy, cx = h // 2, w // 2
+    ry, rx = max(2, h // 8), max(2, w // 8)
+    region = centred[cy - ry : cy + ry + 1, cx - rx : cx + rx + 1]
+    peak_y, peak_x = (int(v) for v in np.unravel_index(int(np.argmax(region)), region.shape))
+    top = float(region[peak_y, peak_x])
+    yy, xx = np.ogrid[: region.shape[0], : region.shape[1]]
+    elsewhere = region[(yy - peak_y) ** 2 + (xx - peak_x) ** 2 > _DRIFT_PEAK_RADIUS**2]
+    floor = float(np.median(centred))
+    if elsewhere.size == 0 or top - floor < _DRIFT_MIN_RATIO * max(float(elsewhere.max()) - floor, 0.0):
+        return None
+    if top <= floor:
+        return None
+
+    def refine(below: float, at: float, above: float) -> float:
+        curve = below - 2 * at + above
+        return 0.0 if curve >= 0 else max(-0.5, min(0.5, 0.5 * (below - above) / curve))
+
+    y, x = cy - ry + peak_y, cx - rx + peak_x  # in the centred correlation: never on its border
+    dy = peak_y - ry + refine(float(centred[y - 1, x]), top, float(centred[y + 1, x]))
+    dx = peak_x - rx + refine(float(centred[y, x - 1]), top, float(centred[y, x + 1]))
+    return dy, dx
+
+
+def measure_drift(planes: PlaneService, path: Path) -> dict[str, Any]:
+    """How far the specimen moved between the first and the last frames of the movie ``path``:
+    ``drift`` and ``drift_unit`` ("A", or "px" of the movie when its pixel size is unknown).
+    Empty when the movie has too few frames or shows nothing to follow. The mean of a few frames
+    at each end is read, binned, and compared (:func:`shift_between`); this is a coarse look at
+    whole-frame motion, not a motion correction."""
+    info, _ = planes.info(path)
+    if info.rgb or info.size_t < 4:
+        return {}
+    frames = min(_DRIFT_FRAMES, info.size_t // 2)
+    factor = min(MAX_BIN, max(1, math.ceil(max(info.size_x, info.size_y) / _DRIFT_SIDE)))
+    z = info.size_z // 2
+    first = planes.plane(path, 0, 0, z, bin=factor, proc=Processing(t_end=frames - 1)).array
+    start = info.size_t - frames
+    last = planes.plane(path, start, 0, z, bin=factor, proc=Processing(t_end=info.size_t - 1)).array
+    shift = shift_between(first, last)
+    if shift is None:
+        return {}
+    pixels = math.hypot(shift[0], shift[1]) * factor
+    apix = info.calibration.x.to_angstrom()
+    if apix is None:
+        return {"drift": round(pixels, 2), "drift_unit": "px"}
+    return {"drift": round(pixels * apix, 2), "drift_unit": "A"}

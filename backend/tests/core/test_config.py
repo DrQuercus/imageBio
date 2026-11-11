@@ -84,6 +84,7 @@ interval = 2
 min_stable = 6
 scan = false
 metrics = false
+drift = true
 mean_free_path_nm = 322
 """)
     s = Settings.load(cfg)
@@ -95,6 +96,7 @@ mean_free_path_nm = 322
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
     assert Settings().live_state_dir == tmp_path / "xdg" / "imagebio"
     assert s.live_mfp_nm == 322.0 and Settings().live_mfp_nm is None
+    assert s.live_drift is True and Settings().live_drift is False  # reading frames is asked for
     for bad in (
         "[live]\ninterval = 0.1",
         "[live]\nmin_stable = 0",

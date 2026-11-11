@@ -8,7 +8,16 @@ import numpy as np
 import pytest
 
 from imagebio.core.config import Settings
-from imagebio.live.metrics import ICE_BAND, ICE_SIDES, ice_ring_ratio, measure, measure_plane, robust_mean_std
+from imagebio.live.metrics import (
+    ICE_BAND,
+    ICE_SIDES,
+    ice_ring_ratio,
+    measure,
+    measure_drift,
+    measure_plane,
+    robust_mean_std,
+    shift_between,
+)
 from imagebio.live.simulator import mrc_bytes
 from imagebio.service.planes import PlaneService
 
@@ -202,3 +211,92 @@ def test_a_movie_is_measured_on_its_first_frames_and_says_so(tmp_path: Path, pla
     assert (
         as_image["mean"] == pytest.approx(trimmed(movie[0]).mean(), rel=1e-5) and "estimated" not in as_image
     )
+
+
+# ── drift between the first and the last frames of a movie ────────────────────
+
+
+def specimen(shape: tuple[int, int], rng: np.random.Generator) -> np.ndarray:
+    """A smooth random field of unit spread: what ice and carbon look like at low resolution."""
+    spectrum = np.fft.rfft2(rng.normal(0, 1, shape))
+    fy = np.fft.fftfreq(shape[0])[:, None]
+    fx = np.fft.rfftfreq(shape[1])[None, :]
+    field = np.fft.irfft2(spectrum * np.exp(-(fy**2 + fx**2) / (2 * 0.03**2)), s=shape)
+    return field / field.std()
+
+
+def displaced(image: np.ndarray, dy: float, dx: float) -> np.ndarray:
+    """``image`` moved by (dy, dx) pixels, fractions included (the image wraps around)."""
+    fy = np.fft.fftfreq(image.shape[0])[:, None]
+    fx = np.fft.rfftfreq(image.shape[1])[None, :]
+    return np.fft.irfft2(np.fft.rfft2(image) * np.exp(-2j * np.pi * (fy * dy + fx * dx)), s=image.shape)
+
+
+@pytest.mark.parametrize("shift", [(0.0, 0.0), (2.5, -1.25), (0.4, 0.3), (-6.0, 9.5), (-0.2, 3.0)])
+def test_a_displacement_is_found_to_a_fraction_of_a_pixel(shift: tuple[float, float]) -> None:
+    rng = np.random.default_rng(21)
+    field = specimen((512, 512), rng)
+    # counts of a few electrons, a contrast of a fifth, and pixels that differ by 5 % in sensitivity:
+    # that pattern is the same in both images and has not moved
+    pattern = 1 + 0.05 * rng.normal(0, 1, field.shape)
+    first = rng.poisson(20 * (1 + 0.2 * field) * pattern).astype(np.float32)
+    last = rng.poisson(20 * (1 + 0.2 * displaced(field, *shift)) * pattern).astype(np.float32)
+    found = shift_between(first, last)
+    assert found is not None
+    assert found[0] == pytest.approx(shift[0], abs=0.2) and found[1] == pytest.approx(shift[1], abs=0.2)
+    back = shift_between(last, first)  # the other way round: the opposite displacement
+    assert back is not None and back[0] == pytest.approx(-shift[0], abs=0.2)
+
+
+def test_nothing_to_follow_gives_no_drift_rather_than_a_number() -> None:
+    rng = np.random.default_rng(22)
+    pattern = 1 + 0.05 * rng.normal(0, 1, (512, 512))
+    for _ in range(10):  # noise, with the pattern of the detector under it: not "no drift", nothing
+        assert shift_between(rng.poisson(5 * pattern), rng.poisson(5 * pattern)) is None
+    field = specimen((512, 512), rng)
+    image = rng.poisson(20 * (1 + 0.2 * field)).astype(np.float32)
+    assert shift_between(image, image[:, :500]) is None  # not the same size
+    assert shift_between(image[:100, :100], image[:100, :100]) is None  # too small a field
+    assert shift_between(np.full((256, 256), np.nan), np.full((256, 256), np.nan)) is None
+    holes = image.copy()
+    holes[5, 7], holes[100, 200] = np.nan, np.inf
+    found = shift_between(image, holes)  # holes in the data do not spread
+    assert found is not None and abs(found[0]) < 0.2 and abs(found[1]) < 0.2
+
+
+def drifting_movie(frames: int, per_frame: tuple[float, float], rng: np.random.Generator) -> np.ndarray:
+    field = specimen((512, 512), rng)
+    pattern = 1 + 0.05 * rng.normal(0, 1, field.shape)
+    movie = [
+        rng.poisson(5 * (1 + 0.2 * displaced(field, k * per_frame[0], k * per_frame[1])) * pattern)
+        for k in range(frames)
+    ]
+    return np.asarray(movie, np.uint16)
+
+
+def test_the_drift_of_a_movie_between_its_first_and_last_frames(tmp_path: Path, planes: PlaneService) -> None:
+    rng = np.random.default_rng(23)
+    movie = drifting_movie(12, (0.5, -0.25), rng)
+    (tmp_path / "m.mrc").write_bytes(mrc_bytes(movie, 1.2, stack=True))
+    measured = measure_drift(planes, tmp_path / "m.mrc")
+    # the means of frames 0-3 and 8-11 are 8 frames apart: 4 and -2 pixels, 4.47 pixels of 1.2 Å
+    assert measured.keys() == {"drift", "drift_unit"} and measured["drift_unit"] == "A"
+    assert measured["drift"] == pytest.approx(8 * np.hypot(0.5, 0.25) * 1.2, abs=0.35)
+
+    import tifffile
+
+    tifffile.imwrite(tmp_path / "m.tif", movie, photometric="minisblack")  # no pixel size in it
+    in_pixels = measure_drift(planes, tmp_path / "m.tif")
+    assert in_pixels["drift_unit"] == "px" and in_pixels["drift"] == pytest.approx(
+        8 * np.hypot(0.5, 0.25), abs=0.3
+    )
+    still = drifting_movie(8, (0.0, 0.0), rng)
+    (tmp_path / "still.mrc").write_bytes(mrc_bytes(still, 1.2, stack=True))
+    assert measure_drift(planes, tmp_path / "still.mrc")["drift"] < 0.3
+    (tmp_path / "short.mrc").write_bytes(mrc_bytes(movie[:3], 1.2, stack=True))
+    assert measure_drift(planes, tmp_path / "short.mrc") == {}  # three frames: no two ends
+    (tmp_path / "image.mrc").write_bytes(mrc_bytes(movie[0], 1.2))
+    assert measure_drift(planes, tmp_path / "image.mrc") == {}
+    noise = rng.poisson(2, (8, 256, 256)).astype(np.uint16)
+    (tmp_path / "noise.mrc").write_bytes(mrc_bytes(noise, 1.2, stack=True))
+    assert measure_drift(planes, tmp_path / "noise.mrc") == {}  # nothing to follow

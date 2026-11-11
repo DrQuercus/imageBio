@@ -192,7 +192,12 @@ class Scanner:
         registry: Registry,
         settings: ScanSettings | None = None,
         fs: Fs | None = None,
+        *,
+        remeasure_with_movie: bool = False,
     ) -> None:
+        #: What was measured on an exposure is forgotten when its movie completes afterwards:
+        #: for a service that also measures the movie (its drift).
+        self._remeasure_with_movie = remeasure_with_movie
         self._index = index
         self._root_id = root_id
         self._registry = registry
@@ -944,7 +949,8 @@ class Scanner:
                 (exposure_id,),
             ).fetchall()
             old = db.execute(
-                "SELECT state, primary_name, time, time_source FROM exposures WHERE id = ?", (exposure_id,)
+                "SELECT state, primary_name, time, time_source, members FROM exposures WHERE id = ?",
+                (exposure_id,),
             ).fetchone()
             shown = [m for m in members if m["role"] in PRIMARY_ROLES]
             states: dict[str, str] = {}
@@ -966,20 +972,26 @@ class Scanner:
                 continue
             primary = min(shown, key=lambda m: (primary_rank(m["role"]), m["name"]))
             complete = primary["state"] == "complete"
+            movie_arrived = (
+                self._remeasure_with_movie
+                and states.get("movie") == "complete"
+                and json.loads(old["members"]).get("movie") != "complete"
+            )
             when, source = old["time"], old["time_source"]
             if source in (None, "mtime") and primary["mtime_ns"] is not None:
                 when, source = primary["mtime_ns"] / _NS, "mtime"
             db.execute(
                 # what was measured on another file, or on this one before it changed, is forgotten
-                # (the right-hand sides see the row as it was)
-                "UPDATE exposures SET metrics = CASE WHEN primary_name IS ? AND size IS ? AND mtime_ns IS ? "
-                "THEN metrics END, mean_counts = CASE WHEN primary_name IS ? AND size IS ? AND mtime_ns IS ? "
-                "THEN mean_counts END, "
+                # (the right-hand sides see the row as it was); so is, when the movie is measured
+                # too, what was measured before the movie was complete
+                "UPDATE exposures SET metrics = CASE WHEN ? = 0 AND primary_name IS ? AND size IS ? "
+                "AND mtime_ns IS ? THEN metrics END, mean_counts = CASE WHEN ? = 0 AND primary_name IS ? "
+                "AND size IS ? AND mtime_ns IS ? THEN mean_counts END, "
                 "state = ?, primary_name = ?, primary_role = ?, size = ?, mtime_ns = ?, "
                 "completed_at = ?, verified = ?, note = ?, members = ?, time = ?, time_source = ?, seq = ? "
                 "WHERE id = ?",
                 (
-                    *(primary["name"], primary["size"], primary["mtime_ns"]) * 2,
+                    *(int(movie_arrived), primary["name"], primary["size"], primary["mtime_ns"]) * 2,
                     "complete" if complete else "incoming",
                     primary["name"],
                     primary["role"],
