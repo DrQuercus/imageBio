@@ -11,11 +11,15 @@ check on every request that the user may still read the watched directory (the A
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
 import math
+import os
 import shutil
 import sqlite3
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -24,7 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Final
 
-from imagebio.core.config import Settings
+from imagebio.core.config import ConfigError, Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
 from imagebio.cryo.epu import read_epu_xml
@@ -44,10 +48,10 @@ from imagebio.live.alerts import (
 from imagebio.live.index import Index, hold_state_dir
 from imagebio.live.metrics import Microscope, measure, measure_drift
 from imagebio.live.quality import QualityRules
-from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
+from imagebio.live.scanner import CycleReport, FileVersion, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
-from imagebio.tools.pipeline import Job, process
+from imagebio.tools.pipeline import Job, ProgramUnavailableError, process
 from imagebio.tools.runner import clean_environment
 
 __all__ = ["CATEGORIES", "MAX_ACTIVE_WATCHES", "MAX_STOPPED_WATCHES", "LiveService", "WatchInfo"]
@@ -81,6 +85,11 @@ _REFERENCE_MIN: Final = 20  # measured images under which a session has no refer
 MOVIE_WAIT_S: Final = 120.0
 _PROCESS_IDLE_S: Final = 2.0  # a worker with nothing to run looks again after this
 _RUN_PREFIX: Final = "run-"  # directories of the runs of the external programs (tools/pipeline.py)
+_UNAVAILABLE_PAUSE_S: Final = 60.0  # after a program could not be started at all
+
+
+class _NotAsIndexedError(Exception):
+    """A file of an exposure is no longer the regular file the scanner indexed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,16 +173,24 @@ class LiveService:
         #: The external programs the administrator declared (tools/), None: none.
         self._processing = settings.processing
         self._aligns_movies = settings.processing is not None and settings.processing.motion is not None
+        # Runs get their directories in a place that is this server's alone, whatever else the
+        # administrator keeps next to it: at start, what is left there is removed.
+        owner = hashlib.sha256(os.path.realpath(settings.live_state_dir).encode()).hexdigest()[:12]
         self._work = (
-            settings.processing.work_dir if settings.processing is not None else None
-        ) or settings.live_state_dir / "work"
+            (settings.processing.work_dir if settings.processing is not None else None)
+            or settings.live_state_dir / "work"
+        ) / f"imagebio-runs-{owner}"
         secret = settings.smtp.password_env if settings.smtp is not None else None
         self._program_env = clean_environment({secret} if secret else ())
         #: Results waiting for the scanner of their directory, which alone numbers changes.
-        self._results: dict[int, list[tuple[int, str, int | None, int | None, dict[str, Any]]]] = {}
+        self._results: dict[
+            int, list[tuple[int, str, int | None, int | None, dict[str, Any], FileVersion | None]]
+        ] = {}
         #: (directory, exposure) being run, or run and not yet recorded: not to be picked again.
         self._running: set[tuple[int, int]] = set()
         self._handed: dict[int, set[int]] = {}  # given to a scanner whose cycle has not succeeded yet
+        self._active: set[tuple[int, int]] = set()  # those of _running a worker is busy with now
+        self._paused_until = 0.0  # time.monotonic() before which no program is started
         self._turn_user = ""  # whose exposure ran last: the next turn is somebody else's
         self._turn_root: dict[str, int] = {}  # and, for each user, in which of their directories
         self._ran = {"ok": 0, "failed": 0}
@@ -198,6 +215,11 @@ class LiveService:
         newer version, damaged) is found when the server starts, not at the first request."""
         if (self._settings.live_state_dir / "live.sqlite").is_file():
             _ = self.index
+        if self._processing is not None:
+            for step in (self._processing.motion, self._processing.ctf):
+                for argv in (step.argv, *step.formats.values()) if step is not None else ():
+                    if not (os.path.isfile(argv[0]) and os.access(argv[0], os.X_OK)):
+                        raise ConfigError(f"processing: {argv[0]} is not there, or cannot be run")
 
     def start(self) -> None:
         """Resume the watches that were active when the server stopped, if any were ever made."""
@@ -355,10 +377,11 @@ class LiveService:
             )
             .fetchone()
         )
-        if xml is None:
+        path = self._plain_file(root, row["rel"], xml["name"]) if xml is not None else None
+        if path is None:
             return None
         try:
-            found = read_epu_xml(root.joinpath(*[p for p in row["rel"].split("/") if p], xml["name"]))
+            found = read_epu_xml(path)
         except (ImageBioError, OSError, ValueError):
             return None
         return {"epu": found.to_json()}
@@ -380,8 +403,11 @@ class LiveService:
             if movie is None:
                 return {}
             name = movie["name"]
+        path = self._plain_file(root, row["rel"], name)
+        if path is None:
+            return {}
         try:
-            return measure_drift(self._planes, root.joinpath(*[p for p in row["rel"].split("/") if p], name))
+            return measure_drift(self._planes, path)
         except (ImageBioError, OSError, ValueError):
             return {}
 
@@ -446,8 +472,10 @@ class LiveService:
                         self._settings.cs_mm,
                         self._settings.amplitude_contrast,
                     )
-                path = root.joinpath(*[part for part in row["rel"].split("/") if part], row["primary_name"])
+                path = self._plain_file(root, row["rel"], row["primary_name"])
                 try:
+                    if path is None:  # no longer the regular file that was indexed
+                        raise OSError("not a regular file")
                     metrics = measure(
                         self._planes,
                         path,
@@ -459,9 +487,11 @@ class LiveService:
                     metrics = {}
                 if metrics and self._settings.live_drift and row["arrived"]:
                     metrics.update(self._drift(root, row))
-                scanner.add_metrics(
-                    row["id"], row["primary_name"], row["size"], row["mtime_ns"], metrics, late
-                )
+                identity = (row["id"], row["primary_name"], row["size"], row["mtime_ns"])
+                try:
+                    scanner.add_metrics(*identity, metrics, late)
+                except ValueError:  # a number that cannot be written: as an image that cannot be read
+                    scanner.add_metrics(*identity, {}, None)
                 done += 1
                 if time.perf_counter() - started >= self.measure_budget_s or (
                     stop is not None and stop.is_set()
@@ -507,11 +537,14 @@ class LiveService:
     def _unprocessed(self, root_id: int, now: float, skip: set[int]) -> sqlite3.Row | None:
         """The newest exposure of a directory the programs have not run on: among those that
         arrived while it was watched (a session found already written is not gone through).
-        With a motion step, an exposure waits for its movie, ``MOVIE_WAIT_S`` at most."""
+        With a motion step, an exposure waits for its movie to be complete, ``MOVIE_WAIT_S``
+        at most: a movie that never completes does not keep its image from the CTF step.
+        Without one, a movie is not waited for at all."""
         marks = ",".join("?" * len(_ACQUIRED))
         movie = (
-            "AND (e.primary_role = 'movie' OR e.completed_at <= ? OR EXISTS (SELECT 1 FROM files f "
-            "WHERE f.exposure_id = e.id AND f.role = 'movie' AND f.state = 'complete')) "
+            "AND (e.completed_at <= ? OR (EXISTS (SELECT 1 FROM files f WHERE f.exposure_id = e.id "
+            "AND f.role = 'movie' AND f.state = 'complete') AND NOT EXISTS (SELECT 1 FROM files f "
+            "WHERE f.exposure_id = e.id AND f.role = 'movie' AND f.state = 'pending'))) "
             if self._aligns_movies
             else "AND ? IS NOT NULL "
         )
@@ -522,9 +555,7 @@ class LiveService:
                 "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
                 "WHERE e.root_id = ? AND e.processing IS NULL AND e.arrived = 1 AND e.state = 'complete' "
                 f"AND e.category IN ({marks}) AND e.primary_role IN ('image', 'movie') "
-                "AND e.time IS NOT NULL "
-                "AND NOT EXISTS (SELECT 1 FROM files f WHERE f.exposure_id = e.id AND f.role = 'movie' "
-                f"AND f.state = 'pending') {movie}ORDER BY e.time DESC LIMIT ?",
+                f"AND e.time IS NOT NULL {movie}ORDER BY e.time DESC LIMIT ?",
                 (root_id, *_ACQUIRED, now - MOVIE_WAIT_S, len(skip) + 1),
             )
             .fetchall()
@@ -536,6 +567,8 @@ class LiveService:
         directories take turns within theirs: somebody who follows eight sessions, or a session
         with thousands of movies waiting, does not keep the programs from anybody else."""
         if self._closed or not (self._settings.live_state_dir / "live.sqlite").is_file():
+            return None
+        if time.monotonic() < self._paused_until:  # a program cannot be started: see process_once
             return None
         with self._lock:
             rows = (
@@ -550,7 +583,9 @@ class LiveService:
             wanted = {row["root_id"] for row in rows}
             for root_id in [r for r in self._results if r not in wanted]:  # nobody asks any more
                 del self._results[root_id]
-            self._running = {key for key in self._running if key[0] in wanted}
+            # what a worker is running stays known whatever its watch becomes: switched off and
+            # on again, the same exposure would otherwise be started a second time next to it
+            self._running = {key for key in self._running if key[0] in wanted or key in self._active}
             by_user: dict[str, list[tuple[int, Path]]] = {}
             for row in rows:
                 by_user.setdefault(row["user"], []).append((row["root_id"], Path(row["path"])))
@@ -566,51 +601,64 @@ class LiveService:
                     if row is not None:
                         self._turn_user, self._turn_root[user] = user, root_id
                         self._running.add((root_id, row["id"]))
+                        self._active.add((root_id, row["id"]))
                         return root_id, path, row
         return None
 
-    def _job_of(self, root: Path, row: sqlite3.Row) -> Job:
-        """What the programs need to know of an exposure, from what its acquisition says."""
+    @staticmethod
+    def _plain_file(root: Path, rel: str, name: str) -> Path | None:
+        """The path of a file of a watched directory, if it still is what the scanner indexed:
+        a regular file, reached through no link. Between two cycles, whoever writes to the
+        directory can put a link to somebody else's file, or a pipe, in its place."""
+        parts = [part for part in rel.split("/") if part]
+        path = root.joinpath(*parts, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                return None
+            if os.path.realpath(path) != os.path.join(os.path.realpath(root), *parts, name):
+                return None
+        except OSError:
+            return None
+        return path
+
+    def _job_of(self, root: Path, row: sqlite3.Row) -> tuple[Job, FileVersion | None]:
+        """What the programs need to know of an exposure, from what its acquisition says, and
+        the movie it has at this moment. Raises :class:`_NotAsIndexedError` when a file is no
+        longer the regular file that was indexed."""
         epu = json.loads(row["meta"]).get("epu") or {}
-        directory = root.joinpath(*[part for part in row["rel"].split("/") if part])
-        primary = directory / row["primary_name"]
-        movie: Path | None = primary if row["primary_role"] == "movie" else None
-        if movie is None:
-            found = (
-                self.index.connection()
-                .execute(
-                    "SELECT name FROM files WHERE exposure_id = ? AND role = 'movie' AND state = 'complete' "
-                    "ORDER BY name LIMIT 1",
-                    (row["id"],),
-                )
-                .fetchone()
-            )
-            movie = directory / found["name"] if found is not None else None
+        primary = self._plain_file(root, row["rel"], row["primary_name"])
+        version = Scanner.movie_of(self.index.connection(), row["id"])
+        movie = self._plain_file(root, row["rel"], version[0]) if version is not None else None
+        if primary is None or (version is not None and movie is None):
+            raise _NotAsIndexedError
 
-        def positive(value: Any) -> float | None:
+        def positive(value: Any, low: float = 0.0, high: float = math.inf) -> float | None:
             ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-            return float(value) if ok and value > 0 else None
+            return float(value) if ok and low < value <= high else None
 
-        apix = positive(epu.get("pixel_size"))
+        # a pixel size is a fraction of an ångström to a few hundred: anything else is a mistake
+        # in a metadata file, or somebody trying their luck
+        apix = positive(epu.get("pixel_size"), 0.01, 1000.0)
         if apix is None:  # no metadata file: what the image itself says
             try:
                 x = self._planes.info(primary)[0].calibration.x
-                apix = positive(x.value) if x.known and x.unit == "Å" else None
+                apix = positive(x.value, 0.01, 1000.0) if x.known and x.unit == "Å" else None
             except (ImageBioError, OSError, ValueError):
                 apix = None
-        kv = positive(epu.get("voltage"))
-        frames = positive(epu.get("fractions"))
-        dose = positive(epu.get("dose"))
-        return Job(
+        kv = positive(epu.get("voltage"), 20.0, 1500.0)
+        frames = positive(epu.get("fractions"), 0.0, 1e6)
+        dose = positive(epu.get("dose"), 0.0, 1e6)
+        job = Job(
             movie=movie,
             image=primary if row["primary_role"] == "image" else None,
             apix=apix,
-            kv=kv if kv is not None and 20 <= kv <= 1500 else self._settings.kv,
+            kv=kv if kv is not None else self._settings.kv,
             cs_mm=self._settings.cs_mm,
             amplitude=self._settings.amplitude_contrast,
             dose=dose / frames if dose is not None and frames is not None else None,
             frames=int(frames) if frames is not None else None,
         )
+        return job, version
 
     def process_once(self, now: float | None = None, stop: threading.Event | None = None) -> bool:
         """Run the declared programs on one exposure, in the calling thread; False when none
@@ -621,21 +669,45 @@ class LiveService:
         if picked is None:
             return False
         root_id, root, row = picked
+        key = (root_id, row["id"])
+        movie: FileVersion | None = None
         try:
-            result = process(
-                self._job_of(root, row), self._processing, self._work, stop=stop, env=self._program_env
+            job, movie = self._job_of(root, row)
+            result = process(job, self._processing, self._work, stop=stop, env=self._program_env)
+            if result is not None:
+                json.dumps(result, allow_nan=False)  # what could not be written is not a result
+        except _NotAsIndexedError:
+            # Left as it is until the scanner has looked at the directory again: it will see
+            # what the file has become. Meanwhile it is not picked again.
+            with self._lock:
+                self._active.discard(key)
+                self._handed.setdefault(root_id, set()).add(row["id"])
+            return True
+        except ProgramUnavailableError as e:
+            # A matter of installation, not of this exposure: nothing is recorded against it,
+            # and nothing is tried for a while rather than marking a whole session as failed.
+            log.error(
+                "the %s program could not be started: no program is run for %g s", e, _UNAVAILABLE_PAUSE_S
             )
+            with self._lock:
+                self._active.discard(key)
+                self._running.discard(key)
+                self._paused_until = time.monotonic() + _UNAVAILABLE_PAUSE_S
+            return False
         except Exception:  # recorded, so that the exposure is not tried again for ever
             log.exception("the external programs could not be run on an exposure of root %s", root_id)
             result = {"error": "the programs could not be run"}
+            with contextlib.suppress(Exception):
+                movie = Scanner.movie_of(self.index.connection(), row["id"])
         with self._lock:
+            self._active.discard(key)
             if result is None:  # the server is stopping: the run does not count
-                self._running.discard((root_id, row["id"]))
+                self._running.discard(key)
                 return False
             failed = "error" in result or any(isinstance(v, dict) and "error" in v for v in result.values())
             self._ran["failed" if failed else "ok"] += 1
             self._results.setdefault(root_id, []).append(
-                (row["id"], row["primary_name"], row["size"], row["mtime_ns"], result)
+                (row["id"], row["primary_name"], row["size"], row["mtime_ns"], result, movie)
             )
         return True
 

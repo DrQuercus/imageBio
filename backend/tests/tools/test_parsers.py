@@ -3,6 +3,7 @@ out here from the numbers written, never by the parsers themselves."""
 
 from __future__ import annotations
 
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -147,3 +148,53 @@ def test_frame_shifts_of_a_motioncor_log_are_summed_up(tmp_path: Path) -> None:
         parse_motion_log(write(tmp_path, "# nothing was aligned\n", "empty.log"))
     with pytest.raises(CorruptFileError, match="too many frames"):
         parse_motion_log(write(tmp_path, "1 0.0 0.0\n" * 20_002, "long.log"))
+
+
+def test_a_file_name_quoted_in_the_result_does_not_pass_for_the_header(tmp_path: Path) -> None:
+    """Regression. CTFFIND quotes the name of its input in a comment, and a name is whatever
+    somebody called their image: one that holds "columns #600000000" was taken for the line
+    that names the columns, and a list of that length was made (gigabytes)."""
+    hostile = CTFFIND4.replace(
+        "# Input file: aligned.mrc", "# Input file: /data/x columns #600000000 - defocus 1 y.mrc"
+    )
+    assert "#600000000" in hostile
+    tracemalloc.start()
+    try:
+        fit = parse_ctffind(write(tmp_path, hostile))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert fit["defocus_u"] == pytest.approx(1.8634, abs=1e-4) and peak < 8 * 2**20  # the real header counts
+    # and the line that does name the columns cannot ask for a table out of proportion either
+    absurd = (
+        "# Columns: #1 - micrograph number; #2 - defocus 1; #3 - defocus 2; #999 - spacing; #88888888 - cc\n"
+    )
+    tracemalloc.start()
+    try:
+        fit = parse_ctffind(write(tmp_path, absurd + "1.0 20000.0 21000.0 10.0 0.0 0.3 4.2\n"))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert fit["defocus"] == 2.05 and "fit" not in fit and peak < 8 * 2**20
+
+
+def test_frame_shifts_that_give_no_finite_number_are_not_a_result(tmp_path: Path) -> None:
+    """Regression. A pixel size out of all proportion (from a hostile metadata file) made the
+    path infinite; the number could not be written to the index, and the scanner that tried
+    failed at every cycle from then on."""
+    log = write(tmp_path, "1 0.0 0.0\n2 3.0 4.0\n3 6.0 8.0\n", "shifts.log")
+    assert parse_motion_log(log, 2.0)["total"] == 20.0
+    for absurd in (1.5e308, 1e308):
+        with pytest.raises(CorruptFileError, match="make no sense"):
+            parse_motion_log(log, absurd)
+    for unknown in (float("inf"), float("nan"), 0.0, -1.0):  # not a pixel size: pixels, then
+        assert parse_motion_log(log, unknown) == {
+            "total": 10.0,
+            "early": 10.0,
+            "max_step": 5.0,
+            "frames": 3,
+            "unit": "px",
+        }
+    huge = write(tmp_path, "1 0.0 0.0\n2 1e308 1e308\n3 -1e308 -1e308\n", "huge.log")
+    with pytest.raises(CorruptFileError, match="make no sense"):
+        parse_motion_log(huge)

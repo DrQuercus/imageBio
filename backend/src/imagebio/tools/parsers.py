@@ -21,7 +21,8 @@ __all__ = ["MAX_RESULT_BYTES", "PARSERS", "parse_ctffind", "parse_motion_log", "
 MAX_RESULT_BYTES: Final = 1 << 20
 _MAX_FRAMES: Final = 20_000
 _EARLY_STEPS: Final = 5  # the first frames, where beam-induced motion is the largest
-_COLUMN: Final = re.compile(r"#\s*(\d+)\s*-?\s*([^;#]+)")
+_COLUMN: Final = re.compile(r"#\s*(\d{1,3})\s*-?\s*([^;#]+)")
+_MAX_COLUMNS: Final = 64
 #: Columns of the CTFFIND results file when its header does not say (versions 4 and 5 agree).
 _CTFFIND_ORDER: Final = ("number", "defocus_1", "defocus_2", "angle", "phase", "cc", "fit")
 _CTFFIND_NAMES: Final = (  # a word of the header -> what the column is
@@ -59,26 +60,28 @@ def parse_ctffind(path: Path, apix: float | None = None) -> dict[str, Any]:
     the resolution (Å) up to which the rings were fitted; tilt (°) and thickness (nm) when the
     program gives them (version 5). Raises :class:`CorruptFileError` when there is no such fit."""
     del apix  # CTFFIND writes ångströms: the pixel size is not needed
-    names = list(_CTFFIND_ORDER)
+    names: dict[int, str] = dict(enumerate(_CTFFIND_ORDER))  # position in a line -> what it is
     row: list[float] | None = None
     for line in _read(path).splitlines():
         text = line.strip()
         if text.startswith("#"):
-            if "columns" in text.lower():
-                found = {int(n): label.strip().lower() for n, label in _COLUMN.findall(text)}
+            # Only the line that begins so names the columns: the other comments quote the name
+            # of the input file, which is whatever somebody called their image.
+            if text[1:].lstrip().lower().startswith("columns:"):
+                found = {
+                    int(n) - 1: next((key for word, key in _CTFFIND_NAMES if word in label.lower()), "?")
+                    for n, label in _COLUMN.findall(text)
+                    if 1 <= int(n) <= _MAX_COLUMNS
+                }
                 if found:
-                    names = ["?"] * max(found)
-                    for position, label in found.items():
-                        names[position - 1] = next(
-                            (key for word, key in _CTFFIND_NAMES if word in label), "?"
-                        )
+                    names = found
         elif text:
             values = _floats(text)
             if values is not None and len(values) >= 7:
                 row = values  # the last line counts: one micrograph per run
     if row is None:
         raise CorruptFileError("no fit in the result file of the CTF program")
-    got = {name: row[i] for i, name in enumerate(names[: len(row)]) if name != "?"}
+    got = {name: row[i] for i, name in names.items() if name != "?" and i < len(row)}
     try:
         first, second = got["defocus_1"], got["defocus_2"]
     except KeyError:
@@ -111,13 +114,17 @@ def _motion(shifts: list[tuple[float, float]], apix: float | None) -> dict[str, 
     if len(shifts) < 2:
         raise CorruptFileError("the motion correction gave fewer than two frames")
     steps = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in itertools.pairwise(shifts)]
-    scale = apix if apix is not None and apix > 0 else 1.0
+    known = apix is not None and math.isfinite(apix) and apix > 0
+    scale = apix if known and apix is not None else 1.0
+    total, early, largest = sum(steps) * scale, sum(steps[:_EARLY_STEPS]) * scale, max(steps) * scale
+    if not (math.isfinite(total) and math.isfinite(early) and math.isfinite(largest)):
+        raise CorruptFileError("the frame shifts of the motion correction make no sense")
     return {
-        "total": round(sum(steps) * scale, 2),
-        "early": round(sum(steps[:_EARLY_STEPS]) * scale, 2),
-        "max_step": round(max(steps) * scale, 2),
+        "total": round(total, 2),
+        "early": round(early, 2),
+        "max_step": round(largest, 2),
         "frames": len(shifts),
-        "unit": "A" if apix is not None and apix > 0 else "px",
+        "unit": "A" if known else "px",
     }
 
 

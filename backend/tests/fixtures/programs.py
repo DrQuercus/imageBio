@@ -13,10 +13,24 @@ from pathlib import Path
 
 from imagebio.core.config import ProcessingConfig, ToolStep
 
-__all__ = ["CTFFIND_ANSWERS", "RECORD_VARIABLE", "ctf_step", "motion_step", "processing"]
+__all__ = [
+    "CTFFIND_ANSWERS",
+    "GATE_KIND_VARIABLE",
+    "GATE_VARIABLE",
+    "RECORD_VARIABLE",
+    "ctf_step",
+    "motion_step",
+    "processing",
+]
 
 #: Name of the environment variable that names a file where each run writes what it was given.
 RECORD_VARIABLE = "FAKE_PROGRAMS_RECORD"
+
+#: Name of the variable that names a file a program waits for, once it has read its input and
+#: before it writes its result (it creates ``<file>.reached`` when it gets there); and of the
+#: variable that says which program waits ("motion" or "ctf"; both when not set).
+GATE_VARIABLE = "FAKE_PROGRAMS_GATE"
+GATE_KIND_VARIABLE = "FAKE_PROGRAMS_GATE_KIND"
 
 _COMMON = """\
 import json, os, sys, time
@@ -27,6 +41,14 @@ def record(kind, **what):
     if path:
         with open(path, "a") as f:
             f.write(json.dumps({"kind": kind, "pid": os.getpid(), **what}) + "\\n")
+
+def gate(kind):
+    path = os.environ.get("FAKE_PROGRAMS_GATE")
+    if path and os.environ.get("FAKE_PROGRAMS_GATE_KIND", kind) == kind:
+        with open(path + ".reached", "a") as f:
+            f.write(f"{os.getpid()}\\n")
+        while not os.path.exists(path):
+            time.sleep(0.02)
 
 def misbehave(name):
     if "hang" in name:
@@ -46,6 +68,7 @@ record("motion", argv=args, cwd=os.getcwd())
 misbehave(os.path.basename(movie))
 with mrcfile.open(movie, permissive=True) as m:
     frames = np.asarray(m.data, dtype=np.float32)
+gate("motion")
 with mrcfile.new(option("-OutMrc"), overwrite=True) as m:
     m.set_data(frames.sum(axis=0).astype(np.float32))
 star = os.path.splitext(option("-OutMrc"))[0] + ".star"
@@ -68,6 +91,7 @@ record("ctf", answers=answers, argv=sys.argv[1:])
 misbehave(os.path.basename(image))
 with mrcfile.open(image, permissive=True) as m:
     mean = float(np.asarray(m.data, dtype=np.float64).mean())
+gate("ctf")
 out = os.path.splitext(diagnostic)[0] + ".txt"
 if "garbage" in os.path.basename(image):
     open(out, "w").write("# no rings were found\\n")

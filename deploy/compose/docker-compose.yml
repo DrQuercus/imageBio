@@ -36,6 +36,8 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    # a small init as process 1: it reaps what an external program leaves behind when killed
+    init: true
     user: "${IMAGEBIO_UID:?}:${IMAGEBIO_GID:?}"
     read_only: true
     tmpfs: [/tmp]

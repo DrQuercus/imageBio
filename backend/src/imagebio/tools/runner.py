@@ -6,11 +6,17 @@
 - What it prints goes to a file of its working directory; its answers on standard input come
   from a file too, so that neither side can block the other on a full pipe.
 - The secrets of the server (``IMAGEBIO_*``) are not in its environment.
+
+What this does not do: a program that detaches part of itself on purpose (a child that starts
+a session of its own) takes it out of the group, and out of reach. And a program that cannot
+be killed (it runs under another account) is given a few seconds, then left: the server does
+not wait for it for ever.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import signal
 import subprocess
@@ -23,7 +29,11 @@ from typing import Final
 
 __all__ = ["LOG_NAME", "Outcome", "clean_environment", "run_program"]
 
+log = logging.getLogger(__name__)
+
 LOG_NAME: Final = "program.log"
+#: Seconds a killed program is given to be gone before it is left to itself.
+KILL_GRACE_S: Final = 10.0
 _STDIN_NAME: Final = "program.stdin"
 _POLL_S: Final = 0.05
 _TAIL_BYTES: Final = 2000
@@ -64,6 +74,17 @@ def clean_environment(secret_names: Collection[str] = ()) -> dict[str, str]:
 def _kill_group(pid: int) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pid, signal.SIGKILL)
+
+
+def _gone(process: subprocess.Popen[bytes]) -> bool:
+    """Wait for a program that was just killed; False when it is still there after the grace
+    period (the kill was not permitted): the caller goes on without it."""
+    try:
+        process.wait(KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        log.error("a program (pid %s) could not be killed: it is left running", process.pid)
+        return False
+    return True
 
 
 def run_program(
@@ -109,12 +130,12 @@ def run_program(
                 else:
                     continue
                 _kill_group(process.pid)
-                process.wait()
+                _gone(process)
                 break
     finally:
         _kill_group(process.pid)  # whatever it left running, however this function is left
         if process.poll() is None:
-            process.wait()
+            _gone(process)
     if status == "ok" and process.returncode != 0:
         status = "failed"
     tail = ""

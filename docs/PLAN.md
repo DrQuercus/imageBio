@@ -561,6 +561,8 @@ Critères d'acceptation :
 - **Plantage ou blocage isolé : passé.** Avec un programme qui plante, un qui se bloque et un qui répond, le serveur continue de répondre pendant le blocage, chaque image reçoit son résultat ou son motif, le programme bloqué est tué avec ses enfants, et l'arrêt du serveur tue celui qui tourne.
 - **Pas d'accaparement : passé.** Les utilisateurs passent à tour de rôle : avec douze images en attente chez l'un et deux chez l'autre, le second est servi une fois sur deux jusqu'à ce qu'il n'ait plus rien.
 
+Une relecture indépendante du code qui lance les programmes a trouvé neuf défauts réels (le plus grave : un fichier de métadonnées hostile arrêtait pour de bon le scrutateur d'un dossier). Tous sont corrigés, chacun avec un test de régression ; le détail est dans l'ADR 011.
+
 Limites :
 - **Ni MotionCor3 ni CTFFIND n'ont été lancés** : pas de binaire, pas de carte graphique. Les options de `deploy/processing.example.toml` et les formats lus viennent de la documentation ; ils sont à vérifier sur votre installation avant de s'y fier.
 - **La somme pondérée par la dose n'est pas conservée** : la somme alignée sert au CTF puis disparaît. C'était le dernier reste de M4.

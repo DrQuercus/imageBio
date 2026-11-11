@@ -41,11 +41,13 @@ from imagebio.live.completeness import Integrity, check_integrity, is_stable
 from imagebio.live.index import Index
 from imagebio.live.layout import PRIMARY_ROLES, Member, category_of, classify, name_time, primary_rank
 
-__all__ = ["CycleReport", "Entry", "Fs", "ScanSettings", "Scanner"]
+__all__ = ["CycleReport", "Entry", "FileVersion", "Fs", "ScanSettings", "Scanner"]
 
 log = logging.getLogger(__name__)
 
 _NS: Final = 1_000_000_000
+#: A file as it was at some moment: its name, its size and its date.
+FileVersion = tuple[str, int | None, int | None]
 _WAITING_FOR_XML: Final = "waiting for the EPU metadata file (.xml)"
 _NO_XML: Final = "completed without its EPU metadata file (.xml)"
 _ROLE_ORDER: Final = {"xml": 0, "mdoc": 0, "preview": 1}  # metadata first: images wait for it
@@ -213,8 +215,9 @@ class Scanner:
         self._measured: list[
             tuple[int, str, int | None, int | None, dict[str, Any], dict[str, Any] | None]
         ] = []
-        #: Results of the external programs waiting for the next cycle, the same way.
-        self._processed: list[tuple[int, str, int | None, int | None, dict[str, Any]]] = []
+        #: Results of the external programs waiting for the next cycle, the same way: already
+        #: written as JSON, and with the movie they were worked out from.
+        self._processed: list[tuple[int, str, int | None, int | None, str, FileVersion | None]] = []
         self._load()
 
     # ── memory, rebuilt from the index ───────────────────────────────────────
@@ -326,7 +329,9 @@ class Scanner:
 
         ``meta``: metadata read on the same occasion for an exposure that had none (an image
         found already written, indexed without its files being opened). What the scanner read
-        itself is never replaced by it."""
+        itself is never replaced by it. Raises :class:`ValueError` for what cannot be written
+        (a number that is not finite): better here than in the middle of a cycle."""
+        json.dumps((metrics, meta), allow_nan=False)
         self._measured.append((exposure_id, primary, size, mtime_ns, metrics, meta))
 
     @property
@@ -335,27 +340,42 @@ class Scanner:
         return frozenset(m[0] for m in self._measured)
 
     def add_processing(
-        self, exposure_id: int, primary: str, size: int | None, mtime_ns: int | None, result: dict[str, Any]
+        self,
+        exposure_id: int,
+        primary: str,
+        size: int | None,
+        mtime_ns: int | None,
+        result: dict[str, Any],
+        movie: FileVersion | None = None,
     ) -> None:
         """Hand over what the external programs gave for an exposure whose file ``primary`` was
-        as said (``size``, ``mtime_ns``) when they were started. Like a measurement, it enters
-        the index at the next cycle, with a new sequence number, unless the file changed."""
-        self._processed.append((exposure_id, primary, size, mtime_ns, result))
+        as said (``size``, ``mtime_ns``) and whose movie was ``movie`` (name, size, date; None:
+        it had no complete one) when they were started. Like a measurement, it enters the index
+        at the next cycle, with a new sequence number, unless one of the two changed meanwhile.
+        Raises :class:`ValueError` for a result that cannot be written (a number that is not
+        finite): better here than in the middle of a cycle."""
+        self._processed.append(
+            (exposure_id, primary, size, mtime_ns, json.dumps(result, allow_nan=False), movie)
+        )
+
+    @staticmethod
+    def movie_of(db: sqlite3.Connection, exposure_id: int) -> FileVersion | None:
+        """The complete movie of an exposure, as it is now: name, size and date."""
+        row = db.execute(
+            "SELECT name, size, mtime_ns FROM files WHERE exposure_id = ? AND role = 'movie' "
+            "AND state = 'complete' ORDER BY name LIMIT 1",
+            (exposure_id,),
+        ).fetchone()
+        return (row["name"], row["size"], row["mtime_ns"]) if row is not None else None
 
     def _apply_processing(self, db: sqlite3.Connection) -> None:
-        for exposure_id, primary, size, mtime_ns, result in self._processed:
+        for exposure_id, primary, size, mtime_ns, result, movie in self._processed:
+            if self.movie_of(db, exposure_id) != movie:
+                continue  # the movie came, went or was written again: to be run again
             done = db.execute(
                 "UPDATE exposures SET processing = ?, seq = ? WHERE id = ? AND root_id = ? "
                 "AND state = 'complete' AND primary_name IS ? AND size IS ? AND mtime_ns IS ?",
-                (
-                    json.dumps(result, allow_nan=False),
-                    self._seq + 1,
-                    exposure_id,
-                    self._root_id,
-                    primary,
-                    size,
-                    mtime_ns,
-                ),
+                (result, self._seq + 1, exposure_id, self._root_id, primary, size, mtime_ns),
             )
             if done.rowcount:
                 self._seq += 1

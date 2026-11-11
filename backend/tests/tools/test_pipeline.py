@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 
 from fixtures.programs import RECORD_VARIABLE, processing
-from imagebio.tools.pipeline import Job, process
+from imagebio.core.config import ProcessingConfig, ToolStep
+from imagebio.tools.pipeline import Job, ProgramUnavailableError, process
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="programs are run on POSIX systems only")
 
@@ -175,3 +176,19 @@ def test_a_result_outside_the_directory_of_the_run_is_not_read(world: Path, tmp_
     )
     result = process(job(world, movie=None), linking, world / "work")
     assert result is not None and result["ctf"] == {"error": "the program wrote no result file"}
+
+
+def test_a_program_that_is_not_installed_is_not_held_against_the_exposure(world: Path) -> None:
+    """Regression. A mistyped path in the configuration gave every exposure the final result
+    "the program could not be started": once the path was put right, nothing was run again."""
+    absent = ProcessingConfig(
+        ctf=ToolStep(
+            argv=(str(world / "programs/not_installed"),),
+            stdin=("{image}",),
+            result="{out}/d.txt",
+            parser="ctffind",
+        )
+    )
+    with pytest.raises(ProgramUnavailableError):
+        process(job(world, movie=None), absent, world / "work")
+    assert list((world / "work").iterdir()) == []  # the directory of the run is removed all the same

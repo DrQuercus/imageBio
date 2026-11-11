@@ -24,7 +24,7 @@ from imagebio.tools.parsers import PARSERS
 from imagebio.tools.runner import Outcome, run_program
 from imagebio.tools.templates import MissingValueError, UnsafeValueError, fill, number
 
-__all__ = ["Job", "process"]
+__all__ = ["Job", "ProgramUnavailableError", "process"]
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,11 @@ class Job:
     #: Dose per frame (e/Å²) and number of frames, when the acquisition says.
     dose: float | None = None
     frames: int | None = None
+
+
+class ProgramUnavailableError(Exception):
+    """A declared program could not be started at all (not there, not executable): a matter of
+    installation, not of this exposure, which is left to be run when it is put right."""
 
 
 class _StepError(Exception):
@@ -110,6 +115,8 @@ def _run(
     )
     if outcome.status == "stopped":
         raise _Stopped
+    if outcome.status == "unavailable":
+        raise ProgramUnavailableError(kind)
     if not outcome.ok:
         log.warning("%s step: %s (status %s)\n%s", kind, outcome.status, outcome.code, outcome.tail)
         raise _StepError(outcome.public(step.timeout_s))
@@ -130,7 +137,8 @@ def process(
 ) -> dict[str, Any] | None:
     """Run the declared steps on ``job``. Returns ``{"motion": {...}, "ctf": {...}, "seconds":
     ...}``: a step that gave no result holds ``{"error": <why>}``, one that does not apply (no
-    movie, no micrograph) is absent. None when the server stopped meanwhile."""
+    movie, no micrograph) is absent. None when the server stopped meanwhile. Raises
+    :class:`ProgramUnavailableError` when a program cannot be started."""
     started = time.monotonic()
     work_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory = Path(tempfile.mkdtemp(prefix="run-", dir=work_root))  # 0700, a name nobody knows

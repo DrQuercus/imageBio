@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from imagebio.tools import runner
 from imagebio.tools.runner import LOG_NAME, clean_environment, run_program
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="programs are run on POSIX systems only")
@@ -139,3 +140,27 @@ def test_the_secrets_of_the_server_are_not_handed_over(
     (tmp_path / "env.json").unlink()
     assert run_program(printing, cwd=tmp_path, timeout_s=20).ok  # the default environment is the clean one
     assert "IMAGEBIO_PROXY_SECRET" not in json.loads((tmp_path / "env.json").read_text())
+
+
+def test_a_program_that_cannot_be_killed_is_not_waited_for_for_ever(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression. A program that runs under another account (through sudo, say) cannot be
+    killed by the server: the refusal was ignored, then the program was waited for without
+    limit, and neither its time limit nor the server stopping ended that."""
+    hanging = program(tmp_path, "open('pid', 'w').write(str(os.getpid()))\ntime.sleep(600)\n")
+    refused: list[int] = []
+
+    def not_permitted(pid: int, signal_number: int) -> None:
+        refused.append(pid)
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(runner.os, "killpg", not_permitted)
+    monkeypatch.setattr(runner, "KILL_GRACE_S", 0.5)
+    started = time.monotonic()
+    outcome = run_program(hanging, cwd=tmp_path, timeout_s=1.0)
+    took = time.monotonic() - started
+    monkeypatch.undo()
+    pid = int((tmp_path / "pid").read_text())
+    os.kill(pid, 9)  # the test may: it is its own program
+    assert outcome.status == "timeout" and took < 8 and refused and set(refused) == {pid}
