@@ -178,6 +178,10 @@ export const api = {
 
     stop: (id: number, signal?: AbortSignal) => getJson<LiveWatch>(`/api/live/watches/${id}`, signal, "DELETE"),
 
+    /** Stop a watch and take it off the list; the index of its directory goes once nobody watches it. */
+    forget: (id: number, signal?: AbortSignal) =>
+      getJson<LiveWatch>(`/api/live/watches/${id}?${buildQuery({ forget: true })}`, signal, "DELETE"),
+
     summary: (id: number, signal?: AbortSignal) => getJson<LiveSummary>(`/api/live/watches/${id}`, signal),
 
     /** Exposures that changed since sequence number `since`. */

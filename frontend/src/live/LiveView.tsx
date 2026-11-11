@@ -118,6 +118,15 @@ export function LiveView({ dir, onViewer }: Props) {
       })
       .catch((e) => setError(message(e)));
   };
+  const forget = (w: LiveWatch) => {
+    api.live
+      .forget(w.id)
+      .then(() => {
+        if (watch?.id === w.id) open(null); // nothing left to show of it
+        refreshWatches();
+      })
+      .catch((e) => setError(message(e)));
+  };
 
   return (
     <div className="app live" data-testid="live">
@@ -142,9 +151,13 @@ export function LiveView({ dir, onViewer }: Props) {
                 <span className={`beacon ${w.active ? "fresh" : "none"}`} />
                 <span className="name">{w.path}</span>
               </button>
-              {w.active && (
+              {w.active ? (
                 <button className="watch-stop" onClick={() => stop(w)} title="Arrêter la surveillance (l'index est conservé)" aria-label={`Arrêter ${w.path}`}>
                   ■
+                </button>
+              ) : (
+                <button className="watch-stop" onClick={() => forget(w)} title="Oublier cette session (son index est effacé si personne d'autre ne la suit)" aria-label={`Oublier ${w.path}`}>
+                  ✕
                 </button>
               )}
             </div>

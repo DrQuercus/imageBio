@@ -141,6 +141,12 @@ test("a session is chosen in the browser, listed, and stopped", async ({ page })
   await expect(page.getByRole("button", { name: "Arrêter demo/session" })).toHaveCount(0);
   await expect(listed).toBeVisible(); // still there to be read, or watched again
 
+  // forgetting it takes it off the list, and leaves the session
+  await page.getByRole("button", { name: "Oublier demo/session" }).click();
+  await expect(listed).toHaveCount(0);
+  await expect(page.getByTestId("live-session")).toHaveText("aucune session");
+  await expect(page.getByTestId("live-empty")).toBeVisible();
+
   // a directory one may not read, or that is not there
   await page.goto("/#live=demo%2Fnowhere");
   await expect(page.getByTestId("error")).toContainText("not found");
