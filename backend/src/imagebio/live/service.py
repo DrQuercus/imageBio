@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from imagebio.core.config import Settings
-from imagebio.core.errors import InvalidRequestError, NotFoundError
+from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
 from imagebio.io.registry import Registry
 from imagebio.live.alerts import (
@@ -40,6 +40,7 @@ from imagebio.live.alerts import (
     step,
 )
 from imagebio.live.index import Index
+from imagebio.live.metrics import measure
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -63,6 +64,14 @@ _TEST_INTERVAL_S: Final = 10.0  # between two test notices of one user
 #: is told for ever about a session they left, or may no longer read.
 _ALERT_IDLE_S: Final = 7 * 86400.0
 _SEEN_EVERY_S: Final = 600.0  # how often "its user looked at it" is written to the index
+#: Images of a session that was found already written (they did not arrive while it was
+#: watched) that are measured: the most recent ones. Measuring reads each image in full.
+MEASURED_WHEN_FOUND: Final = 200
+_MEASURE_BATCH: Final = 16  # candidates looked up at a time
+#: The brightest images of a session stand for "no ice": this share of them is above the
+#: reference the others are compared to, which a single odd image therefore cannot set.
+_REFERENCE_TOP: Final = 0.02
+_REFERENCE_MIN: Final = 20  # measured images under which a session has no reference yet
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +143,8 @@ class LiveService:
         self._thumb_db_bytes: int | None = None  # size of the thumbnails in the index, once counted
         self._render = threading.BoundedSemaphore(_RENDER_SLOTS)
         self._closed = False
+        #: Seconds per cycle spent measuring images (one image at least); tests replace it.
+        self.measure_budget_s = 0.4 * settings.live_interval_s
         #: Delivers alert notices, and tells how full a volume is; tests replace both.
         self.notifier = notifier or Notifier(settings.smtp)
         self.disk_usage: Callable[[Path], Any] = shutil.disk_usage
@@ -229,11 +240,14 @@ class LiveService:
         wait = 0.0
         while not stop.wait(wait):
             try:
+                started = time.perf_counter()
                 now = self.clock()
                 report = scanner.cycle(now)
                 self._pending[root_id] = report.pending
-                took = report.duration_ms / 1000
                 self.check_alerts(root_id, now)
+                if report.error is None:
+                    self._measure(scanner, root_id, path, stop)
+                took = time.perf_counter() - started
             except Exception:  # cycle() reports its own errors; this is a bug or the index gone
                 log.exception("live scanner of root %s failed", root_id)
                 took = 0.0
@@ -253,7 +267,70 @@ class LiveService:
             reports[root_id] = scanner.cycle(when)
             self._pending[root_id] = reports[root_id].pending
             self.check_alerts(root_id, when)
+            if reports[root_id].error is None:
+                self._measure(scanner, root_id, path)
         return reports
+
+    # ── measurements on the images ───────────────────────────────────────────
+    def _unmeasured(self, root_id: int, skip: frozenset[int]) -> list[sqlite3.Row]:
+        """Exposures to measure, newest first: those that arrived while the directory was
+        watched, then the most recent of those that were found in it."""
+        db = self.index.connection()
+        marks = ",".join("?" * len(_ACQUIRED))
+        select = (
+            "SELECT e.id, e.primary_name, e.primary_role, e.size, e.mtime_ns, e.meta, d.rel "  # noqa: S608
+            "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
+            f"WHERE e.root_id = ? AND e.metrics IS NULL AND e.state = 'complete' AND e.category IN ({marks}) "
+            "AND e.primary_role IN ('image', 'movie') AND e.time IS NOT NULL AND "
+        )
+        order = " ORDER BY e.time DESC LIMIT ?"
+        limit = _MEASURE_BATCH + len(skip)
+        rows = db.execute(select + "e.arrived = 1" + order, (root_id, *_ACQUIRED, limit)).fetchall()
+        if len(rows) < limit:
+            oldest = db.execute(
+                f"SELECT time FROM exposures WHERE root_id = ? AND category IN ({marks}) "  # noqa: S608
+                "AND time IS NOT NULL ORDER BY time DESC LIMIT 1 OFFSET ?",
+                (root_id, *_ACQUIRED, MEASURED_WHEN_FOUND - 1),
+            ).fetchone()
+            rows += db.execute(
+                select + "e.arrived = 0 AND e.time >= ?" + order,
+                (root_id, *_ACQUIRED, oldest["time"] if oldest is not None else -1e300, limit),
+            ).fetchall()
+        return [row for row in rows if row["id"] not in skip][:_MEASURE_BATCH]
+
+    def _measure(
+        self, scanner: Scanner, root_id: int, root: Path, stop: threading.Event | None = None
+    ) -> int:
+        """Measure images that were not yet (``live/metrics.py``), for ``measure_budget_s``
+        seconds at most, one image at least; the scanner writes the results at its next cycle.
+        An image that cannot be read is given empty measurements: it is not tried again."""
+        if not self._settings.live_metrics:
+            return 0
+        started = time.perf_counter()
+        done = 0
+        while not (stop is not None and stop.is_set()):
+            rows = self._unmeasured(root_id, scanner.measuring)
+            for row in rows:
+                apix = json.loads(row["meta"]).get("epu", {}).get("pixel_size")
+                path = root.joinpath(*[part for part in row["rel"].split("/") if part], row["primary_name"])
+                try:
+                    metrics = measure(
+                        self._planes,
+                        path,
+                        row["primary_role"],
+                        apix if row["primary_role"] == "image" and isinstance(apix, int | float) else None,
+                    )
+                except (ImageBioError, OSError, ValueError):
+                    metrics = {}
+                scanner.add_metrics(row["id"], row["primary_name"], row["size"], row["mtime_ns"], metrics)
+                done += 1
+                if time.perf_counter() - started >= self.measure_budget_s or (
+                    stop is not None and stop.is_set()
+                ):
+                    return done
+            if len(rows) < _MEASURE_BATCH:
+                break
+        return done
 
     # ── watches ──────────────────────────────────────────────────────────────
     def watches(self, user: str) -> list[WatchInfo]:
@@ -416,9 +493,28 @@ class LiveService:
                 "last_hour": self._arrived_since(db, watch.root_id, now, 3600),
             },
             "alerts": [c for c, state in self._alert_states(db, watch.id).items() if state.told],
+            "ice": self._ice_reference(db, watch.root_id),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
+
+    @staticmethod
+    def _ice_reference(db: sqlite3.Connection, root_id: int) -> dict[str, Any]:
+        """What the mean counts of an image are compared to: the counts of the brightest
+        images of the session (the thinnest ice, or none). None until enough were measured."""
+        measured = db.execute(
+            "SELECT COUNT(*) FROM exposures WHERE root_id = ? AND mean_counts IS NOT NULL "
+            "AND state = 'complete'",
+            (root_id,),
+        ).fetchone()[0]
+        reference = None
+        if measured >= _REFERENCE_MIN:
+            reference = db.execute(
+                "SELECT mean_counts FROM exposures WHERE root_id = ? AND mean_counts IS NOT NULL "
+                "AND state = 'complete' ORDER BY mean_counts DESC LIMIT 1 OFFSET ?",
+                (root_id, int(measured * _REFERENCE_TOP)),
+            ).fetchone()[0]
+        return {"measured": measured, "reference": reference}
 
     @staticmethod
     def _acquired_sql() -> str:
@@ -462,7 +558,7 @@ class LiveService:
         rows = db.execute(
             "SELECT e.id, e.seq, e.name, e.category, e.state, e.primary_name, e.primary_role, "  # noqa: S608
             "e.size, e.time, e.time_source, e.first_seen, e.completed_at, e.verified, e.note, "
-            "e.members, e.meta, d.rel "
+            "e.members, e.meta, e.metrics, d.rel "
             "FROM exposures e JOIN dirs d ON d.id = e.dir_id "
             f"WHERE e.root_id = ? AND e.seq > ? AND e.primary_name IS NOT NULL AND e.category IN ({marks}) "
             "ORDER BY e.seq LIMIT ?",
@@ -488,6 +584,7 @@ class LiveService:
                 "note": row["note"],
                 "members": json.loads(row["members"]),
                 "meta": json.loads(row["meta"]),
+                "metrics": json.loads(row["metrics"]) if row["metrics"] is not None else None,
             }
             for row in rows
         ]

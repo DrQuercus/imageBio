@@ -201,6 +201,8 @@ class Scanner:
         # every path below is built from this real path: a path that is not its own real path
         # goes through a symbolic link, and is not followed
         self._root = self._fs.realpath(os.fspath(root))
+        #: Measurements waiting for the next cycle: (exposure, primary file, size, date, metrics).
+        self._measured: list[tuple[int, str, int | None, int | None, dict[str, Any]]] = []
         self._load()
 
     # ── memory, rebuilt from the index ───────────────────────────────────────
@@ -296,6 +298,40 @@ class Scanner:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    # ── measurements made on the images, by somebody else ────────────────────
+    def add_metrics(
+        self, exposure_id: int, primary: str, size: int | None, mtime_ns: int | None, metrics: dict[str, Any]
+    ) -> None:
+        """Hand over what was measured on the file ``primary`` of an exposure, as it was
+        (``size``, ``mtime_ns``) when it was read. It enters the index at the next cycle, with a
+        new sequence number, unless the file changed meanwhile."""
+        self._measured.append((exposure_id, primary, size, mtime_ns, metrics))
+
+    @property
+    def measuring(self) -> frozenset[int]:
+        """The exposures whose measurements wait for the next cycle."""
+        return frozenset(m[0] for m in self._measured)
+
+    def _apply_metrics(self, db: sqlite3.Connection) -> None:
+        for exposure_id, primary, size, mtime_ns, metrics in self._measured:
+            mean = metrics.get("mean")
+            done = db.execute(
+                "UPDATE exposures SET metrics = ?, mean_counts = ?, seq = ? WHERE id = ? AND root_id = ? "
+                "AND state = 'complete' AND primary_name IS ? AND size IS ? AND mtime_ns IS ?",
+                (
+                    json.dumps(metrics, allow_nan=False),
+                    mean if isinstance(mean, int | float) else None,
+                    self._seq + 1,
+                    exposure_id,
+                    self._root_id,
+                    primary,
+                    size,
+                    mtime_ns,
+                ),
+            )
+            if done.rowcount:
+                self._seq += 1
+
     # ── a cycle ──────────────────────────────────────────────────────────────
     def cycle(self, now: float) -> CycleReport:
         """Bring the index up to date. Never raises for what the disk does; an internal error
@@ -313,6 +349,7 @@ class Scanner:
                 began = True
                 if not self._recent_loaded:
                     self._load_recent(db, now)
+                self._apply_metrics(db)
                 self._scan(db, now, report, walked)
                 self._poll(db, now, report)
                 self._verify(db, now, report)
@@ -336,6 +373,7 @@ class Scanner:
         if report.full:
             self._full_at = now
         self._cold = False
+        self._measured.clear()  # they are in the index now (a failed cycle keeps them for the next)
         report.pending = len(self._pending)
         return report
 
@@ -932,10 +970,16 @@ class Scanner:
             if source in (None, "mtime") and primary["mtime_ns"] is not None:
                 when, source = primary["mtime_ns"] / _NS, "mtime"
             db.execute(
-                "UPDATE exposures SET state = ?, primary_name = ?, primary_role = ?, size = ?, mtime_ns = ?, "
+                # what was measured on another file, or on this one before it changed, is forgotten
+                # (the right-hand sides see the row as it was)
+                "UPDATE exposures SET metrics = CASE WHEN primary_name IS ? AND size IS ? AND mtime_ns IS ? "
+                "THEN metrics END, mean_counts = CASE WHEN primary_name IS ? AND size IS ? AND mtime_ns IS ? "
+                "THEN mean_counts END, "
+                "state = ?, primary_name = ?, primary_role = ?, size = ?, mtime_ns = ?, "
                 "completed_at = ?, verified = ?, note = ?, members = ?, time = ?, time_source = ?, seq = ? "
                 "WHERE id = ?",
                 (
+                    *(primary["name"], primary["size"], primary["mtime_ns"]) * 2,
                     "complete" if complete else "incoming",
                     primary["name"],
                     primary["role"],

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
+import mrcfile
 import numpy as np
 import pytest
 import tifffile
@@ -773,6 +775,175 @@ def test_background_scanning_starts_and_stops_with_the_watches(tmp_path: Path) -
     for t in threads:  # leaving the server stops the scanners
         t.join(timeout=10)
         assert not t.is_alive()
+
+
+# ── measurements on the images ────────────────────────────────────────────────
+
+
+def measured(world: World) -> dict[str, dict | None]:
+    """The measurements of every exposure in the index, by name (None: not measured)."""
+    import json
+
+    rows = world.live.index.connection().execute("SELECT name, metrics FROM exposures").fetchall()
+    return {r["name"]: json.loads(r["metrics"]) if r["metrics"] is not None else None for r in rows}
+
+
+def old_session(world: World, directory: str, count: int, *, size: int = 16) -> dict[str, np.ndarray]:
+    """Images written two days ago, one a minute, named as EPU names them; by exposure name."""
+    data = world.tree.base / directory / "Images-Disc1/GridSquare_1/Data"
+    data.mkdir(parents=True)
+    rng = np.random.default_rng(count)
+    when = BASE - 2 * 86400
+    images = {}
+    for n in range(count):
+        name = f"FoilHole_1_Data_{n}_{n}_20270113_{n // 60:02d}{n % 60:02d}00"
+        images[name] = rng.normal(20 + n, 2, (size, size)).astype(np.float32)
+        (data / f"{name}.mrc").write_bytes(mrc_bytes(images[name], 1.0))
+        os.utime(data / f"{name}.mrc", (when, when))
+    for directory_ in (data, data.parent, data.parent.parent, data.parent.parent.parent):
+        os.utime(directory_, (when, when))
+    return images
+
+
+def test_images_are_measured_as_they_arrive(world: World) -> None:
+    sim = sim_in(world, "cryo/alice_session", 40, pause_probability=0.0)
+    watch = world.watch("cryo/alice_session", ALICE)
+    world.run([sim], 240)
+    sim.stop()
+    world.run([sim], 30)
+    items = world.items(watch, ALICE, limit=5000)["items"]
+    assert len(items) == len(sim.exposures) >= 30
+    for item in items:
+        with mrcfile.open(world.tree.base / item["path"]) as m:
+            pixels = np.asarray(m.data, np.float64)
+        metrics = item["metrics"]
+        assert metrics.keys() == {"mean", "std", "ice_ring"}, item["name"]
+        assert metrics["mean"] == pytest.approx(pixels.mean(), rel=5e-3)  # no hot pixel here: the plain mean
+        assert metrics["std"] == pytest.approx(pixels.std(), rel=0.05)
+        assert 0.3 < metrics["ice_ring"] < 3
+
+    # the session's reference: the brightest images, the top fiftieth left out
+    ice = world.summary(watch, ALICE)["ice"]
+    means = sorted((i["metrics"]["mean"] for i in items), reverse=True)
+    assert ice == {"measured": len(items), "reference": means[int(len(items) * 0.02)]}
+    assert means[0] >= ice["reference"] > means[len(means) // 2]
+
+
+def test_a_measurement_is_a_change_a_client_is_told_about(world: World) -> None:
+    session = world.tree.base / "public/shared"
+    watch = world.watch("public/shared", ALICE)
+    world.run([], 5)
+    image = np.random.default_rng(1).normal(40, 3, (64, 64)).astype(np.float32)
+    (session / "a.mrc").write_bytes(mrc_bytes(image, 1.0))
+    for path in (session / "a.mrc", session):
+        os.utime(path, (world.now, world.now))
+    seen = world.items(watch, ALICE)
+    while not (seen["items"] and seen["items"][-1]["state"] == "complete"):
+        world.run([], 5)
+        seen = world.items(watch, ALICE, since=seen["seq"]) if seen["items"] else world.items(watch, ALICE)
+        assert world.now < BASE + 60
+    assert seen["items"][-1]["metrics"] is None  # complete, shown, not measured yet
+    assert world.summary(watch, ALICE)["ice"] == {"measured": 0, "reference": None}
+    world.run([], 5)  # the next cycle writes what was measured after the previous one
+    after = world.items(watch, ALICE, since=seen["seq"])
+    assert [i["name"] for i in after["items"]] == ["a"] and after["seq"] > seen["seq"]
+    assert after["items"][0]["metrics"]["mean"] == pytest.approx(float(image.mean()), rel=5e-3)
+    assert world.summary(watch, ALICE)["ice"] == {
+        "measured": 1,
+        "reference": None,
+    }  # one image is no reference
+    world.run([], 30)
+    assert world.items(watch, ALICE, since=after["seq"])["items"] == []  # measured once
+
+    # the file is written again within the minutes it is still looked at: measured again
+    brighter = (image + 100).astype(np.float32)
+    (session / "a.mrc").write_bytes(mrc_bytes(np.concatenate([brighter, brighter]), 1.0))
+    os.utime(session / "a.mrc", (world.now, world.now))
+    world.run([], 40)
+    again = world.items(watch, ALICE)["items"][0]
+    assert again["state"] == "complete" and again["metrics"]["mean"] == pytest.approx(
+        float(brighter.mean()), rel=5e-3
+    )
+
+
+def test_of_a_session_found_already_written_only_the_last_images_are_measured(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measuring reads each image in full: a session of thousands of images opened after the
+    fact must not be read from end to end."""
+    monkeypatch.setattr("imagebio.live.service.MEASURED_WHEN_FOUND", 20)
+    images = old_session(world, "public/shared", 30)
+    names = sorted(images, key=lambda n: int(n.split("_")[3]))  # oldest first
+    watch = world.watch("public/shared", ALICE)
+    world.live.measure_budget_s = 0.0  # one image per cycle, the newest first
+    world.run([], 5)
+    assert [n for n, m in measured(world).items() if m is not None] == []  # measured, not written yet
+    world.run([], 5)
+    assert [n for n, m in measured(world).items() if m is not None] == [names[-1]]
+    world.run([], 10)
+    assert {n for n, m in measured(world).items() if m is not None} == set(names[-3:])
+    world.live.measure_budget_s = 60.0
+    world.run([], 15)
+    done = measured(world)
+    assert {n for n, m in done.items() if m is not None} == set(names[-20:])
+    for name in names[-20:]:
+        assert done[name]["mean"] == pytest.approx(float(images[name].mean()), rel=0.02)
+        assert "ice_ring" not in done[name]  # 16 pixels: too small a field for a spectrum
+    assert world.summary(watch, ALICE)["ice"]["measured"] == 20
+
+    # an image that arrives now is measured whatever the number of older ones
+    data = world.tree.base / "public/shared/Images-Disc1/GridSquare_1/Data"
+    new = np.full((16, 16), 7, np.float32)
+    (data / "FoilHole_1_Data_99_99_20270115_101500.mrc").write_bytes(mrc_bytes(new, 1.0))
+    for path in (data / "FoilHole_1_Data_99_99_20270115_101500.mrc", data):
+        os.utime(path, (world.now, world.now))
+    world.run([], 150)  # an EPU image without its metadata file is accepted after two minutes
+    assert measured(world)["FoilHole_1_Data_99_99_20270115_101500"] == {"mean": 7.0, "std": 0.0}
+
+
+def test_an_image_that_cannot_be_read_is_not_measured_again(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import imagebio.live.service as service
+
+    images = old_session(world, "public/shared", 3)
+    names = sorted(images)
+    data = world.tree.base / "public/shared/Images-Disc1/GridSquare_1/Data"
+    whole = (data / f"{names[1]}.mrc").read_bytes()
+    (data / f"{names[1]}.mrc").write_bytes(whole[:1100])  # cut in its pixels, two days ago
+    when = BASE - 2 * 86400
+    for path in (data / f"{names[1]}.mrc", data):
+        os.utime(path, (when, when))
+    calls: list[str] = []
+    real = service.measure
+
+    def counting(planes, path, role, apix=None):
+        calls.append(path.name)
+        return real(planes, path, role, apix)
+
+    monkeypatch.setattr(service, "measure", counting)
+    watch = world.watch("public/shared", ALICE)
+    world.run([], 60)
+    done = measured(world)
+    assert done[names[1]] == {} and done[names[0]]["mean"] > 0 and done[names[2]]["mean"] > 0
+    assert sorted(calls) == [f"{n}.mrc" for n in names]  # each one once, the broken one included
+    items = {i["name"]: i for i in world.items(watch, ALICE)["items"]}
+    assert items[names[1]]["metrics"] == {} and math.isfinite(items[names[0]]["metrics"]["mean"])
+    assert world.summary(watch, ALICE)["ice"]["measured"] == 2
+
+
+def test_measuring_can_be_turned_off(tmp_path: Path) -> None:
+    tree = build_tree(tmp_path / "data")
+    (tree.base / "public/shared").mkdir()
+    world = World(tree, tmp_path / "state", live_metrics=False)
+    try:
+        old_session(world, "public/shared", 3)
+        watch = world.watch("public/shared", ALICE)
+        world.run([], 30)
+        assert [i["metrics"] for i in world.items(watch, ALICE)["items"]] == [None, None, None]
+        assert world.summary(watch, ALICE)["ice"] == {"measured": 0, "reference": None}
+    finally:
+        world.client.__exit__(None, None, None)
 
 
 def test_a_directory_never_has_two_scanners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -465,26 +465,37 @@ _V2_ALERT_STATES = (
 )
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
     with index.write() as db:
         db.execute("INSERT INTO roots (path, created_at) VALUES ('/data/session', 1.0)")
         db.execute(
-            "INSERT INTO watches (user, logical, root_id, active, created_at) VALUES ('alice', 'cryo/session', 1, 1, 2.0)"
+            "INSERT INTO watches (user, logical, root_id, active, created_at) "
+            "VALUES ('alice', 'cryo/session', 1, 1, 2.0)"
         )
+        db.execute("INSERT INTO dirs (root_id, rel, mtime_ns) VALUES (1, '', 5)")
+        db.execute(
+            "INSERT INTO exposures (root_id, dir_id, name, category, state, first_seen, seq) "
+            "VALUES (1, 1, 'a', 'image', 'complete', 6.0, 1)"
+        )
+        db.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
     index.close()
     old = sqlite3.connect(path)  # what the earlier versions looked like
-    old.executescript("ALTER TABLE watches DROP COLUMN seen_at; DROP TABLE alert_states;")
+    old.executescript(  # 3 and before: images were not measured
+        "DROP INDEX exposures_unmeasured; DROP INDEX exposures_mean; "
+        "ALTER TABLE exposures DROP COLUMN metrics; ALTER TABLE exposures DROP COLUMN mean_counts;"
+    )
+    if version <= 2:  # alerts without the memory of which channel was told
+        old.executescript("ALTER TABLE watches DROP COLUMN seen_at; DROP TABLE alert_states;")
+        old.executescript(_V2_ALERT_STATES)
+        old.execute("INSERT INTO alert_states VALUES (1, 'no_image', 4.0, 1, 1, NULL)")
     if version == 1:  # before alerts existed
         old.executescript(
-            "ALTER TABLE watches DROP COLUMN alerts; ALTER TABLE watches DROP COLUMN alerts_at;"
+            "DROP TABLE alert_states; ALTER TABLE watches DROP COLUMN alerts; "
+            "ALTER TABLE watches DROP COLUMN alerts_at;"
         )
-    else:  # alerts, without the memory of which channel was told
-        old.executescript(_V2_ALERT_STATES)
-        old.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
-        old.execute("INSERT INTO alert_states VALUES (1, 'no_image', 4.0, 1, 1, NULL)")
     old.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(version),))
     old.commit()
     old.close()
@@ -494,7 +505,7 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "3"
+        == "4"
     )
     row = db.execute("SELECT user, logical, active, alerts, alerts_at, seen_at FROM watches").fetchone()
     rules = (None, None) if version == 1 else ('{"channels": ["phone"]}', 3.0)
@@ -503,6 +514,8 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert db.execute("SELECT COUNT(*) FROM alert_states").fetchone()[0] == 0
     columns = {r["name"] for r in db.execute("PRAGMA table_info(alert_states)")}
     assert {"phase", "clear_since", "delivered", "todo"} <= columns and "notified" not in columns
+    exposure = db.execute("SELECT name, state, seq, metrics, mean_counts FROM exposures").fetchone()
+    assert tuple(exposure) == ("a", "complete", 1, None, None)  # kept, and waiting to be measured
     index.close()
     Index(path).close()  # and opening it again changes nothing
 

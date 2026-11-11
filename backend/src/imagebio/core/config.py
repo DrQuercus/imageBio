@@ -177,6 +177,8 @@ class Settings:
     live_min_stable_s: float = 10.0
     #: False: watched directories are not scanned by this process.
     live_scan: bool = True
+    #: Measure each image of a watched session (mean counts, ice ring): reads every image once.
+    live_metrics: bool = True
     thumb_cache_bytes: int = 2 * 2**30
     #: Where the live monitor may send alerts.
     alert_channels: tuple[AlertChannel, ...] = ()
@@ -262,7 +264,7 @@ class Settings:
         server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
-        live = section("live", {"state_dir", "interval", "min_stable", "scan"})
+        live = section("live", {"state_dir", "interval", "min_stable", "scan", "metrics"})
         alerts = section("alerts", {"smtp", "channels"})
         raw_channels = alerts.get("channels", [])
         if not isinstance(raw_channels, list):
@@ -331,6 +333,7 @@ class Settings:
             live_interval_s=float(live.get("interval", defaults.live_interval_s)),
             live_min_stable_s=float(live.get("min_stable", defaults.live_min_stable_s)),
             live_scan=bool(live.get("scan", True)),
+            live_metrics=bool(live.get("metrics", True)),
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),
             smtp=smtp,

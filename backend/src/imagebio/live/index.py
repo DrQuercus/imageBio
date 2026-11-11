@@ -22,7 +22,7 @@ from typing import Final
 
 __all__ = ["SCHEMA_VERSION", "Index"]
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
 _BUSY_TIMEOUT_S = 30.0
 
@@ -33,6 +33,7 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     # version 3 keeps, for each alert, which channels were told: the states of version 2 cannot
     # say it. They are dropped (the schema creates the new table): what still holds is told again.
     2: ("DROP TABLE IF EXISTS alert_states", "ALTER TABLE watches ADD COLUMN seen_at REAL"),
+    3: ("ALTER TABLE exposures ADD COLUMN metrics TEXT", "ALTER TABLE exposures ADD COLUMN mean_counts REAL"),
 }
 
 _SCHEMA: Final = """
@@ -105,10 +106,15 @@ CREATE TABLE IF NOT EXISTS exposures (
     members      TEXT NOT NULL DEFAULT '{}',  -- JSON {role: state}
     meta         TEXT NOT NULL DEFAULT '{}',  -- JSON from the XML, the mdoc and the reader
     seq          INTEGER NOT NULL,
+    metrics      TEXT,                   -- JSON measured on the pixels (live/metrics.py); NULL: not yet
+    mean_counts  REAL,                   -- the mean of the metrics, to compare the images of a session
     UNIQUE (dir_id, name)
 );
 CREATE INDEX IF NOT EXISTS exposures_seq ON exposures (root_id, seq);
 CREATE INDEX IF NOT EXISTS exposures_time ON exposures (root_id, time);
+CREATE INDEX IF NOT EXISTS exposures_unmeasured ON exposures (root_id, time)
+    WHERE metrics IS NULL AND arrived = 1;
+CREATE INDEX IF NOT EXISTS exposures_mean ON exposures (root_id, mean_counts) WHERE mean_counts IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS files (
     id           INTEGER PRIMARY KEY,

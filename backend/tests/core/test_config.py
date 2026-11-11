@@ -83,9 +83,13 @@ state_dir = "{tmp_path / "state"}"
 interval = 2
 min_stable = 6
 scan = false
+metrics = false
 """)
     s = Settings.load(cfg)
     assert (s.live_interval_s, s.live_min_stable_s, s.live_scan) == (2.0, 6.0, False)
+    assert (
+        s.live_metrics is False and Settings().live_metrics is True
+    )  # images are measured unless told not to
     assert s.live_state_dir == tmp_path / "state" and s.thumb_cache_bytes == 64 * 2**20
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
     assert Settings().live_state_dir == tmp_path / "xdg" / "imagebio"
