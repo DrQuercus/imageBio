@@ -6,11 +6,14 @@ import {
   formatBytes,
   formatLiveLink,
   freshness,
+  arrangeItems,
   DARK_ABOVE,
+  filterItems,
   gridLayout,
   historyBars,
   iceLabel,
   iceSummary,
+  iceThickness,
   imageFlags,
   itemDetails,
   mergeItems,
@@ -19,6 +22,7 @@ import {
   parseLiveLink,
   parseThreshold,
   relativeIce,
+  sortValue,
   tilePosition,
 } from "../src/live/store";
 
@@ -176,6 +180,62 @@ describe("what was measured on an image", () => {
     expect(metricsLines(item(1, { metrics: {} }), 50)).toEqual(["Image illisible : pas de mesure"]);
     const movie = item(1, { metrics: { mean: 1234.56, estimated: true, frames: 40 } });
     expect(metricsLines(movie, null)).toEqual(["Coups moyens : 1235 (estimés sur les premières frames)"]);
+  });
+
+  it("gives a thickness in nanometres once the mean free path is known", () => {
+    const one = measured(1, 50 / Math.E); // relative ice 1
+    expect(iceThickness(one, 50, 395)).toBeCloseTo(395, 9);
+    expect(iceThickness(one, 50, null)).toBeNull();
+    expect(iceThickness(item(1), 50, 395)).toBeNull();
+    expect(iceLabel(one, 50, 395)).toBe("glace 395 nm");
+    expect(iceLabel(one, 50)).toBe("glace 1.00");
+    expect(metricsLines(one, 50, 395)).toEqual(["Coups moyens : 18.39", "Glace relative : 1.00 (ln I₀/I)", "Épaisseur de glace : 395 nm"]);
+    const drifting = item(1, { metrics: { mean: 20, drift: 4.26, drift_unit: "A" } });
+    expect(metricsLines(drifting, null)).toEqual(["Coups moyens : 20.00", "Dérive entre le début et la fin : 4.3 Å"]);
+    expect(metricsLines(item(1, { metrics: { mean: 20, drift: 3, drift_unit: "px" } }), null)[1]).toBe("Dérive entre le début et la fin : 3.0 px");
+  });
+
+  it("calls an image an empty hole only against the counts of an empty hole", () => {
+    const bright = measured(1, 49); // within 5 % of the reference
+    expect(imageFlags(bright, 50, false)).toEqual([]); // the reference is only the brightest of the session
+    expect(imageFlags(bright, 50, true)).toEqual(["empty"]);
+    expect(imageFlags(measured(1, 47), 50, true)).toEqual([]);
+    expect(imageFlags(measured(1, 55), 50, true)).toEqual(["empty"]); // brighter still
+  });
+
+  it("sorts the tiles on a value, those without it last", () => {
+    const a = item(1, { meta: { epu: { applied_defocus: -2.5, dose: 40 } }, metrics: { mean: 50, ice_ring: 1.1 } });
+    const b = item(2, { meta: { epu: { applied_defocus: -1, dose: 42 } }, metrics: { mean: 25, ice_ring: 1.6 } });
+    const c = item(3); // not measured, no metadata
+    const d = item(4, { meta: { mdoc: { defocus: -4, dose: 3 } }, metrics: { mean: 40, drift: 2 } });
+    const session = [a, b, c, d];
+    expect(sortValue(a, "defocus", null)).toBe(2.5); // how far from focus, whatever the sign
+    expect(sortValue(d, "dose", null)).toBe(3);
+    expect(sortValue(c, "ice", 50)).toBeNull();
+    expect(sortValue(b, "ice", 50)).toBeCloseTo(Math.log(2), 12);
+    const names = (key: Parameters<typeof arrangeItems>[1], descending: boolean) => arrangeItems(session, key, descending, 50).map((i) => i.id);
+    expect(names("time", false)).toEqual([1, 2, 3, 4]);
+    expect(names("time", true)).toEqual([4, 3, 2, 1]);
+    expect(names("ice", true)).toEqual([2, 4, 1, 3]); // thickest first; the unmeasured one last
+    expect(names("ice", false)).toEqual([1, 4, 2, 3]); // and last again the other way round
+    expect(names("ring", true)).toEqual([2, 1, 3, 4]);
+    expect(names("defocus", false)).toEqual([2, 1, 4, 3]);
+    expect(names("dose", true)).toEqual([2, 1, 4, 3]);
+    expect(names("drift", true)).toEqual([4, 1, 2, 3]);
+    expect(arrangeItems([], "ice", true, 50)).toEqual([]);
+  });
+
+  it("keeps the marked images, or those measured and without a mark", () => {
+    const fine = measured(1, 45, 1.0);
+    const icy = measured(2, 45, 1.9);
+    const dark = measured(3, 2);
+    const unmeasured = item(4);
+    const incoming = item(5, { state: "incoming", metrics: { mean: 45, ice_ring: 3 } });
+    const all = [fine, icy, dark, unmeasured, incoming];
+    expect(filterItems(all, "all", 50, false)).toBe(all);
+    expect(filterItems(all, "flagged", 50, false).map((i) => i.id)).toEqual([2, 3]);
+    expect(filterItems(all, "clean", 50, false).map((i) => i.id)).toEqual([1]);
+    expect(filterItems([measured(6, 49.5)], "flagged", 50, true).map((i) => i.id)).toEqual([6]); // an empty hole, once calibrated
   });
 
   it("summarises the last measured images of the session", () => {

@@ -84,6 +84,7 @@ interval = 2
 min_stable = 6
 scan = false
 metrics = false
+mean_free_path_nm = 322
 """)
     s = Settings.load(cfg)
     assert (s.live_interval_s, s.live_min_stable_s, s.live_scan) == (2.0, 6.0, False)
@@ -93,7 +94,13 @@ metrics = false
     assert s.live_state_dir == tmp_path / "state" and s.thumb_cache_bytes == 64 * 2**20
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
     assert Settings().live_state_dir == tmp_path / "xdg" / "imagebio"
-    for bad in ("[live]\ninterval = 0.1", "[live]\nmin_stable = 0", "[live]\npoll = 3"):
+    assert s.live_mfp_nm == 322.0 and Settings().live_mfp_nm is None
+    for bad in (
+        "[live]\ninterval = 0.1",
+        "[live]\nmin_stable = 0",
+        "[live]\npoll = 3",
+        "[live]\nmean_free_path_nm = 3",
+    ):
         cfg.write_text(bad)
         with pytest.raises(ConfigError):
             Settings.load(cfg)

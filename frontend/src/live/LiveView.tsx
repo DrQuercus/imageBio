@@ -12,7 +12,22 @@ import { AlertsPanel } from "./AlertsPanel";
 import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
-import { formatLiveLink, iceSummary, type ItemMap, mergeItems, orderItems } from "./store";
+import { IcePanel } from "./IcePanel";
+import {
+  arrangeItems,
+  CATEGORY_VIEWS,
+  type CategoryView,
+  FILTER_LABELS,
+  filterItems,
+  formatLiveLink,
+  iceSummary,
+  type ItemFilter,
+  type ItemMap,
+  mergeItems,
+  orderItems,
+  SORT_LABELS,
+  type SortKey,
+} from "./store";
 
 const POLL_MS = 3000;
 const PAGE = 2000;
@@ -36,6 +51,9 @@ export function LiveView({ dir, onViewer }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [browsed, setBrowsed] = useState<string | null>(null);
   const [newestFirst, setNewestFirst] = useState(true);
+  const [sortKey, setSortKey] = useState<SortKey>("time");
+  const [filter, setFilter] = useState<ItemFilter>("all");
+  const [category, setCategory] = useState<CategoryView>("data");
   const [tile, setTile] = useState(180);
   const onError = useCallback((m: string) => setError(m), []);
 
@@ -69,8 +87,10 @@ export function LiveView({ dir, onViewer }: Props) {
 
   // ── follow it: one loop, each turn asks for what changed since the last one ──
   const watchId = watch?.id ?? null;
+  const categories = CATEGORY_VIEWS.find((v) => v.key === category)?.categories ?? "data,image";
   useEffect(() => {
     if (watchId === null) return;
+    setItems(new Map()); // another session, or another kind of image: nothing of the previous one
     const controller = new AbortController();
     let timer = 0;
     let since = 0;
@@ -82,7 +102,7 @@ export function LiveView({ dir, onViewer }: Props) {
         receivedAt.current = performance.now();
         setSummary(s);
         while (s.seq > since) {
-          const page = await api.live.items(watchId, since, PAGE, controller.signal);
+          const page = await api.live.items(watchId, since, PAGE, controller.signal, categories);
           known = mergeItems(known, page.items);
           since = page.seq;
           if (!page.more) break;
@@ -103,11 +123,17 @@ export function LiveView({ dir, onViewer }: Props) {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [watchId]);
+  }, [watchId, categories]);
 
   const ordered = useMemo(() => orderItems(items), [items]);
   const reference = summary?.ice.reference ?? null;
+  const calibrated = summary?.ice.calibrated ?? false;
+  const mfp = summary?.ice.mfp_nm ?? null;
   const ice = useMemo(() => iceSummary(ordered, reference), [ordered, reference]);
+  const shown = useMemo(
+    () => arrangeItems(filterItems(ordered, filter, reference, calibrated), sortKey, newestFirst, reference),
+    [ordered, filter, sortKey, newestFirst, reference, calibrated],
+  );
   const open = (path: string | null) => {
     window.location.hash = formatLiveLink(path);
   };
@@ -166,6 +192,7 @@ export function LiveView({ dir, onViewer }: Props) {
           ))}
         </section>
         {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
+        {watch && summary && <IcePanel watchId={watch.id} ice={summary.ice} onError={onError} />}
         <div className="live-browser">
           <FileBrowser current={null} onOpen={onViewer} onError={onError} onDirectory={setBrowsed} />
           <button className="watch-here" disabled={!browsed} onClick={() => open(browsed)} data-testid="watch-here">
@@ -186,17 +213,35 @@ export function LiveView({ dir, onViewer }: Props) {
             <StatsBar summary={summary} ice={ice} receivedAt={receivedAt.current} />
             <RateGraph history={history} />
             <div className="grid-bar">
-              <span data-testid="grid-count">{ordered.length.toLocaleString("fr-FR")} image{ordered.length > 1 ? "s" : ""}</span>
+              <span data-testid="grid-count">
+                {shown.length !== ordered.length ? `${shown.length.toLocaleString("fr-FR")} sur ` : ""}
+                {ordered.length.toLocaleString("fr-FR")} image{ordered.length > 1 ? "s" : ""}
+              </span>
+              <select value={category} onChange={(e) => setCategory(e.target.value as CategoryView)} aria-label="Images montrées" data-testid="grid-category">
+                {CATEGORY_VIEWS.map((v) => (
+                  <option key={v.key} value={v.key}>{v.label}</option>
+                ))}
+              </select>
+              <select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)} aria-label="Trier par" data-testid="grid-sort">
+                {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                  <option key={k} value={k}>{SORT_LABELS[k]}</option>
+                ))}
+              </select>
               <button className={newestFirst ? "on" : ""} onClick={() => setNewestFirst((v) => !v)} data-testid="order">
-                {newestFirst ? "Les plus récentes d'abord" : "Dans l'ordre d'acquisition"}
+                {sortKey === "time" ? (newestFirst ? "Les plus récentes d'abord" : "Dans l'ordre d'acquisition") : newestFirst ? "Décroissant" : "Croissant"}
               </button>
+              <select value={filter} onChange={(e) => setFilter(e.target.value as ItemFilter)} aria-label="Filtrer" data-testid="grid-filter">
+                {(Object.keys(FILTER_LABELS) as ItemFilter[]).map((k) => (
+                  <option key={k} value={k}>{FILTER_LABELS[k]}</option>
+                ))}
+              </select>
               <span className="spacer" />
               <label className="tile-size">
                 Taille
                 <input type="range" min={100} max={320} step={20} value={tile} onChange={(e) => setTile(Number(e.target.value))} aria-label="Taille des vignettes" />
               </label>
             </div>
-            <ImageGrid items={ordered} newestFirst={newestFirst} tile={tile} reference={reference} onOpen={onViewer} />
+            <ImageGrid items={shown} tile={tile} reference={reference} calibrated={calibrated} mfp={mfp} onOpen={onViewer} />
           </>
         ) : (
           <div className="empty" data-testid="live-empty">

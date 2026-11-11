@@ -179,6 +179,9 @@ class Settings:
     live_scan: bool = True
     #: Measure each image of a watched session (mean counts, ice ring): reads every image once.
     live_metrics: bool = True
+    #: Mean free path of electrons in ice for this microscope (aperture-limited scattering), nm:
+    #: ice thickness is then shown in nm. None: relative values only, unless a user gives one.
+    live_mfp_nm: float | None = None
     thumb_cache_bytes: int = 2 * 2**30
     #: Where the live monitor may send alerts.
     alert_channels: tuple[AlertChannel, ...] = ()
@@ -207,6 +210,8 @@ class Settings:
             raise ConfigError("cache sizes must be positive")
         if not 0.5 <= self.live_interval_s <= 3600 or self.thumb_cache_bytes < 0:
             raise ConfigError("live.interval must be between 0.5 and 3600 seconds")
+        if self.live_mfp_nm is not None and not 50 <= self.live_mfp_nm <= 5000:
+            raise ConfigError("live.mean_free_path_nm must be between 50 and 5000 (nanometres)")
         if not 1 <= self.live_min_stable_s <= 3600:
             raise ConfigError("live.min_stable must be between 1 and 3600 seconds")
         # Without authentication, only loopback is acceptable. In "proxy" mode the identity
@@ -264,7 +269,9 @@ class Settings:
         server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
-        live = section("live", {"state_dir", "interval", "min_stable", "scan", "metrics"})
+        live = section(
+            "live", {"state_dir", "interval", "min_stable", "scan", "metrics", "mean_free_path_nm"}
+        )
         alerts = section("alerts", {"smtp", "channels"})
         raw_channels = alerts.get("channels", [])
         if not isinstance(raw_channels, list):
@@ -334,6 +341,7 @@ class Settings:
             live_min_stable_s=float(live.get("min_stable", defaults.live_min_stable_s)),
             live_scan=bool(live.get("scan", True)),
             live_metrics=bool(live.get("metrics", True)),
+            live_mfp_nm=float(live["mean_free_path_nm"]) if "mean_free_path_nm" in live else None,
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),
             smtp=smtp,

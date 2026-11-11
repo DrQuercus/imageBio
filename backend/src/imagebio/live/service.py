@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import sqlite3
 import threading
@@ -493,7 +494,7 @@ class LiveService:
                 "last_hour": self._arrived_since(db, watch.root_id, now, 3600),
             },
             "alerts": [c for c, state in self._alert_states(db, watch.id).items() if state.told],
-            "ice": self._ice_reference(db, watch.root_id),
+            "ice": self._ice(db, watch),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
@@ -515,6 +516,33 @@ class LiveService:
                 (root_id, int(measured * _REFERENCE_TOP)),
             ).fetchone()[0]
         return {"measured": measured, "reference": reference}
+
+    def _ice(self, db: sqlite3.Connection, watch: WatchInfo) -> dict[str, Any]:
+        """What ice thickness is computed from for a watch: the counts of an empty hole when
+        its user gave them (``calibrated``), else the brightest images of the session; and the
+        mean free path, the user's or the server's, when one is known."""
+        found = self._ice_reference(db, watch.root_id)
+        own = db.execute("SELECT ice_i0, ice_mfp_nm FROM watches WHERE id = ?", (watch.id,)).fetchone()
+        i0, mfp = own["ice_i0"], own["ice_mfp_nm"]
+        return {
+            "measured": found["measured"],
+            "reference": i0 if i0 is not None else found["reference"],
+            "calibrated": i0 is not None,
+            "session": found["reference"],
+            "i0": i0,
+            "mfp_nm": mfp if mfp is not None else self._settings.live_mfp_nm,
+            "mfp_own": mfp,
+        }
+
+    def set_ice(self, watch: WatchInfo, i0: float | None, mfp_nm: float | None) -> dict[str, Any]:
+        """Set, or forget (None), the counts of an empty hole and the mean free path of a watch."""
+        if i0 is not None and not (math.isfinite(i0) and 0 < i0 <= 1e12):
+            raise InvalidRequestError("i0 (mean counts of an empty hole) must be a positive number")
+        if mfp_nm is not None and not (math.isfinite(mfp_nm) and 50 <= mfp_nm <= 5000):
+            raise InvalidRequestError("mfp (mean free path) must be between 50 and 5000 nanometres")
+        with self.index.write() as db:
+            db.execute("UPDATE watches SET ice_i0 = ?, ice_mfp_nm = ? WHERE id = ?", (i0, mfp_nm, watch.id))
+        return self._ice(self.index.connection(), watch)
 
     @staticmethod
     def _acquired_sql() -> str:

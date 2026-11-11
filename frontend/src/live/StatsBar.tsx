@@ -58,7 +58,9 @@ export function StatsBar({ summary, ice, receivedAt }: Props) {
       </div>
       <div className="stat" title="Glace traversée, par rapport aux images les plus claires de la session : ln(I₀/I) sur les coups moyens, médiane des dernières images mesurées. À multiplier par le libre parcours moyen du microscope (300 à 400 nm) pour une épaisseur. « Anneau » : part de ces images dont l'anneau de glace cristalline dépasse 1,2.">
         <span className="stat-label">Glace</span>
-        <span className="stat-value small" data-testid="stat-ice">{ice ? ice.median.toFixed(2) : "—"}</span>
+        <span className="stat-value small" data-testid="stat-ice">
+          {!ice ? "—" : summary.ice.mfp_nm ? `${Math.round(ice.median * summary.ice.mfp_nm)} nm` : ice.median.toFixed(2)}
+        </span>
         <span className="stat-sub" data-testid="stat-ice-sub">
           {ice
             ? `sur ${ice.count} image${ice.count > 1 ? "s" : ""} · anneau ${Math.round(ice.ring * 100)} %`

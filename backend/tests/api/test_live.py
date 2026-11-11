@@ -825,7 +825,8 @@ def test_images_are_measured_as_they_arrive(world: World) -> None:
     # the session's reference: the brightest images, the top fiftieth left out
     ice = world.summary(watch, ALICE)["ice"]
     means = sorted((i["metrics"]["mean"] for i in items), reverse=True)
-    assert ice == {"measured": len(items), "reference": means[int(len(items) * 0.02)]}
+    assert (ice["measured"], ice["reference"]) == (len(items), means[int(len(items) * 0.02)])
+    assert ice["calibrated"] is False and ice["session"] == ice["reference"]
     assert means[0] >= ice["reference"] > means[len(means) // 2]
 
 
@@ -843,15 +844,14 @@ def test_a_measurement_is_a_change_a_client_is_told_about(world: World) -> None:
         seen = world.items(watch, ALICE, since=seen["seq"]) if seen["items"] else world.items(watch, ALICE)
         assert world.now < BASE + 60
     assert seen["items"][-1]["metrics"] is None  # complete, shown, not measured yet
-    assert world.summary(watch, ALICE)["ice"] == {"measured": 0, "reference": None}
+    none = world.summary(watch, ALICE)["ice"]
+    assert (none["measured"], none["reference"]) == (0, None)
     world.run([], 5)  # the next cycle writes what was measured after the previous one
     after = world.items(watch, ALICE, since=seen["seq"])
     assert [i["name"] for i in after["items"]] == ["a"] and after["seq"] > seen["seq"]
     assert after["items"][0]["metrics"]["mean"] == pytest.approx(float(image.mean()), rel=5e-3)
-    assert world.summary(watch, ALICE)["ice"] == {
-        "measured": 1,
-        "reference": None,
-    }  # one image is no reference
+    ice = world.summary(watch, ALICE)["ice"]
+    assert (ice["measured"], ice["reference"]) == (1, None)  # one image is no reference
     world.run([], 30)
     assert world.items(watch, ALICE, since=after["seq"])["items"] == []  # measured once
 
@@ -932,6 +932,64 @@ def test_an_image_that_cannot_be_read_is_not_measured_again(
     assert world.summary(watch, ALICE)["ice"]["measured"] == 2
 
 
+def test_ice_thickness_is_calibrated_per_watch(world: World) -> None:
+    """The counts of an empty hole and the mean free path turn relative values into nanometres;
+    each user sets their own, and what is not set falls back on the session and the server."""
+    old_session(world, "public/shared", 30)
+    alice = world.watch("public/shared", ALICE)
+    bob = world.watch("public/shared", BOB)
+    world.run([], 30)
+    found = world.summary(alice, ALICE)["ice"]
+    assert found["measured"] == 30 and found["calibrated"] is False and found["i0"] is None
+    assert found["reference"] == found["session"] > 0 and found["mfp_nm"] is None
+
+    r = world.client.put(f"{WATCHES}/{alice}/ice", params={"i0": 80.5, "mfp": 395}, headers=ALICE)
+    assert r.status_code == 200
+    assert r.json() == {
+        "measured": 30,
+        "reference": 80.5,
+        "calibrated": True,
+        "session": found["session"],
+        "i0": 80.5,
+        "mfp_nm": 395.0,
+        "mfp_own": 395.0,
+    }
+    assert world.summary(alice, ALICE)["ice"] == r.json()
+    assert world.summary(bob, BOB)["ice"] == found  # hers, not his
+    world.restart()
+    assert world.summary(alice, ALICE)["ice"]["i0"] == 80.5  # kept with the watch
+    # what is left out is forgotten
+    cleared = world.client.put(f"{WATCHES}/{alice}/ice", params={"mfp": 300}, headers=ALICE).json()
+    assert (
+        cleared["calibrated"] is False
+        and cleared["reference"] == found["session"]
+        and cleared["mfp_nm"] == 300
+    )
+    assert world.client.put(f"{WATCHES}/{alice}/ice", headers=ALICE).json() == found
+
+    for params in ({"i0": 0}, {"i0": -3}, {"i0": "nan"}, {"mfp": 10}, {"mfp": 1e6}, {"i0": 5, "unit": "nm"}):
+        bad = world.client.put(f"{WATCHES}/{alice}/ice", params=params, headers=ALICE)
+        assert bad.status_code == 400 and bad.json()["error"]["code"] == "invalid_request", params
+    assert world.client.put(f"{WATCHES}/{alice}/ice", params={"i0": 5}, headers=BOB).status_code == 404
+    evil = world.client.put(
+        f"{WATCHES}/{alice}/ice", params={"i0": 5}, headers={**ALICE, "Origin": "https://evil.example"}
+    )
+    assert evil.status_code == 403
+
+
+def test_the_server_can_know_the_mean_free_path_of_its_microscope(tmp_path: Path) -> None:
+    tree = build_tree(tmp_path / "data")
+    (tree.base / "public/shared").mkdir()
+    world = World(tree, tmp_path / "state", live_mfp_nm=322.0)
+    try:
+        watch = world.watch("public/shared", ALICE)
+        assert world.summary(watch, ALICE)["ice"]["mfp_nm"] == 322.0
+        own = world.client.put(f"{WATCHES}/{watch}/ice", params={"mfp": 400}, headers=ALICE).json()
+        assert own["mfp_nm"] == 400 and own["mfp_own"] == 400  # a user's value comes first
+    finally:
+        world.client.__exit__(None, None, None)
+
+
 def test_measuring_can_be_turned_off(tmp_path: Path) -> None:
     tree = build_tree(tmp_path / "data")
     (tree.base / "public/shared").mkdir()
@@ -941,7 +999,8 @@ def test_measuring_can_be_turned_off(tmp_path: Path) -> None:
         watch = world.watch("public/shared", ALICE)
         world.run([], 30)
         assert [i["metrics"] for i in world.items(watch, ALICE)["items"]] == [None, None, None]
-        assert world.summary(watch, ALICE)["ice"] == {"measured": 0, "reference": None}
+        none = world.summary(watch, ALICE)["ice"]
+        assert (none["measured"], none["reference"]) == (0, None)
     finally:
         world.client.__exit__(None, None, None)
 

@@ -18,16 +18,19 @@ interface TileProps {
   size: number;
   /** Mean counts the images of the session are compared to; null: none yet. */
   reference: number | null;
+  /** The reference is the counts of an empty hole; and the mean free path in nm, if known. */
+  calibrated: boolean;
+  mfp: number | null;
   onOpen: (path: string) => void;
 }
 
-const Tile = memo(function Tile({ item, top, left, size, reference, onOpen }: TileProps) {
+const Tile = memo(function Tile({ item, top, left, size, reference, calibrated, mfp, onOpen }: TileProps) {
   const [failed, setFailed] = useState(false);
   const incoming = item.state !== "complete";
   const details = itemDetails(item);
-  const flags = incoming ? [] : imageFlags(item, reference);
-  const ice = incoming ? null : iceLabel(item, reference);
-  const title = [item.name, item.note, ...metricsLines(item, reference)].filter(Boolean).join("\n");
+  const flags = incoming ? [] : imageFlags(item, reference, calibrated);
+  const ice = incoming ? null : iceLabel(item, reference, mfp);
+  const title = [item.name, item.note, ...metricsLines(item, reference, mfp)].filter(Boolean).join("\n");
   // positions are set through the style object (CSSOM), which the page's CSP allows
   return (
     <button
@@ -70,15 +73,16 @@ const Tile = memo(function Tile({ item, top, left, size, reference, onOpen }: Ti
 });
 
 interface Props {
-  /** In acquisition order, oldest first. */
+  /** In the order they are shown. */
   items: LiveItem[];
-  newestFirst: boolean;
   tile: number;
   reference: number | null;
+  calibrated: boolean;
+  mfp: number | null;
   onOpen: (path: string) => void;
 }
 
-export function ImageGrid({ items, newestFirst, tile, reference, onOpen }: Props) {
+export function ImageGrid({ items, tile, reference, calibrated, mfp, onOpen }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
   const [scrollTop, setScrollTop] = useState(0);
@@ -103,10 +107,10 @@ export function ImageGrid({ items, newestFirst, tile, reference, onOpen }: Props
   const layout = gridLayout(items.length, box.width, box.height, scrollTop, tile, GAP);
   const tiles = [];
   for (let position = layout.first; position <= layout.last; position++) {
-    const item = items[newestFirst ? items.length - 1 - position : position];
+    const item = items[position];
     if (!item) continue;
     const { top, left } = tilePosition(position, layout.columns, tile, GAP);
-    tiles.push(<Tile key={item.id} item={item} top={top} left={left} size={tile} reference={reference} onOpen={onOpen} />);
+    tiles.push(<Tile key={item.id} item={item} top={top} left={left} size={tile} reference={reference} calibrated={calibrated} mfp={mfp} onOpen={onOpen} />);
   }
 
   return (

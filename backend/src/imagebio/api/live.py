@@ -151,6 +151,19 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         rules = AlertRules(names, no_image, disk_free, rate_drop)
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
 
+    @app.put("/api/live/watches/{watch_id}/ice")
+    def live_watch_ice_set(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        i0: float | None = Query(None),
+        mfp: float | None = Query(None),
+    ) -> Response:
+        """What the ice thickness of a watch is computed from: ``i0``, the mean counts of an
+        image through an empty hole, and ``mfp``, the mean free path in nanometres. What is
+        left out is forgotten (the brightest images of the session, the server's value)."""
+        _only(request, frozenset({"i0", "mfp"}))
+        return _json(live.set_ice(own_watch(request, watch_id), i0, mfp))
+
     @app.post("/api/live/watches/{watch_id}/alerts/test")
     def live_watch_alerts_test(request: Request, watch_id: int = _WATCH_ID) -> Response:
         """Send a test notice to the channels of the watch."""

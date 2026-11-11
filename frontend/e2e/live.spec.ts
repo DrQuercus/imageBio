@@ -226,5 +226,51 @@ test("images are measured: ice against the session, and a mark on crystalline ic
   await expect(tile).toContainText("glace cristalline");
   await expect(tile).toHaveAttribute("title", /Anneau de glace : ([2-9]|\d\d)\.\d\d/); // far above 1
   await expect(page.getByTestId("stat-ice-sub")).toContainText(/ · anneau [1-9]\d* %/);
+
+  // only the marked images, then every image sorted on its ice ring: that one first
+  await page.getByTestId("grid-filter").selectOption("flagged");
+  await expect(page.getByTestId("tile")).toHaveCount(1);
+  await expect(page.getByTestId("grid-count")).toHaveText(/^1 sur \d+ images$/);
+  await page.getByTestId("grid-filter").selectOption("clean");
+  await expect(page.locator(`[data-testid="tile"][data-name="${name}"]`)).toHaveCount(0);
+  await page.getByTestId("grid-filter").selectOption("all");
+  await page.getByTestId("grid-sort").selectOption("ring");
+  await expect(page.getByTestId("order")).toHaveText("Décroissant");
+  await expect(page.getByTestId("tile").first()).toHaveAttribute("data-name", name);
+  await page.getByTestId("grid-sort").selectOption("time");
+
+  // the counts of an empty hole and a mean free path: thickness in nanometres, empty holes marked
+  await expect(page.getByTestId("ice-mode")).toHaveText("Glace relative aux images les plus claires de la session.");
+  const reference = Number(await page.getByTestId("ice-i0").getAttribute("placeholder"));
+  expect(reference).toBeGreaterThan(0);
+  await page.getByTestId("ice-i0").fill(String(reference * Math.E)); // every image then has one free path of ice
+  await page.getByTestId("ice-mfp").fill("400");
+  await page.getByTestId("ice-save").click();
+  await expect(page.getByTestId("ice-saved")).toBeVisible();
+  await expect(page.getByTestId("ice-mode")).toHaveText("Épaisseur absolue : comparée au trou vide.");
+  await expect(page.getByTestId("stat-ice")).toHaveText(/^(39\d|40\d) nm$/);
+  await expect(page.getByTestId("tile").nth(3)).toContainText(/glace (39\d|40\d) nm/);
+  await expect(page.getByTestId("tile").nth(3)).toHaveAttribute("title", /Épaisseur de glace : (39\d|40\d) nm/);
+  // with a hole as bright as the images, they are empty holes
+  await page.getByTestId("ice-i0").fill(String(reference));
+  await page.getByTestId("ice-save").click();
+  await expect(page.locator('[data-testid="tile"][data-flags~="empty"]').first()).toContainText("trou vide");
+  await page.getByTestId("ice-mfp").fill("3"); // not a mean free path
+  await expect(page.getByTestId("ice-save")).toBeDisabled();
+  await page.getByTestId("ice-i0").fill("");
+  await page.getByTestId("ice-mfp").fill("");
+  await page.getByTestId("ice-save").click();
+  await expect(page.getByTestId("ice-mode")).toHaveText("Glace relative aux images les plus claires de la session.");
+  await expect(page.locator('[data-testid="tile"][data-flags~="empty"]')).toHaveCount(0);
+
+  // the overview images EPU takes on the way are another view of the same session
+  const squares = page.waitForResponse((r) => r.url().includes("/items?") && r.url().includes("category=gridsquare") && r.ok());
+  await page.getByTestId("grid-category").selectOption("gridsquare");
+  await squares;
+  await expect(page.getByTestId("tile")).toHaveCount(4); // one overview per grid square of the session
+  await expect(page.getByTestId("tile").first()).toHaveAttribute("data-name", /^GridSquare_/);
+  await expect(page.getByTestId("grid-count")).toHaveText("4 images");
+  await page.getByTestId("grid-category").selectOption("data");
+  await expect(page.getByTestId("tile").first()).toBeVisible();
   await expect(page.getByTestId("error")).toHaveCount(0);
 });

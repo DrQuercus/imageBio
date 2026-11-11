@@ -9,6 +9,7 @@ import type {
   AlertTestResult,
   ClassesResponse,
   GainCheck,
+  IceReference,
   LiveAlerts,
   LiveHistory,
   LivePage,
@@ -199,8 +200,12 @@ export const api = {
     summary: (id: number, signal?: AbortSignal) => getJson<LiveSummary>(`/api/live/watches/${id}`, signal),
 
     /** Exposures that changed since sequence number `since`. */
-    items: (id: number, since: number, limit: number, signal?: AbortSignal) =>
-      getJson<LivePage>(`/api/live/watches/${id}/items?${buildQuery({ since, limit })}`, signal),
+    items: (id: number, since: number, limit: number, signal?: AbortSignal, category?: string) =>
+      getJson<LivePage>(`/api/live/watches/${id}/items?${buildQuery({ since, limit, category })}`, signal),
+
+    /** The counts of an empty hole and the mean free path (nm) of a watch; null forgets one. */
+    setIce: (id: number, i0: number | null, mfp: number | null, signal?: AbortSignal) =>
+      getJson<IceReference>(`/api/live/watches/${id}/ice?${buildQuery({ i0: i0 ?? undefined, mfp: mfp ?? undefined })}`, signal, "PUT"),
 
     history: (id: number, bucket: number, signal?: AbortSignal) =>
       getJson<LiveHistory>(`/api/live/watches/${id}/history?${buildQuery({ bucket })}`, signal),

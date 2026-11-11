@@ -107,10 +107,18 @@ export function itemDetails(item: LiveItem): string {
   return parts.join(" · ");
 }
 
-/** The relative ice of an image as written in the corner of its tile; null: nothing to write. */
-export function iceLabel(item: LiveItem, reference: number | null): string | null {
+/** Ice thickness in nm, when the mean free path is known. */
+export function iceThickness(item: LiveItem, reference: number | null, mfp: number | null): number | null {
   const ice = relativeIce(item, reference);
-  return ice === null ? null : `glace ${ice.toFixed(2)}`;
+  return ice === null || !mfp ? null : ice * mfp;
+}
+
+/** The ice of an image as written in the corner of its tile: nanometres when the mean free
+ *  path is known, the relative value otherwise; null: nothing to write. */
+export function iceLabel(item: LiveItem, reference: number | null, mfp: number | null = null): string | null {
+  const ice = relativeIce(item, reference);
+  if (ice === null) return null;
+  return mfp ? `glace ${Math.round(ice * mfp)} nm` : `glace ${ice.toFixed(2)}`;
 }
 
 /** How much ice the beam went through, compared with the brightest images of the session:
@@ -128,35 +136,122 @@ export const ICE_RING_LIMIT = 1.2;
 /** Relative ice above which an image has a tenth of the counts of the reference: a grid bar,
  *  or ice too thick to see through. */
 export const DARK_ABOVE = Math.log(10);
+/** Relative ice under which an image is as bright as an empty hole (within 5 %). Only said
+ *  when the reference is the counts of an empty hole, not the brightest images of the session. */
+export const EMPTY_BELOW = 0.05;
 
-export type ImageFlag = "ice_ring" | "dark";
+export type ImageFlag = "ice_ring" | "dark" | "empty";
 
 export const FLAG_LABELS: Record<ImageFlag, { short: string; long: string }> = {
   ice_ring: { short: "glace cristalline", long: "Anneau de glace marqué : glace cristalline ou contamination" },
-  dark: { short: "très sombre", long: "Dix fois moins de coups que les images claires de la session : barreau de grille ou glace très épaisse" },
+  dark: { short: "très sombre", long: "Dix fois moins de coups que la référence : barreau de grille ou glace très épaisse" },
+  empty: { short: "trou vide", long: "Autant de coups qu'un trou vide : pas de glace" },
 };
 
-/** What is worth a mark on the tile of an image. */
-export function imageFlags(item: LiveItem, reference: number | null): ImageFlag[] {
+/** What is worth a mark on the tile of an image. `calibrated`: the reference is the counts of
+ *  an empty hole (given by the user), so an image as bright as it is one. */
+export function imageFlags(item: LiveItem, reference: number | null, calibrated = false): ImageFlag[] {
   const flags: ImageFlag[] = [];
   const ring = item.metrics?.ice_ring;
   if (typeof ring === "number" && ring > ICE_RING_LIMIT) flags.push("ice_ring");
   const ice = relativeIce(item, reference);
   if (ice !== null && ice > DARK_ABOVE) flags.push("dark");
+  if (ice !== null && calibrated && ice < EMPTY_BELOW) flags.push("empty");
   return flags;
 }
 
 /** The measurements of an image, one per line, for the tooltip of its tile. */
-export function metricsLines(item: LiveItem, reference: number | null): string[] {
+export function metricsLines(item: LiveItem, reference: number | null, mfp: number | null = null): string[] {
   const m = item.metrics;
   if (!m) return [];
   if (typeof m.mean !== "number") return ["Image illisible : pas de mesure"];
   const lines = [`Coups moyens : ${m.mean.toFixed(m.mean < 100 ? 2 : 0)}${m.estimated ? " (estimés sur les premières frames)" : ""}`];
   const ice = relativeIce(item, reference);
   if (ice !== null) lines.push(`Glace relative : ${ice.toFixed(2)} (ln I₀/I)`);
+  if (ice !== null && mfp) lines.push(`Épaisseur de glace : ${Math.round(ice * mfp)} nm`);
   if (typeof m.ice_ring === "number") lines.push(`Anneau de glace : ${m.ice_ring.toFixed(2)}`);
+  if (typeof m.drift === "number") lines.push(`Dérive entre le début et la fin : ${m.drift.toFixed(1)} ${m.drift_unit === "A" ? "Å" : "px"}`);
   return lines;
 }
+
+// ── order and choice of the tiles ────────────────────────────────────────────
+
+export type SortKey = "time" | "ice" | "ring" | "defocus" | "dose" | "drift";
+
+export const SORT_LABELS: Record<SortKey, string> = {
+  time: "Heure",
+  ice: "Glace",
+  ring: "Anneau de glace",
+  defocus: "Défocus",
+  dose: "Dose",
+  drift: "Dérive",
+};
+
+/** The value an image is sorted on; null: it has none (not measured, no metadata). */
+export function sortValue(item: LiveItem, key: SortKey, reference: number | null): number | null {
+  switch (key) {
+    case "time":
+      return itemTime(item);
+    case "ice":
+      return relativeIce(item, reference);
+    case "ring":
+      return item.metrics?.ice_ring ?? null;
+    case "defocus": {
+      const d = item.meta.epu?.applied_defocus ?? item.meta.mdoc?.defocus;
+      return typeof d === "number" ? Math.abs(d) : null;
+    }
+    case "dose": {
+      const d = item.meta.epu?.dose ?? item.meta.mdoc?.dose;
+      return typeof d === "number" ? d : null;
+    }
+    case "drift":
+      return item.metrics?.drift ?? null;
+  }
+}
+
+/** The images in display order. `items` come in acquisition order; images without the value
+ *  sorted on go last, whatever the direction, in acquisition order. */
+export function arrangeItems(items: LiveItem[], key: SortKey, descending: boolean, reference: number | null): LiveItem[] {
+  if (key === "time") return descending ? [...items].reverse() : items;
+  const valued: [number, number, LiveItem][] = [];
+  const rest: LiveItem[] = [];
+  items.forEach((item, position) => {
+    const value = sortValue(item, key, reference);
+    if (value === null || !Number.isFinite(value)) rest.push(item);
+    else valued.push([value, position, item]);
+  });
+  valued.sort((a, b) => (descending ? b[0] - a[0] : a[0] - b[0]) || a[1] - b[1]);
+  return [...valued.map((v) => v[2]), ...rest];
+}
+
+export type ItemFilter = "all" | "flagged" | "clean";
+
+export const FILTER_LABELS: Record<ItemFilter, string> = {
+  all: "Toutes",
+  flagged: "Marquées",
+  clean: "Sans marque",
+};
+
+/** The images a filter keeps: those with a mark (crystalline ice, very dark, empty hole), or
+ *  those that were measured and have none. */
+export function filterItems(items: LiveItem[], filter: ItemFilter, reference: number | null, calibrated: boolean): LiveItem[] {
+  if (filter === "all") return items;
+  return items.filter((item) => {
+    if (item.state !== "complete") return false;
+    const marked = imageFlags(item, reference, calibrated).length > 0;
+    return filter === "flagged" ? marked : !marked && typeof item.metrics?.mean === "number";
+  });
+}
+
+/** What the grid can show: the acquisitions, or the overview images EPU takes on the way. */
+export const CATEGORY_VIEWS = [
+  { key: "data", label: "Acquisitions", categories: "data,image" },
+  { key: "foilhole", label: "Trous", categories: "foilhole" },
+  { key: "gridsquare", label: "Carrés", categories: "gridsquare" },
+  { key: "atlas", label: "Atlas", categories: "atlas" },
+] as const;
+
+export type CategoryView = (typeof CATEGORY_VIEWS)[number]["key"];
 
 /** Median relative ice of the most recent measured images, and the share of them with a
  *  marked ice ring. null: no reference, or nothing measured. */

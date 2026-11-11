@@ -250,6 +250,10 @@ export interface ImageMetrics {
   /** True for a movie without an integrated image: the mean is scaled from its first frames. */
   estimated?: boolean;
   frames?: number;
+  /** Shift of the specimen between the first and the last frames of the movie, and its unit
+   *  ("A": ångströms, "px": pixels of the movie when its pixel size is unknown). */
+  drift?: number;
+  drift_unit?: "A" | "px";
 }
 
 export interface LivePage {
@@ -285,7 +289,22 @@ export interface LiveSummary {
   alerts: AlertCondition[];
   /** Images measured so far, and the mean counts of the brightest of them (the thinnest ice of
    *  the session, or none at all): what the others are compared to. null: too few yet. */
-  ice: { measured: number; reference: number | null };
+  ice: IceReference;
+}
+
+/** What the ice of a session is measured against (see relativeIce in live/store.ts). */
+export interface IceReference {
+  measured: number;
+  /** Mean counts the images are compared to: `i0` when the user gave it, else `session`. */
+  reference: number | null;
+  /** True when `reference` is the counts of an empty hole: thickness is then absolute. */
+  calibrated: boolean;
+  /** The counts of the brightest images of the session; null: too few measured yet. */
+  session: number | null;
+  i0: number | null;
+  /** Mean free path in nm (the user's, else the server's); null: relative values only. */
+  mfp_nm: number | null;
+  mfp_own: number | null;
 }
 
 export type AlertCondition = "no_image" | "disk" | "rate_drop" | "scanner";
