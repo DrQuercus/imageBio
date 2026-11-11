@@ -1,4 +1,4 @@
-"""Command line: ``imagebio serve`` and ``imagebio info``."""
+"""Command line: ``imagebio serve``, ``info``, ``simulate``, ``backup`` and ``restore``."""
 
 from __future__ import annotations
 
@@ -51,6 +51,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     simulate.add_argument("--size", type=int, default=512, help="side of the images in pixels (default: 512)")
     simulate.add_argument("--seed", type=int, default=0)
+
+    backup = sub.add_parser(
+        "backup", help="copy the Live index and the configuration into a new dated directory"
+    )
+    backup.add_argument("destination", type=Path, help="directory that receives the backups")
+    backup.add_argument(
+        "--config", metavar="FILE", help="configuration of the server (default: its defaults)"
+    )
+    restore = sub.add_parser("restore", help="put the Live index of a backup back (server stopped)")
+    restore.add_argument("source", type=Path, help="a directory written by 'imagebio backup'")
+    restore.add_argument(
+        "--config", metavar="FILE", help="configuration of the server (default: its defaults)"
+    )
+    restore.add_argument(
+        "--force", action="store_true", help="replace the index that is there (it is kept aside)"
+    )
     return parser
 
 
@@ -116,6 +132,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "simulate":
         return _simulate(args)
     try:
+        if args.command in ("backup", "restore"):
+            from imagebio.live import backup as backups
+
+            configured = Settings.load(args.config) if args.config else Settings()
+            if args.command == "backup":
+                made = backups.backup(
+                    configured, args.destination, Path(args.config) if args.config else None
+                )
+                print(f"backup written to {made}")
+            else:
+                manifest = backups.restore(configured, args.source, force=args.force)
+                print(
+                    f"Live index of {manifest['created']} restored, "
+                    f"{manifest['index']['watches']} watch(es): start the server"
+                )
+            return 0
         if args.command == "info":
             from imagebio.io.registry import open_dataset
 

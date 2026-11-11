@@ -18,9 +18,32 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Final
+from typing import IO, Final
 
-__all__ = ["SCHEMA_VERSION", "Index"]
+__all__ = ["LOCK_NAME", "SCHEMA_VERSION", "Index", "hold_state_dir"]
+
+#: A file next to the index on which a running server holds a shared lock, so that a restore
+#: (which wants it alone) can tell that the index is in use even when nothing is being written.
+LOCK_NAME: Final = "live.lock"
+
+
+def hold_state_dir(directory: Path, *, alone: bool = False) -> IO[str] | None:
+    """Take the lock of a state directory: shared for a server, exclusive (``alone``) for a
+    restore. Returns the open file that holds it (closing it releases the lock), None where
+    the system has no such locks. Raises :class:`BlockingIOError` when ``alone`` is asked and
+    somebody holds the directory."""
+    try:
+        import fcntl
+    except ImportError:  # not a POSIX system: no lock, and no check
+        return None
+    handle = open(directory / LOCK_NAME, "a")  # noqa: SIM115 - kept open as long as the lock is held
+    try:
+        fcntl.flock(handle, (fcntl.LOCK_EX | fcntl.LOCK_NB) if alone else fcntl.LOCK_SH)
+    except OSError:
+        handle.close()
+        raise BlockingIOError("the state directory is in use") from None
+    return handle
+
 
 SCHEMA_VERSION: Final = 6
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
@@ -185,7 +208,11 @@ class Index:
 
     def _open(self) -> sqlite3.Connection:
         # isolation_level None: transactions are explicit
-        db = sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S, isolation_level=None)
+        # each thread uses its own connection, but close() closes them all from one thread, so
+        # that the write-ahead log is folded into the file when the server stops
+        db = sqlite3.connect(
+            self._path, timeout=_BUSY_TIMEOUT_S, isolation_level=None, check_same_thread=False
+        )
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")
         if self._path != ":memory:":

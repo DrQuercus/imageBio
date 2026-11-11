@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -42,6 +44,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imagebio import __version__
 from imagebio.api.live import register_live_routes
+from imagebio.api.metrics import CONTENT_TYPE, TOKEN_VARIABLE, render_metrics
 from imagebio.api.security import SecurityMiddleware, current_user
 from imagebio.core.cache import options_key
 from imagebio.core.config import Settings
@@ -200,7 +203,8 @@ def create_app(
     app.state.service = service
     app.state.live = live
     app.state.roots = roots
-    app.add_middleware(SecurityMiddleware, settings=settings)
+    metrics_token = os.environ.get(TOKEN_VARIABLE) or None
+    app.add_middleware(SecurityMiddleware, settings=settings, metrics_token=metrics_token)
 
     # ── errors: JSON, no internals ───────────────────────────────────────────
     @app.exception_handler(ImageBioError)
@@ -274,6 +278,22 @@ def create_app(
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok", "version": __version__}
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics(request: Request) -> Response:
+        """Figures for a monitoring system (``api/metrics.py``). Off unless configured; then
+        for this computer only, or for the bearer of the token."""
+        _check_query(request, frozenset())
+        if not settings.metrics:
+            raise StarletteHTTPException(status_code=404)
+        if metrics_token is not None:
+            given = request.headers.get("authorization", "")
+            if not hmac.compare_digest(given.encode(), f"Bearer {metrics_token}".encode()):
+                return _error(401, "authentication_required", "a metrics token is required")
+        elif request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+            return _error(403, "access_denied", "metrics are served to this computer only")
+        body = render_metrics(service.cache_stats(), live.metrics())
+        return Response(body, media_type=CONTENT_TYPE, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/me")
     def me(request: Request) -> dict[str, Any]:

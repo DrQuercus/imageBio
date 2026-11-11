@@ -22,7 +22,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import IO, Any, Final
 
 from imagebio.core.config import Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
@@ -41,7 +41,7 @@ from imagebio.live.alerts import (
     notice_for,
     step,
 )
-from imagebio.live.index import Index
+from imagebio.live.index import Index, hold_state_dir
 from imagebio.live.metrics import Microscope, measure, measure_drift
 from imagebio.live.quality import QualityRules
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
@@ -136,6 +136,7 @@ class LiveService:
         self.clock = clock
         self._lock = threading.RLock()
         self._index_value: Index | None = None
+        self._held: IO[str] | None = None  # the lock of the state directory, while the index is open
         self._threads: dict[int, tuple[threading.Thread, threading.Event]] = {}
         #: Scanners told to stop that may still be finishing a cycle, by directory.
         self._retired: dict[int, threading.Thread] = {}
@@ -164,6 +165,7 @@ class LiveService:
             if self._index_value is None:
                 directory = self._settings.live_state_dir
                 directory.mkdir(parents=True, exist_ok=True)
+                self._held = hold_state_dir(directory)  # tells a restore that the index is in use
                 self._index_value = Index(directory / "live.sqlite")
             return self._index_value
 
@@ -186,6 +188,9 @@ class LiveService:
             if self._index_value is not None:
                 self._index_value.close()
                 self._index_value = None
+            if self._held is not None:
+                self._held.close()
+                self._held = None
 
     def _active_roots(self) -> dict[int, Path]:
         rows = self.index.connection().execute(
@@ -413,6 +418,42 @@ class LiveService:
             if len(rows) < _MEASURE_BATCH:
                 break
         return done
+
+    def metrics(self) -> dict[str, Any]:
+        """Figures for a monitoring system: no path, no user. Empty when the Live mode was
+        never used (the index is not created for the occasion)."""
+        index_file = self._settings.live_state_dir / "live.sqlite"
+        if not index_file.is_file():
+            return {}
+        db = self.index.connection()
+        now = self.clock()
+        states = dict.fromkeys(("active", "stopped"), 0)
+        for row in db.execute("SELECT active, COUNT(*) AS n FROM watches GROUP BY active"):
+            states["active" if row["active"] else "stopped"] = row["n"]
+        counts = {
+            row["root_id"]: row["n"]
+            for row in db.execute(
+                "SELECT root_id, COUNT(*) AS n FROM exposures WHERE state != 'deleted' GROUP BY root_id"
+            )
+        }
+        roots = [
+            {
+                "id": row["id"],
+                "age": now - row["cycle_at"] if row["cycle_at"] is not None else None,
+                "duration": row["cycle_ms"] / 1000 if row["cycle_ms"] is not None else None,
+                "failing": 1 if row["error"] else 0,
+                "pending": self._pending.get(row["id"], 0),
+                "exposures": counts.get(row["id"], 0),
+            }
+            for row in db.execute("SELECT id, cycle_at, cycle_ms, error FROM roots ORDER BY id")
+        ]
+        thumbs = db.execute("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM thumbs").fetchone()[0]
+        return {
+            "watches": states,
+            "roots": roots,
+            "index_bytes": index_file.stat().st_size,
+            "thumb_bytes": thumbs,
+        }
 
     # ── watches ──────────────────────────────────────────────────────────────
     def watches(self, user: str) -> list[WatchInfo]:

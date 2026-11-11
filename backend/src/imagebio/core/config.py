@@ -163,6 +163,9 @@ class Settings:
     port: int = 8000
     allowed_hosts: frozenset[str] = frozenset()
     trust_network: bool = False
+    #: Serve ``/metrics`` (Prometheus text format): to this computer only, or to whoever
+    #: presents the token of the environment variable IMAGEBIO_METRICS_TOKEN.
+    metrics: bool = False
     auth_mode: AuthMode = "none"
     user_header: str = "X-Forwarded-User"
     groups_header: str = "X-Forwarded-Groups"
@@ -280,7 +283,7 @@ class Settings:
         unknown_top = set(data) - {"server", "auth", "cache", "live", "microscope", "alerts", "roots"}
         if unknown_top:
             raise ConfigError(f"unknown section(s) {sorted(unknown_top)}")
-        server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
+        server = section("server", {"host", "port", "allowed_hosts", "trust_network", "metrics"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
         live = section(
@@ -346,6 +349,7 @@ class Settings:
             port=int(server.get("port", defaults.port)),
             allowed_hosts=frozenset(map(str, server.get("allowed_hosts", []))),
             trust_network=bool(server.get("trust_network", False)),
+            metrics=bool(server.get("metrics", False)),
             auth_mode=cast(AuthMode, str(auth.get("mode", defaults.auth_mode))),
             user_header=str(auth.get("user_header", defaults.user_header)),
             groups_header=str(auth.get("groups_header", defaults.groups_header)),

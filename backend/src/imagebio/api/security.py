@@ -104,12 +104,19 @@ class SecurityMiddleware:
     ``allowed_hosts``; its scheme by ``X-Forwarded-Proto``.
     """
 
-    def __init__(self, app: Callable[[Scope, Receive, Send], Awaitable[None]], settings: Settings) -> None:
+    def __init__(
+        self,
+        app: Callable[[Scope, Receive, Send], Awaitable[None]],
+        settings: Settings,
+        metrics_token: str | None = None,
+    ) -> None:
         self.app = app
         loopback = is_loopback_host(settings.host)
         self.allowed = (_LOOPBACK_NAMES | settings.allowed_hosts) if loopback else settings.allowed_hosts
         self.enforce = loopback or bool(settings.allowed_hosts)
         self.proxied = settings.auth_mode == "proxy"
+        # a scraper with the metrics token asks by whatever name it knows the server under
+        self.open_paths = _OPEN_PATHS | ({"/metrics"} if settings.metrics and metrics_token else set())
         self.public_names = settings.allowed_hosts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -141,7 +148,7 @@ class SecurityMiddleware:
 
         hosts = [value.decode("latin-1") for name, value in scope["headers"] if name == b"host"]
         known_host = len(hosts) == 1 and host_name(hosts[0]) in self.allowed
-        if self.enforce and scope["path"] not in _OPEN_PATHS and not known_host:
+        if self.enforce and scope["path"] not in self.open_paths and not known_host:
             await refuse("forbidden_host", "forbidden host")
             return
         if scope["method"] not in _SAFE_METHODS and not self._same_site(scope, hosts):
