@@ -1,0 +1,17 @@
+# Backup of the Live index and of the configuration: /etc/systemd/system/imagebio-backup.service
+# The server keeps running. The directory must belong to the account:
+#     install -d -o imagebio -g imagebio -m 0750 /var/backups/imagebio
+
+[Unit]
+Description=Backup of imageBio (Live index and configuration)
+
+[Service]
+Type=oneshot
+User=imagebio
+Group=imagebio
+ExecStart=/opt/imagebio/venv/bin/imagebio backup /var/backups/imagebio --config /etc/imagebio/imagebio.toml --keep 14
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/backups/imagebio /var/lib/imagebio

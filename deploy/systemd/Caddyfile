@@ -1,0 +1,31 @@
+# /etc/caddy/Caddyfile for imageBio installed without Docker, with local accounts.
+# Accounts: one "login hash" line per user in /etc/caddy/imagebio-users; a hash is made by
+# `caddy hash-password`. Then: caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+
+imagebio.lab.example {
+	# tls /etc/ssl/lab/fullchain.pem /etc/ssl/lab/privkey.pem
+	tls internal
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+
+	# monitoring is read on the server itself (127.0.0.1:8000), never through the proxy
+	handle /metrics {
+		respond 404
+	}
+
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		basic_auth {
+			import /etc/caddy/imagebio-users
+		}
+		reverse_proxy 127.0.0.1:8000 {
+			# whatever the browser sent under these names is replaced or removed
+			header_up X-Forwarded-User {http.auth.user.id}
+			header_up -X-Forwarded-Groups
+			header_up X-Imagebio-Proxy-Secret {$IMAGEBIO_PROXY_SECRET}
+		}
+	}
+}

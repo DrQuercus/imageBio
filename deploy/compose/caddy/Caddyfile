@@ -1,0 +1,30 @@
+# Local accounts: Caddy asks for a login and a password (file "users" next to this one) and
+# tells imageBio who it is. Variables come from .env through docker-compose.yml.
+
+{$IMAGEBIO_HOST} {
+	tls {$IMAGEBIO_TLS:internal}
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+
+	# monitoring is read from inside the "app" network, never through the proxy
+	handle /metrics {
+		respond 404
+	}
+
+	# open in imageBio too: says "ok" and the version
+	handle /healthz {
+		reverse_proxy imagebio:8000
+	}
+
+	handle {
+		basic_auth {
+			import users
+		}
+		reverse_proxy imagebio:8000 {
+			# whatever the browser sent under these names is replaced or removed
+			header_up X-Forwarded-User {http.auth.user.id}
+			header_up -X-Forwarded-Groups
+			header_up X-Imagebio-Proxy-Secret {$IMAGEBIO_PROXY_SECRET}
+		}
+	}
+}

@@ -58,6 +58,15 @@ jobs:
       - run: npm run e2e
         working-directory: frontend
 
+  deployment:
+    name: Deployment (image, Caddy stack, backup and restore)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # builds deploy/Dockerfile, runs deploy/compose/docker-compose.yml and checks it from outside
+      - run: deploy/compose/smoke-test.sh
+
   cryoviewer:
     name: CryoViewer (Python ${{ matrix.python }})
     runs-on: ubuntu-latest

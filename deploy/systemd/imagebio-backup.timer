@@ -1,0 +1,12 @@
+# /etc/systemd/system/imagebio-backup.timer  --  systemctl enable --now imagebio-backup.timer
+
+[Unit]
+Description=Daily backup of imageBio
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

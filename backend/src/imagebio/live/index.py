@@ -20,7 +20,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Final
 
-__all__ = ["LOCK_NAME", "SCHEMA_VERSION", "Index", "hold_state_dir"]
+__all__ = ["LOCK_NAME", "SCHEMA_VERSION", "Index", "IndexVersionError", "hold_state_dir"]
+
+
+class IndexVersionError(RuntimeError):
+    """The index was written by a newer version of the program: migrations only go forward."""
+
 
 #: A file next to the index on which a running server holds a shared lock, so that a restore
 #: (which wants it alone) can tell that the index is in use even when nothing is being written.
@@ -190,8 +195,10 @@ class Index:
         row = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() if known else None
         version = int(row[0]) if row else None  # None: a new index
         if version is not None and version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"the live index has schema version {version}, this program expects {SCHEMA_VERSION}"
+            raise IndexVersionError(
+                f"the Live index was written by a newer imageBio (index version {version}, this one "
+                f"reads up to {SCHEMA_VERSION}): install that version, or restore the backup taken "
+                "before the update (imagebio restore ... --force)"
             )
         if version is not None:
             for step in range(version, SCHEMA_VERSION):  # an index written by an earlier version

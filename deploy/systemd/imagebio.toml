@@ -1,0 +1,41 @@
+# /etc/imagebio/imagebio.toml for imageBio installed without Docker, behind a reverse proxy
+# on the same machine (deploy/systemd/Caddyfile).
+
+[server]
+host = "127.0.0.1"     # only the proxy of this machine reaches it
+port = 8000
+allowed_hosts = ["imagebio.lab.example"]   # the name users type
+metrics = true         # http://127.0.0.1:8000/metrics, for this machine only
+
+[auth]
+mode = "proxy"
+# The header that names the user. Decide before the first users arrive: watches and their
+# settings belong to that name, and changing the header later orphans them.
+user_header = "X-Forwarded-User"
+groups_header = "X-Forwarded-Groups"
+
+[cache]
+plane_bytes = "4GiB"   # decoded planes kept in memory
+thumb_bytes = "2GiB"   # thumbnails kept in the Live index (on disk)
+
+[live]
+state_dir = "/var/lib/imagebio"
+interval = 5           # seconds between two scans of a watched directory
+min_stable = 10        # a file must keep its size this long to be complete
+# drift = true         # also measure the drift of every movie (reads eight frames of each)
+# mean_free_path_nm = 395   # shows ice thickness in nm once I0 is given (depends on the microscope)
+
+[microscope]           # for the CTF, when a file does not say
+kv = 300
+cs_mm = 2.7
+amplitude_contrast = 0.07
+
+# Where the Live mode may send alerts: users pick a channel by its name and never see its address.
+# [[alerts.channels]]
+# name = "telephone"
+# kind = "ntfy"
+# url = "https://ntfy.sh/a-topic-hard-to-guess"
+
+[[roots]]
+name = "microscope"    # first component of every path users see
+path = "/srv/microscope"

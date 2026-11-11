@@ -1,0 +1,20 @@
+# Single sign-on: everything goes through oauth2-proxy, which authenticates the user, removes
+# the identity headers a browser may have sent and sets its own. Used by docker-compose.sso.yml.
+
+{$IMAGEBIO_HOST} {
+	tls {$IMAGEBIO_TLS:internal}
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+
+	# monitoring is read from inside the "app" network, never through the proxy
+	handle /metrics {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy oauth2-proxy:4180 {
+			# passed on to imageBio by oauth2-proxy with the rest of the request
+			header_up X-Imagebio-Proxy-Secret {$IMAGEBIO_PROXY_SECRET}
+		}
+	}
+}

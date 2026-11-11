@@ -169,6 +169,12 @@ class LiveService:
                 self._index_value = Index(directory / "live.sqlite")
             return self._index_value
 
+    def check(self) -> None:
+        """Open the index, if there is one, so that one this program cannot use (written by a
+        newer version, damaged) is found when the server starts, not at the first request."""
+        if (self._settings.live_state_dir / "live.sqlite").is_file():
+            _ = self.index
+
     def start(self) -> None:
         """Resume the watches that were active when the server stopped, if any were ever made."""
         if (self._settings.live_state_dir / "live.sqlite").is_file():

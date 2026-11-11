@@ -1,0 +1,65 @@
+# imageBio behind Caddy, with local accounts (a file of logins and password hashes read by
+# Caddy: caddy/users). For single sign-on, add docker-compose.sso.yml (see there).
+#
+#     cp env.example .env && chmod 600 .env     # then fill it in
+#     cp caddy/users.example caddy/users        # then add the accounts
+#     docker compose config --quiet             # checks this file and .env
+#     docker compose up -d --build
+#
+# NOT RUN in the session that wrote it (no Docker daemon there): `docker compose config`
+# accepts it, nothing more was verified. See docs/exploitation.md.
+
+name: imagebio
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "${IMAGEBIO_HTTP_PORT:-80}:80"
+      - "${IMAGEBIO_HTTPS_PORT:-443}:443"
+    environment:
+      IMAGEBIO_HOST: ${IMAGEBIO_HOST:?the name users type}
+      IMAGEBIO_TLS: ${IMAGEBIO_TLS:-internal}
+      IMAGEBIO_PROXY_SECRET: ${IMAGEBIO_PROXY_SECRET:?generate one with openssl rand -hex 32}
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # - /etc/ssl/lab:/certs:ro      # with IMAGEBIO_TLS=/certs/fullchain.pem /certs/privkey.pem
+    networks: [edge, app]
+    depends_on: [imagebio]
+
+  imagebio:
+    image: imagebio:${IMAGEBIO_VERSION:?the version to run}
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    user: "${IMAGEBIO_UID:?}:${IMAGEBIO_GID:?}"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      IMAGEBIO_PROXY_SECRET: ${IMAGEBIO_PROXY_SECRET:?generate one with openssl rand -hex 32}
+      IMAGEBIO_METRICS_TOKEN: ${IMAGEBIO_METRICS_TOKEN:-}
+      IMAGEBIO_SMTP_PASSWORD: ${IMAGEBIO_SMTP_PASSWORD:-}
+    volumes:
+      - ./imagebio.toml:/etc/imagebio/imagebio.toml:ro
+      - ${IMAGEBIO_STATE:?}:/var/lib/imagebio
+      - ${IMAGEBIO_BACKUPS:?}:/backups
+      # the data, read-only: one line per [[roots]] of imagebio.toml
+      - ${IMAGEBIO_DATA:?}:/data/microscope:ro
+    # "app" is where the proxy finds the server; "out" lets it send alerts (ntfy, mail)
+    networks: [app, out]
+
+networks:
+  edge:
+  app:
+    internal: true
+  out:
+
+volumes:
+  caddy_data:
+  caddy_config:

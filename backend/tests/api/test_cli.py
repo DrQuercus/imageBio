@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,14 @@ import numpy as np
 import pytest
 
 from imagebio.api import cli
+from imagebio.live.index import Index
+
+
+@pytest.fixture(autouse=True)
+def own_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`serve` looks at the Live index when it starts: never at the one of whoever runs the tests."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+    return tmp_path / "xdg" / "imagebio"
 
 
 def test_info_prints_the_dataset_description(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -84,6 +93,30 @@ def test_serve_configuration_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "refusing to listen on 0.0.0.0" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         cli.main(["serve"])  # neither --config nor --local
+
+
+def test_serve_refuses_an_index_it_cannot_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, own_state
+):
+    """After a rollback to the previous version, or on a damaged file: one line that says what
+    to do, when the server starts, not an error at the first request of the Live mode."""
+    monkeypatch.setattr("uvicorn.run", lambda *a, **kw: pytest.fail("the server must not start"))
+    (tmp_path / "data").mkdir()
+    own_state.mkdir(parents=True)
+    Index(own_state / "live.sqlite").close()
+    with sqlite3.connect(own_state / "live.sqlite") as db:
+        db.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
+    assert cli.main(["serve", "--local", str(tmp_path / "data")]) == 2
+    err = capsys.readouterr().err
+    assert "written by a newer imageBio (index version 99" in err and "restore the backup" in err
+    assert "Traceback" not in err and str(own_state) not in err
+
+    for leftover in own_state.iterdir():
+        leftover.unlink()
+    (own_state / "live.sqlite").write_bytes(b"what a failing disk leaves" * 400)
+    assert cli.main(["serve", "--local", str(tmp_path / "data")]) == 2
+    err = capsys.readouterr().err
+    assert "the Live index cannot be opened" in err and "restore a backup" in err
 
 
 def test_simulate_writes_a_session_a_scanner_understands(tmp_path, capsys):

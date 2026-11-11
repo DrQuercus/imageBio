@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +14,7 @@ from imagebio import __version__
 from imagebio.api.security import PROXY_SECRET_VARIABLE
 from imagebio.core.config import AlertChannel, ConfigError, Settings
 from imagebio.core.errors import ImageBioError
+from imagebio.live.index import IndexVersionError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -166,8 +168,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from imagebio.api.app import create_app
 
         app = create_app(settings)
-    except (ConfigError, ImageBioError) as e:
+        app.state.live.check()
+    except (ConfigError, ImageBioError, IndexVersionError) as e:
         print(f"imagebio: {e}", file=sys.stderr)
+        return 2
+    except sqlite3.DatabaseError as e:
+        print(
+            f"imagebio: the Live index cannot be opened ({e}): if another server is not using it, "
+            "restore a backup (imagebio restore ... --force)",
+            file=sys.stderr,
+        )
         return 2
 
     import uvicorn

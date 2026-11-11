@@ -1,0 +1,43 @@
+# imageBio without Docker: /etc/systemd/system/imagebio.service
+# Installation and the reverse proxy in front of it: docs/exploitation.md
+#
+#     systemd-analyze verify imagebio.service     # checks this file once installed
+
+[Unit]
+Description=imageBio (scientific image viewer, Cryo and Live modes)
+After=network-online.target remote-fs.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=imagebio
+Group=imagebio
+# IMAGEBIO_PROXY_SECRET, and optionally IMAGEBIO_METRICS_TOKEN, IMAGEBIO_SMTP_PASSWORD
+EnvironmentFile=/etc/imagebio/imagebio.env
+ExecStart=/opt/imagebio/venv/bin/imagebio serve --config /etc/imagebio/imagebio.toml
+Restart=on-failure
+RestartSec=5
+# /var/lib/imagebio, created and owned by the account above
+StateDirectory=imagebio
+StateDirectoryMode=0750
+UMask=0027
+
+# The server only reads the data and writes its state directory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

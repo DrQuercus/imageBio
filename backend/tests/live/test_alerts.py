@@ -26,7 +26,7 @@ from imagebio.live.alerts import (
     notice_for,
     step,
 )
-from imagebio.live.index import SCHEMA_VERSION, Index
+from imagebio.live.index import SCHEMA_VERSION, Index, IndexVersionError
 
 NOW = 1_800_000_000.0
 
@@ -540,5 +540,5 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     newer.execute("UPDATE meta SET value = '99' WHERE key = 'schema_version'")
     newer.commit()
     newer.close()
-    with pytest.raises(RuntimeError, match="schema version 99"):
+    with pytest.raises(IndexVersionError, match="index version 99, this one reads up to"):
         Index(path)

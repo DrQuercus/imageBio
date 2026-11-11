@@ -1,0 +1,23 @@
+# The image is built from the root of the repository (deploy/Dockerfile): only frontend/ and
+# backend/ go into it.
+.git
+.github
+docs
+legacy
+deploy
+**/node_modules
+**/dist
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+**/.venv
+**/venv
+backend/tests
+backend/src/imagebio/static
+frontend/e2e
+frontend/.e2e-data
+frontend/test-results
+frontend/playwright-report

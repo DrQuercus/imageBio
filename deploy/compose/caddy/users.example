@@ -1,0 +1,8 @@
+# Copy to "users" (same directory). One account per line: a login, then the hash of its
+# password. Make a hash (the password is asked for, not written on the command line):
+#
+#     docker run --rm -it caddy:2 caddy hash-password
+#
+# then reload:  docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+#
+# alice $2a$14$replace-this-with-the-output-of-caddy-hash-password
