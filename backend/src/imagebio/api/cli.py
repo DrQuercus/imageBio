@@ -59,6 +59,9 @@ def _parser() -> argparse.ArgumentParser:
     backup.add_argument(
         "--config", metavar="FILE", help="configuration of the server (default: its defaults)"
     )
+    backup.add_argument(
+        "--keep", type=int, metavar="N", help="then remove the oldest backups there, keeping N"
+    )
     restore = sub.add_parser("restore", help="put the Live index of a backup back (server stopped)")
     restore.add_argument("source", type=Path, help="a directory written by 'imagebio backup'")
     restore.add_argument(
@@ -141,6 +144,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     configured, args.destination, Path(args.config) if args.config else None
                 )
                 print(f"backup written to {made}")
+                if args.keep is not None:
+                    removed = backups.prune(args.destination, args.keep)
+                    print(f"{len(removed)} older backup(s) removed")
             else:
                 manifest = backups.restore(configured, args.source, force=args.force)
                 print(

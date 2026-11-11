@@ -14,11 +14,13 @@ import pytest
 from fixtures.api import ALICE, BOB, build_tree, make_client
 from imagebio.api import cli
 from imagebio.core.config import AlertChannel, ConfigError, Settings
-from imagebio.live.backup import INDEX_NAME, MANIFEST_NAME, backup, restore
+from imagebio.live import backup as backup_module
+from imagebio.live.backup import INDEX_NAME, MANIFEST_NAME, backup, prune, restore
 from imagebio.live.index import SCHEMA_VERSION
 from imagebio.live.simulator import mrc_bytes
 
 WATCHES = "/api/live/watches"
+THUMB = "/api/live/thumb"
 CHANNELS = (AlertChannel("phone", "ntfy", "https://ntfy.example/a-topic"),)
 
 
@@ -77,11 +79,22 @@ def test_the_state_of_a_server_is_lost_and_restored(tmp_path: Path) -> None:
         before = snapshot(client)
         assert len(before["alice"]["public/session"]["items"]) == 3
         assert before["alice"]["public/session"]["items"][0]["metrics"] is not None
+        thumb = client.get(THUMB, params={"path": "public/session/image_2.mrc", "size": 64}, headers=ALICE)
+        assert thumb.status_code == 200
 
         made = backup(settings, tmp_path / "backups", config)  # while the server runs
         manifest = json.loads((made / MANIFEST_NAME).read_text())
         assert manifest["index"]["schema_version"] == SCHEMA_VERSION and manifest["index"]["watches"] == 2
         assert manifest["config"] is True and (made / "imagebio.toml").read_text() == config.read_text()
+        # thumbnails are a cache: the server keeps them, the backup does not carry them
+        counts = [
+            sqlite3.connect(f"file:{where / INDEX_NAME}?mode=ro", uri=True)
+            .execute("SELECT COUNT(*) FROM thumbs")
+            .fetchone()[0]
+            for where in (state, made)
+        ]
+        assert counts == [1, 0]
+        assert {p.name for p in made.iterdir()} == {INDEX_NAME, "imagebio.toml", MANIFEST_NAME}
         with pytest.raises(ConfigError, match="in use: stop the server"):
             restore(settings, made, force=True)  # not under a running server
 
@@ -94,6 +107,8 @@ def test_the_state_of_a_server_is_lost_and_restored(tmp_path: Path) -> None:
     assert restored["created"] == manifest["created"]
     with serve(tree, state) as client:
         assert snapshot(client) == before  # watches, rules, thresholds, calibration, images and measurements
+        again = client.get(THUMB, params={"path": "public/session/image_2.mrc", "size": 64}, headers=ALICE)
+        assert again.status_code == 200 and again.content == thumb.content  # made again when asked for
         # and the server goes on from there
         client.app.state.live.scan_once(1_800_000_100.0)
         assert client.get(f"{WATCHES}/{alice}", headers=ALICE).json()["acquired"] == 3
@@ -166,7 +181,40 @@ def test_what_is_not_a_usable_backup_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "elsewhere" / INDEX_NAME).exists()  # nothing was put in place
 
 
-def test_backup_and_restore_from_the_command_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_old_backups_are_removed_and_nothing_else(tmp_path: Path) -> None:
+    tree = build_tree(tmp_path / "data")
+    state = tmp_path / "state"
+    with serve(tree, state) as client:
+        client.post(WATCHES, params={"path": "public"}, headers=ALICE)
+    where = tmp_path / "backups"
+    made = backup(Settings(state_dir=state), where)
+    for name in ("2026-01-01T000000Z", "2026-01-02T000000Z", "2026-01-03T000000Z"):
+        shutil.copytree(made, where / name)
+    (where / "2026-01-02T000000Z" / "notes.txt").write_text("why this one matters")  # not only a backup
+    (where / "2025-12-31T000000Z").mkdir()  # named like one, but holds no manifest
+    (where / "other").mkdir()
+    (where / "other" / MANIFEST_NAME).write_text("{}")
+    outside = tmp_path / "outside"
+    shutil.copytree(made, outside)
+    (where / "2026-01-04T000000Z").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="at least one"):
+        prune(where, 0)
+    assert prune(where, 1) == ["2026-01-01T000000Z", "2026-01-03T000000Z"]
+    assert sorted(p.name for p in where.iterdir()) == [
+        "2025-12-31T000000Z",
+        "2026-01-02T000000Z",
+        "2026-01-04T000000Z",
+        made.name,
+        "other",
+    ]
+    assert (outside / INDEX_NAME).is_file() and (where / "2026-01-02T000000Z" / INDEX_NAME).is_file()
+    assert prune(where, 5) == []
+
+
+def test_backup_and_restore_from_the_command_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     tree = build_tree(tmp_path / "data")
     state = tmp_path / "state"
     config = tmp_path / "imagebio.toml"
@@ -176,6 +224,14 @@ def test_backup_and_restore_from_the_command_line(tmp_path: Path, capsys: pytest
     assert cli.main(["backup", str(tmp_path / "backups"), "--config", str(config)]) == 0
     out = capsys.readouterr().out
     made = Path(out.strip().removeprefix("backup written to "))
+    monkeypatch.setattr(backup_module, "_now", lambda: made.name)  # a second one within the same second
+    assert cli.main(["backup", str(tmp_path / "backups"), "--config", str(config)]) == 2
+    assert "already exists there" in capsys.readouterr().err
+    monkeypatch.setattr(backup_module, "_now", lambda: "2031-05-06T070809Z")
+    assert cli.main(["backup", str(tmp_path / "backups"), "--config", str(config), "--keep", "1"]) == 0
+    assert "1 older backup(s) removed" in capsys.readouterr().out
+    assert [p.name for p in (tmp_path / "backups").iterdir()] == ["2031-05-06T070809Z"]
+    made = tmp_path / "backups" / "2031-05-06T070809Z"
     assert made.parent == tmp_path / "backups" and (made / INDEX_NAME).is_file()
     assert cli.main(["restore", str(made), "--config", str(config)]) == 2
     assert "already a Live index here" in capsys.readouterr().err

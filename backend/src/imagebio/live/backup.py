@@ -2,14 +2,16 @@
 rules, thresholds, what was indexed and measured) and the configuration file.
 
 The data themselves are read-only for imageBio and are not its to back up; caches are thrown
-away. A backup can be taken while the server runs (SQLite's online backup gives a consistent
-copy); a restore needs the server stopped.
+away, the thumbnails kept in the index among them (they are made again when asked for). A
+backup can be taken while the server runs (SQLite's online backup gives a consistent copy); a
+restore needs the server stopped.
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import re
 import shutil
 import sqlite3
 import time
@@ -20,11 +22,17 @@ from imagebio import __version__
 from imagebio.core.config import ConfigError, Settings
 from imagebio.live.index import SCHEMA_VERSION, hold_state_dir
 
-__all__ = ["INDEX_NAME", "MANIFEST_NAME", "backup", "restore"]
+__all__ = ["INDEX_NAME", "MANIFEST_NAME", "backup", "prune", "restore"]
 
 INDEX_NAME: Final = "live.sqlite"
 MANIFEST_NAME: Final = "manifest.json"
 _CONFIG_NAME: Final = "imagebio.toml"
+_STAMP: Final = re.compile(r"\d{4}-\d{2}-\d{2}T\d{6}Z")
+
+
+def _now() -> str:
+    """The name of a backup made now: its date (UTC), so that names sort by age."""
+    return time.strftime("%Y-%m-%dT%H%M%SZ", time.gmtime())
 
 
 def _schema_version(db: sqlite3.Connection) -> int:
@@ -48,7 +56,7 @@ def backup(settings: Settings, destination: Path, config: Path | None = None) ->
     """Write a backup into a new, dated directory under ``destination`` and return it. Holds a
     consistent copy of the Live index (if the Live mode was ever used), the configuration file
     ``config`` (if given) and a manifest."""
-    stamp = time.strftime("%Y-%m-%dT%H%M%SZ", time.gmtime())
+    stamp = _now()
     target = destination / stamp
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -62,9 +70,14 @@ def backup(settings: Settings, destination: Path, config: Path | None = None) ->
         # could not be read through a read-only connection
         with (
             contextlib.closing(sqlite3.connect(source, timeout=30)) as live,
-            contextlib.closing(sqlite3.connect(target / INDEX_NAME)) as copy,
+            contextlib.closing(sqlite3.connect(target / INDEX_NAME, isolation_level=None)) as copy,
         ):
             live.backup(copy)
+            # thumbnails are a cache, and by far the largest part of the index
+            copy.execute("DELETE FROM thumbs")
+            # one plain file, readable from a medium that cannot be written to
+            copy.execute("PRAGMA journal_mode = DELETE")
+            copy.execute("VACUUM")
         version, watches = _checked(target / INDEX_NAME)
         manifest["index"] = {
             "schema_version": version,
@@ -76,6 +89,28 @@ def backup(settings: Settings, destination: Path, config: Path | None = None) ->
         manifest["config"] = True
     (target / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
     return target
+
+
+def prune(destination: Path, keep: int) -> list[str]:
+    """Remove the oldest backups of ``destination`` so that ``keep`` remain, and return their
+    names. Only directories named and filled as :func:`backup` does are touched: one that
+    holds anything else is left alone."""
+    if keep < 1:
+        raise ConfigError("at least one backup must be kept")
+    made = sorted(
+        entry
+        for entry in destination.iterdir()
+        if _STAMP.fullmatch(entry.name) and not entry.is_symlink() and (entry / MANIFEST_NAME).is_file()
+    )
+    removed = []
+    for old in made[:-keep]:
+        if {entry.name for entry in old.iterdir()} - {INDEX_NAME, _CONFIG_NAME, MANIFEST_NAME}:
+            continue  # not only a backup: somebody put something there
+        for name in (INDEX_NAME, _CONFIG_NAME, MANIFEST_NAME):
+            (old / name).unlink(missing_ok=True)
+        old.rmdir()
+        removed.append(old.name)
+    return removed
 
 
 def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[str, Any]:
