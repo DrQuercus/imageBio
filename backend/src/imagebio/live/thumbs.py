@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import io
 import math
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 import numpy.typing as npt
@@ -41,23 +42,38 @@ def _to_bytes(plane: npt.NDArray[np.generic]) -> npt.NDArray[np.uint8]:
     return np.asarray(out, dtype=np.uint8)
 
 
-def render_thumbnail(planes: PlaneService, path: Path, px: int) -> bytes:
+def render_thumbnail(
+    planes: PlaneService,
+    path: Path,
+    px: int,
+    *,
+    t: int | None = None,
+    z: int | None = None,
+    options: Mapping[str, Any] | None = None,
+) -> bytes:
     """A JPEG of ``path`` whose longer side is at most ``px`` pixels.
 
     A movie is shown as the mean of its first frames, a volume as its middle section, a colour
-    picture in colour. Raises the errors of the plane service (corrupt file, unknown format…).
+    picture in colour. With ``t`` or ``z`` it is that one plane instead (an image of a stack,
+    a section of a volume), stretched on its own values. Raises the errors of the plane service
+    (corrupt file, unknown format, no such plane…).
     """
     px = max(MIN_PX, min(MAX_PX, int(px)))
-    info, _ = planes.info(path)
+    info, _ = planes.info(path, options)
     factor = min(MAX_BIN, max(1, math.ceil(max(info.size_x, info.size_y) / px)))
-    z = info.size_z // 2
+    one = t is not None or z is not None
+    t0 = t if t is not None else 0
+    z = z if z is not None else info.size_z // 2
     if info.rgb:
-        channels = [_to_bytes(planes.plane(path, 0, c, z, bin=factor).array) for c in range(3)]
+        channels = [
+            _to_bytes(planes.plane(path, t0, c, z, bin=factor, options=options).array) for c in range(3)
+        ]
         image = Image.fromarray(np.stack(channels, axis=-1), mode="RGB")
     else:
-        frames = min(info.size_t, _MOVIE_FRAMES)
+        frames = 1 if one else min(info.size_t, _MOVIE_FRAMES)
         proc = Processing(t_end=frames - 1) if frames > 1 else Processing()
-        image = Image.fromarray(_to_bytes(planes.plane(path, 0, 0, z, bin=factor, proc=proc).array), mode="L")
+        plane = planes.plane(path, t0, 0, z, bin=factor, options=options, proc=proc).array
+        image = Image.fromarray(_to_bytes(plane), mode="L")
     if max(image.size) > px:  # the binning factor is capped: finish with an area average
         ratio = px / max(image.size)
         size = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))

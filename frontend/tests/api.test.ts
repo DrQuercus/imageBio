@@ -62,6 +62,7 @@ describe("links", () => {
         lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true,
         picks: "cryo/job 5/particles.star", picksFlipY: true, picksDiameter: 180, picksMinScore: -0.25,
       },
+      gallery: true,
     };
     const link = formatLink(state);
     expect(link.startsWith("#path=cryo%2Fsession+1%2Fmovie.eer")).toBe(true);

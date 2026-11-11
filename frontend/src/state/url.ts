@@ -24,6 +24,8 @@ export interface LinkState {
   apix?: number;
   /** Cryo mode: filters, frame average, power spectrum. */
   cryo?: Partial<CryoSettings>;
+  /** The planes of the stack side by side instead of one plane in the viewer. */
+  gallery?: boolean;
 }
 
 const num = (value: string | null): number | undefined => {
@@ -90,6 +92,7 @@ export function parseLink(hash: string): LinkState {
     if (score !== undefined) cryo.picksMinScore = score;
   }
   if (Object.keys(cryo).length) state.cryo = cryo;
+  if (q.get("gal") === "1") state.gallery = true;
   return state;
 }
 
@@ -135,5 +138,6 @@ export function formatLink(state: LinkState): string {
       if (cryo.picksMinScore !== null && cryo.picksMinScore !== undefined) q.set("pms", short(cryo.picksMinScore));
     }
   }
+  if (state.gallery) q.set("gal", "1");
   return `#${q.toString()}`;
 }

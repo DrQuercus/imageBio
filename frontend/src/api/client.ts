@@ -7,6 +7,7 @@ import type {
   Dtype,
   AlertRules,
   AlertTestResult,
+  ClassesResponse,
   GainCheck,
   LiveAlerts,
   LiveHistory,
@@ -168,6 +169,14 @@ export const api = {
     options?: ReaderOptions,
     signal?: AbortSignal,
   ) => getJson<GainCheck>(`/api/cryo/gain/check?${buildQuery({ path, ...gain }, options)}`, signal),
+
+  /** Address of the small picture of one plane (a tile of the gallery of a stack). */
+  thumbUrl: (path: string, index: { t?: number; z?: number }, size: number, options: ReaderOptions) =>
+    `/api/datasets/thumb?${buildQuery({ path, ...index, size }, options)}`,
+
+  /** RELION's table of the classes whose averages are in `path`, when there is one. */
+  classes: (path: string, signal?: AbortSignal) =>
+    getJson<ClassesResponse>(`/api/cryo/classes?${buildQuery({ path })}`, signal),
 
   /** The particles a coordinate file holds for an image. */
   picks: (path: string, picks: string, options: ReaderOptions, signal?: AbortSignal) =>

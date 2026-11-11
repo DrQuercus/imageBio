@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { colourAt, type Debug, hoverPixel, openFile, ready, screenOf, trackPlanes } from "./helpers";
+import { colourAt, type Debug, hoverPixel, openFile, ready, screenOf, trackPlanes, trackRefused } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   page.on("dialog", () => {
@@ -212,3 +212,51 @@ test("browsing directories and keyboard shortcuts", async ({ page }) => {
   await page.keyboard.press("i");
   await expect(page.getByTestId("invert")).toHaveClass(/on/);
 });
+
+test("the planes of a stack side by side, and the classes of RELION with their shares", async ({ page }) => {
+  const refused = trackRefused(page);
+  const path = "demo/Class2D/run_it010_classes.mrcs";
+  await openFile(page, path);
+  await expect(page.getByTestId("gallery-toggle")).toBeVisible();
+  await page.getByTestId("gallery-toggle").click();
+  const tiles = page.getByTestId("gallery-tile");
+  await expect(tiles).toHaveCount(8);
+  // the model file next to the averages is found: the most populated class comes first
+  await expect(tiles.first()).toHaveAttribute("data-plane", "5");
+  await expect(tiles.first()).toContainText("6 · 40 % · 6.4 Å");
+  await expect(tiles.nth(1)).toContainText("7 · 20 % · 6.9 Å");
+  await expect(tiles.last()).toContainText("3 · 0.0 %"); // an empty class: no resolution
+  await expect.poll(() => tiles.first().locator("img").evaluate((img) => (img as HTMLImageElement).naturalWidth)).toBe(64);
+  await expect.poll(() => page.evaluate(() => window.location.hash)).toContain("gal=1");
+
+  await page.getByTestId("gallery-sort").click(); // by number
+  await expect(tiles.first()).toHaveAttribute("data-plane", "0");
+  await expect(page.getByTestId("gallery-sort")).toHaveText("Par numéro");
+  // larger tiles: fewer of them in a row, and larger pictures are not needed for 64-pixel averages
+  const before = await tiles.nth(1).boundingBox();
+  await page.getByTestId("gallery-size").fill("256");
+  const after = await tiles.nth(1).boundingBox();
+  expect(after!.width).toBe(256);
+  expect(after!.x).toBeGreaterThan(before!.x);
+
+  // a click shows that plane in the viewer: plane 4 holds the value 30 away from its disc
+  await tiles.nth(3).click();
+  await ready(page, path);
+  await expect(page.getByTestId("t-label")).toHaveText("Frame 4 / 8");
+  await hoverPixel(page, 2, 2);
+  await expect(page.getByTestId("hover-value")).toHaveText("30");
+  // back in the gallery (G), the plane on screen is outlined
+  await page.keyboard.press("g");
+  await expect(page.locator('[data-testid="gallery-tile"].current')).toHaveAttribute("data-plane", "3");
+
+  // a file with one plane has no gallery; a movie has one, without classes
+  await openFile(page, "demo/gradient.mrc");
+  await expect(page.getByTestId("gallery-toggle")).toHaveCount(0);
+  await page.goto(`/#path=${encodeURIComponent("demo/movie.mrc")}&gal=1`); // a link to a gallery
+  await expect(page.getByTestId("gallery")).toBeVisible();
+  await expect(page.getByTestId("gallery")).toHaveAttribute("data-count", "30");
+  await expect(page.getByTestId("gallery-sort")).toHaveCount(0);
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
+});
+

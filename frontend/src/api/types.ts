@@ -201,6 +201,21 @@ export interface LiveItem {
   metrics: ImageMetrics | null;
 }
 
+/** One class of a 2D classification, from RELION's model file. */
+export interface ClassInfo {
+  /** Plane of the class averages, 0-based. */
+  index: number;
+  /** Share of the particles, 0 to 1. */
+  distribution: number;
+  /** Estimated resolution in Å; null for an empty class. */
+  resolution: number | null;
+}
+
+export interface ClassesResponse {
+  model: string | null;
+  classes: ClassInfo[] | null;
+}
+
 /** Particle coordinates of one image (GET /api/cryo/picks). */
 export interface PicksResponse {
   format: "star" | "box" | "cbox" | "cs";

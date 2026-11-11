@@ -261,6 +261,12 @@ progress.disk.stalled { accent-color: var(--red); }
 .tile-info { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; padding: 3px 5px; background: rgba(5, 8, 12, 0.78); font: 10px var(--mono); color: var(--dim); text-align: left; white-space: nowrap; overflow: hidden; }
 .tile-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; direction: rtl; }
 .tile-flag { color: var(--amber); }
+.gallery { position: absolute; inset: 0; padding: 10px; }
+.gallery-tile { position: absolute; padding: 0; border: 1px solid var(--line); border-radius: 3px; background: #000; overflow: hidden; cursor: pointer; }
+.gallery-tile:hover { border-color: var(--accent); }
+.gallery-tile.current { border-color: var(--amber); }
+.gallery-tile img { width: 100%; height: 100%; object-fit: contain; display: block; image-rendering: auto; }
+.gallery-label { position: absolute; left: 0; right: 0; bottom: 0; padding: 1px 4px; background: rgba(5, 8, 12, 0.7); font: 10px var(--mono); color: var(--text); text-align: left; white-space: nowrap; overflow: hidden; }
 .tile-marks { position: absolute; top: 22px; left: 4px; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
 .tile-mark { padding: 1px 5px; border-radius: 3px; background: rgba(5, 8, 12, 0.82); border: 1px solid var(--amber); color: var(--amber); font: 10px var(--mono); }
 .tile-mark.dark { border-color: var(--dim); color: var(--text); }

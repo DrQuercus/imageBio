@@ -47,11 +47,13 @@ from imagebio.core.cache import options_key
 from imagebio.core.config import Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError
 from imagebio.core.model import FileId, json_safe
+from imagebio.cryo.classes import model_star_name, read_classes
 from imagebio.cryo.gain import N_ORIENTATIONS
 from imagebio.cryo.picks import read_picks
 from imagebio.fs.roots import MAX_PATH_LENGTH, ResolvedPath, RootSet, User
 from imagebio.io.registry import Registry, default_registry
 from imagebio.live.service import LiveService
+from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.proc.fourier import radial_profile
 from imagebio.service.planes import MAX_BIN, GainSpec, PlaneService, Processing
 
@@ -469,6 +471,53 @@ def create_app(
         }
         return Response(
             json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
+
+    @app.get("/api/datasets/thumb")
+    def dataset_thumb(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        t: int = Query(0, ge=0),
+        z: int = Query(0, ge=0),
+        size: int = Query(128, ge=MIN_PX, le=MAX_PX),
+    ) -> Response:
+        """One plane of a file as a small JPEG, binned by averaging and stretched on its own
+        values: a tile of the gallery of a stack (particles, class averages, sections)."""
+        options = _check_query(request, frozenset({"path", "t", "z", "size"}))
+        resolved = file_of(request, path)
+        _, file_id = service.info(resolved.real, options)
+        etag = _etag(file_id, "thumb", options_key(options), t, z, size)
+        headers = {"ETag": etag, "Cache-Control": "private, max-age=300"}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        data = render_thumbnail(service, resolved.real, size, t=t, z=z, options=options)
+        return Response(data, media_type="image/jpeg", headers=headers)
+
+    @app.get("/api/cryo/classes")
+    def cryo_classes(
+        request: Request, path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH)
+    ) -> Response:
+        """What RELION says of the class averages ``path`` (``*_classes.mrcs``): the share of
+        the particles and the resolution of each class, from the model file next to it.
+        ``classes`` is null when there is no such file."""
+        _check_query(request, frozenset({"path"}))
+        user, resolved = authorise(request, path)
+        if not resolved.is_file:
+            raise InvalidRequestError(f"not a file: {resolved.logical}")
+        directory, _, name = resolved.logical.rpartition("/")
+        model_name = model_star_name(name)
+        body: dict[str, Any] = {"model": None, "classes": None}
+        if model_name is not None:
+            try:
+                model = roots.resolve(f"{directory}/{model_name}", user)
+            except ImageBioError:
+                model = None
+            if model is not None and model.is_file:
+                body = {"model": model.logical, "classes": read_classes(model.real)}
+        return Response(
+            json.dumps(json_safe(body), allow_nan=False),
+            media_type="application/json",
+            headers={"Cache-Control": "private, no-cache"},
         )
 
     @app.get("/api/cryo/picks")

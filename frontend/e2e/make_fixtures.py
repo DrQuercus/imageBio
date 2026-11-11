@@ -89,6 +89,23 @@ def main(out: Path) -> None:
         "128.0 128.0 MotionCorr/job002/mic_002.mrc 0.5\n"
     )
 
+    # class averages as RELION writes them: plane k holds the value 10 k, with a disc so that it
+    # has something to show; the model file gives each class its share of the particles
+    (demo / "Class2D").mkdir(exist_ok=True)
+    cy, cx = np.mgrid[0:64, 0:64]
+    disc = ((cx - 32) ** 2 + (cy - 32) ** 2 < 20**2).astype(np.float32)
+    averages = np.stack([np.full((64, 64), 10.0 * k, np.float32) + (k + 1) * disc * (cx > 20 + 3 * k) for k in range(8)])
+    write_mrc(demo / "Class2D" / "run_it010_classes.mrcs", averages, 2.4, stack=True)
+    shares = [0.05, 0.10, 0.00, 0.15, 0.02, 0.40, 0.20, 0.08]
+    resolutions = ["9.1", "8.0", "inf", "7.2", "15.0", "6.4", "6.9", "11.3"]
+    rows = "".join(
+        f"{k + 1:06d}@Class2D/job008/run_it010_classes.mrcs {shares[k]:.6f} {resolutions[k]}\n" for k in range(8)
+    )
+    (demo / "Class2D" / "run_it010_model.star").write_text(
+        "data_model_general\n\n_rlnNrClasses 8\n\ndata_model_classes\n\nloop_\n_rlnReferenceImage #1\n"
+        "_rlnClassDistribution #2\n_rlnEstimatedResolution #3\n" + rows
+    )
+
     y, x = np.mgrid[0:48, 0:64]
 
     # value = 100 * y + x, 1.5 Å per pixel

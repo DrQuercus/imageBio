@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, isAbort } from "./api/client";
-import type { DatasetInfoResponse, Me, PicksResponse, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
+import type { ClassInfo, DatasetInfoResponse, Me, PicksResponse, PlaneIndex, PlaneStats, ReaderOptions } from "./api/types";
 import { ContrastPanel } from "./components/ContrastPanel";
 import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
 import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
+import { Gallery } from "./viewer/Gallery";
+import { galleryAxis, type GallerySort, isClassAverages } from "./viewer/gallery";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
@@ -46,6 +48,10 @@ export function App({ onLive }: { onLive: () => void }) {
   const [shown, setShown] = useState("");
   const [copied, setCopied] = useState(false);
   const [picks, setPicks] = useState<PicksResponse | null>(null);
+  const [gallery, setGallery] = useState(initial.gallery ?? false);
+  const [gallerySort, setGallerySort] = useState<GallerySort>("index");
+  const [galleryTile, setGalleryTile] = useState(128);
+  const [classes, setClasses] = useState<ClassInfo[] | null>(null);
   const [picksError, setPicksError] = useState<string | null>(null);
 
   // What is on screen. Every request for pixels is built from these values only: the file as
@@ -142,6 +148,7 @@ export function App({ onLive }: { onLive: () => void }) {
       setDisplay((d) => ({ ...d, auto: true, ...link.display }));
       setUserApix(link.apix ?? null);
       setCryo({ ...NO_CRYO, ...link.cryo });
+      setGallery(link.gallery ?? false);
       setRuler(null);
       setPlaying(false);
     };
@@ -189,6 +196,31 @@ export function App({ onLive }: { onLive: () => void }) {
     [picks, cryo.picksFlipY, cryo.picksDiameter, cryo.picksMinScore, info?.shape.x, info?.shape.y],
   );
   const usePicks = useCallback((file: string) => setCryo((c) => ({ ...c, picks: file, picksMinScore: null })), []);
+
+  // ── gallery of a stack ─────────────────────────────────────────────────────
+  const axis = info ? galleryAxis(info) : null;
+  const galleryOn = gallery && axis !== null;
+  useEffect(() => {
+    setClasses(null);
+    setGallerySort("index");
+    if (!shownPath || !galleryOn || !isClassAverages(shownPath)) return;
+    const controller = new AbortController();
+    api
+      .classes(shownPath, controller.signal)
+      .then((r) => {
+        setClasses(r.classes);
+        if (r.classes) setGallerySort("population"); // as RELION shows them
+      })
+      .catch((e) => !isAbort(e) && setError(message(e)));
+    return () => controller.abort();
+  }, [shownPath, etag, galleryOn]);
+  const openPlane = useCallback(
+    (plane: number) => {
+      if (axis) setIndex((i) => ({ ...i, [axis]: plane }));
+      setGallery(false);
+    },
+    [axis],
+  );
 
   const changeDisplay = useCallback(
     (patch: Partial<DisplaySettings>) => {
@@ -241,15 +273,15 @@ export function App({ onLive }: { onLive: () => void }) {
   // ── the view in the address bar ────────────────────────────────────────────
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo });
+      const link = formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo, gallery });
       window.history.replaceState(null, "", link || window.location.pathname);
     }, 200);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, indexKey, optionsKey, view, display, userApix, cryo]);
+  }, [path, indexKey, optionsKey, view, display, userApix, cryo, gallery]);
 
   const copyLink = () => {
-    const link = window.location.origin + window.location.pathname + formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo });
+    const link = window.location.origin + window.location.pathname + formatLink({ path: path ?? undefined, index, options, view: view ?? undefined, display, apix: userApix ?? undefined, cryo, gallery });
     void navigator.clipboard?.writeText(link).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
@@ -273,6 +305,7 @@ export function App({ onLive }: { onLive: () => void }) {
         case "i": case "I": changeDisplay({ invert: !display.invert }); break;
         case "r": case "R": setTool((t) => (t === "ruler" ? "pan" : "ruler")); break;
         case "p": case "P": setCryo((c) => ({ ...c, spectrum: !c.spectrum })); break;
+        case "g": case "G": setGallery((g) => !g); break;
         case "Escape": setTool("pan"); setRuler(null); break;
         case "f": case "F": case "0": setView(null); break;
         case "1": setView((v) => v && { ...v, zoom: 1 }); break;
@@ -306,6 +339,23 @@ export function App({ onLive }: { onLive: () => void }) {
           <button onClick={() => zoomBy(1.25)} title="Zoom avant (+)" aria-label="Zoom avant">+</button>
           <button onClick={() => zoomBy(1 / 1.25)} title="Zoom arrière (-)" aria-label="Zoom arrière">−</button>
         </div>
+        {axis && info && (
+          <div className="group">
+            <button className={galleryOn ? "on" : ""} onClick={() => setGallery((g) => !g)} title="Tous les plans de la pile côte à côte (G)" data-testid="gallery-toggle">
+              Galerie
+            </button>
+            {galleryOn && classes && (
+              <button onClick={() => setGallerySort((s) => (s === "index" ? "population" : "index"))} data-testid="gallery-sort"
+                title="Ordre des classes : par numéro, ou les plus peuplées d'abord">
+                {gallerySort === "population" ? "Par population" : "Par numéro"}
+              </button>
+            )}
+            {galleryOn && (
+              <input type="range" min={64} max={256} step={16} value={galleryTile} aria-label="Taille des vignettes" data-testid="gallery-size"
+                onChange={(e) => setGalleryTile(Number(e.target.value))} />
+            )}
+          </div>
+        )}
         <span className="spacer" />
         {path && <button onClick={copyLink} data-testid="copy-link">{copied ? "Lien copié" : "Copier le lien"}</button>}
         {me && me.auth_mode !== "none" && <span className="user">{me.user}</span>}
@@ -323,7 +373,10 @@ export function App({ onLive }: { onLive: () => void }) {
               <button onClick={() => setError(null)} aria-label="Fermer">×</button>
             </div>
           )}
-          {response && info ? (
+          {response && info && galleryOn && axis ? (
+            <Gallery path={response.path} options={shownOptions} axis={axis} count={info.shape[axis]} current={index[axis]}
+              classes={classes} sort={gallerySort} tile={galleryTile} onOpen={openPlane} />
+          ) : response && info ? (
             <ViewerCanvas
               key={`${response.path}|${etag}|${shownOptionsKey}`}
               path={response.path}
