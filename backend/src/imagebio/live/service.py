@@ -41,7 +41,7 @@ from imagebio.live.alerts import (
     step,
 )
 from imagebio.live.index import Index
-from imagebio.live.metrics import measure, measure_drift
+from imagebio.live.metrics import Microscope, measure, measure_drift
 from imagebio.live.scanner import CycleReport, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -353,7 +353,16 @@ class LiveService:
         while not (stop is not None and stop.is_set()):
             rows = self._unmeasured(root_id, scanner.measuring)
             for row in rows:
-                apix = json.loads(row["meta"]).get("epu", {}).get("pixel_size")
+                epu = json.loads(row["meta"]).get("epu", {})
+                apix = epu.get("pixel_size")
+                microscope = None
+                if self._settings.live_ctf:  # the voltage the acquisition itself gives comes first
+                    kv = epu.get("voltage")
+                    microscope = Microscope(
+                        kv if isinstance(kv, int | float) and 20 <= kv <= 1500 else self._settings.kv,
+                        self._settings.cs_mm,
+                        self._settings.amplitude_contrast,
+                    )
                 path = root.joinpath(*[part for part in row["rel"].split("/") if part], row["primary_name"])
                 try:
                     metrics = measure(
@@ -361,6 +370,7 @@ class LiveService:
                         path,
                         row["primary_role"],
                         apix if row["primary_role"] == "image" and isinstance(apix, int | float) else None,
+                        microscope,
                     )
                 except (ImageBioError, OSError, ValueError):
                     metrics = {}

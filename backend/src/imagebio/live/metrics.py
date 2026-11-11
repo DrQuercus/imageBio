@@ -16,18 +16,21 @@ exposure, and said to be an estimate).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
 import numpy.typing as npt
 
+from imagebio.proc.ctf import estimate_ctf
 from imagebio.proc.fourier import power_spectrum, radial_profile
 from imagebio.service.planes import MAX_BIN, PlaneService, Processing
 
 __all__ = [
     "ICE_BAND",
     "ICE_SIDES",
+    "Microscope",
     "ice_ring_ratio",
     "measure",
     "measure_drift",
@@ -109,8 +112,21 @@ def ice_ring_ratio(plane: npt.NDArray[Any], apix: float) -> float | None:
     return ice / around
 
 
-def measure_plane(plane: npt.NDArray[Any], apix: float | None) -> dict[str, Any]:
-    """The measurements of one image; a value that cannot be measured is left out."""
+@dataclass(frozen=True, slots=True)
+class Microscope:
+    """What a CTF estimate needs to know of the microscope."""
+
+    kv: float = 300.0
+    cs_mm: float = 2.7
+    amplitude: float = 0.07
+
+
+def measure_plane(
+    plane: npt.NDArray[Any], apix: float | None, microscope: Microscope | None = None
+) -> dict[str, Any]:
+    """The measurements of one image; a value that cannot be measured is left out. With a
+    ``microscope``, the CTF is estimated too (``ctf``: defocus in µm, resolution of the fit in
+    Å, score), when the image shows Thon rings."""
     out: dict[str, Any] = {}
     stats = robust_mean_std(plane)
     if stats is not None:
@@ -119,12 +135,29 @@ def measure_plane(plane: npt.NDArray[Any], apix: float | None) -> dict[str, Any]
         ratio = ice_ring_ratio(plane, apix)
         if ratio is not None:
             out["ice_ring"] = round(ratio, 4)
+        if microscope is not None and 0.05 <= apix <= 20:
+            found = estimate_ctf(
+                plane, apix, kv=microscope.kv, cs_mm=microscope.cs_mm, amplitude=microscope.amplitude
+            )
+            if found is not None:
+                out["ctf"] = {
+                    "defocus": round(found.defocus_um, 3),
+                    "fit": round(found.fit_resolution, 2),
+                    "score": round(found.score, 1),
+                }
     return out
 
 
-def measure(planes: PlaneService, path: Path, role: str, apix: float | None = None) -> dict[str, Any]:
+def measure(
+    planes: PlaneService,
+    path: Path,
+    role: str,
+    apix: float | None = None,
+    microscope: Microscope | None = None,
+) -> dict[str, Any]:
     """Measure the image file ``path`` (``role``: "image" or "movie"). ``apix``: the pixel size
-    to use when the file does not know its own (Å). Raises the errors of the plane service."""
+    to use when the file does not know its own (Å). ``microscope``: estimate the CTF too.
+    Raises the errors of the plane service."""
     info, _ = planes.info(path)
     if info.rgb:
         return {}  # a picture, not counts
@@ -132,7 +165,7 @@ def measure(planes: PlaneService, path: Path, role: str, apix: float | None = No
     proc = Processing(t_end=frames - 1) if frames > 1 else Processing()
     plane = planes.plane(path, 0, 0, info.size_z // 2, proc=proc).array
     known = info.calibration.x.to_angstrom()
-    out = measure_plane(plane, known if known is not None else apix)
+    out = measure_plane(plane, known if known is not None else apix, microscope)
     if role == "movie" and info.size_t > 1 and "mean" in out:
         # per frame so far, and from the first frames only: the exposure is all its frames
         out["mean"] *= info.size_t

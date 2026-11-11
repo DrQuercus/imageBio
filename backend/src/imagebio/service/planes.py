@@ -34,6 +34,7 @@ from imagebio.cryo.gain import (
 )
 from imagebio.io.registry import Registry, default_registry
 from imagebio.proc.binning import bin_mean, binned_shape, crop
+from imagebio.proc.ctf import CtfEstimate, estimate_ctf
 from imagebio.proc.fourier import fourier_crop, fourier_filter, power_spectrum
 from imagebio.proc.stats import PlaneStats, plane_stats
 
@@ -151,6 +152,7 @@ class PlaneService:
         self.max_plane_bytes = 4 * 2**30
         self._stats: OrderedDict[Hashable, PlaneStats] = OrderedDict()
         self._gain_checks: OrderedDict[Hashable, GainCheck] = OrderedDict()
+        self._ctfs: OrderedDict[Hashable, CtfEstimate | None] = OrderedDict()
         self._stats_lock = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────────────────
@@ -352,6 +354,50 @@ class PlaneService:
                 lambda: power_spectrum(self._source(dataset, file_id, okey, t, c, z, source), tile=tile)[0],
             )
         return power, file_id
+
+    def ctf(
+        self,
+        path: Path,
+        t: int = 0,
+        c: int = 0,
+        z: int = 0,
+        *,
+        options: Mapping[str, Any] | None = None,
+        proc: Processing = NO_PROCESSING,
+        kv: float = 300.0,
+        cs_mm: float = 2.7,
+        amplitude: float = 0.07,
+    ) -> tuple[CtfEstimate | None, FileId]:
+        """The CTF of plane ``(t, c, z)`` after the frame average and the gain of ``proc``
+        (``proc.apix`` when the file does not know its pixel size); None when its spectrum
+        shows no Thon rings. Resolution filters are ignored, as for the spectrum."""
+        file_id = FileId.of(path)
+        okey = options_key(options)
+        source = proc.unfiltered
+        with self._pool.lease(path, options, file_id=file_id) as dataset:
+            dataset.check_index(t, c, z)
+            apix = proc.apix or dataset.info.calibration.x.to_angstrom()
+            if not apix:
+                raise InvalidRequestError("pixel size unknown: give it (apix, in Å) to estimate the CTF")
+            if dataset.info.rgb:
+                raise InvalidRequestError("a colour picture has no CTF")
+            key = (file_id, okey, t, c, z, source.key(), apix, kv, cs_mm, amplitude)
+            with self._stats_lock:
+                if key in self._ctfs:
+                    self._ctfs.move_to_end(key)
+                    return self._ctfs[key], file_id
+            found = estimate_ctf(
+                self._source(dataset, file_id, okey, t, c, z, source),
+                apix,
+                kv=kv,
+                cs_mm=cs_mm,
+                amplitude=amplitude,
+            )
+        with self._stats_lock:
+            self._ctfs[key] = found
+            while len(self._ctfs) > _GAIN_CHECK_CACHE_ITEMS:
+                self._ctfs.popitem(last=False)
+        return found, file_id
 
     def gain_check(self, path: Path, gain: GainSpec, options: Mapping[str, Any] | None = None) -> GainCheck:
         """Which orientation of ``gain`` flattens the movie ``path`` best, judged on the mean

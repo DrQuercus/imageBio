@@ -448,6 +448,43 @@ def create_app(
             json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
         )
 
+    @app.get("/api/datasets/ctf")
+    def dataset_ctf(
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=MAX_PATH_LENGTH),
+        t: int = Query(0, ge=0),
+        c: int = Query(0, ge=0),
+        z: int = Query(0, ge=0),
+        t_end: int | None = Query(None, ge=0),
+        apix: float | None = Query(None, gt=0),
+        kv: float | None = Query(None),
+        cs: float | None = Query(None),
+        amp: float | None = Query(None),
+        gain: GainSpec | None = Depends(gain_of),
+    ) -> Response:
+        """A quick estimate of the CTF of a plane from its power spectrum: defocus (µm,
+        positive underfocus), the resolution up to which its Thon rings are found, and the
+        zeros of the fit. ``kv``, ``cs`` (mm) and ``amp`` default to the server's microscope.
+        ``found`` is false when the spectrum shows no rings. Astigmatism is not measured."""
+        options = _check_query(request, _SPECTRUM_PARAMS - {"tile"} | {"apix", "kv", "cs", "amp"})
+        resolved = file_of(request, path)
+        scope = {
+            "kv": settings.kv if kv is None else kv,
+            "cs_mm": settings.cs_mm if cs is None else cs,
+            "amplitude": settings.amplitude_contrast if amp is None else amp,
+        }
+        proc = Processing(t_end=t_end, gain=gain, apix=apix)
+        found, file_id = service.ctf(resolved.real, t, c, z, options=options, proc=proc, **scope)
+        gain_key = gain.key() if gain is not None else None
+        etag = _etag(file_id, "ctf", options_key(options), t, c, z, t_end, gain_key, apix, *scope.values())
+        headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
+        if _not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        body = {"found": found is not None, **scope, **(found.to_json() if found is not None else {})}
+        return Response(
+            json.dumps(json_safe(body), allow_nan=False), media_type="application/json", headers=headers
+        )
+
     @app.get("/api/cryo/gain/check")
     def cryo_gain_check(
         request: Request,

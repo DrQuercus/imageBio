@@ -44,6 +44,91 @@ def client(tree: Tree):
         yield c
 
 
+CTF = "/api/datasets/ctf"
+
+
+@pytest.fixture(scope="module")
+def thon(tree: Tree) -> Tree:
+    """Two micrographs of known defocus (1.8 µm at 300 kV, 1.0 Å per pixel), one without rings."""
+    from fixtures.ctf import micrograph
+
+    rng = np.random.default_rng(61)
+    with mrcfile.new(tree.base / "public/thon.mrc") as m:
+        m.set_data(micrograph((1024, 1024), 1.0, 1.8, rng))
+        m.voxel_size = 1.0
+    tifffile.imwrite(tree.base / "public/thon_nocal.tif", micrograph((1024, 1024), 1.0, 1.2, rng))
+    with mrcfile.new(tree.base / "public/flat.mrc") as m:
+        m.set_data(rng.normal(10, 1, (1024, 1024)).astype(np.float32))
+        m.voxel_size = 1.0
+    return tree
+
+
+def test_the_ctf_of_an_image_through_the_api(client, thon: Tree):
+    r = client.get(CTF, params={"path": "public/thon.mrc"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["found"] is True and body["defocus_um"] == pytest.approx(1.8, rel=0.02)
+    assert (body["kv"], body["cs_mm"], body["amplitude"], body["apix"]) == (300.0, 2.7, 0.07, 1.0)
+    assert 3.4 < body["fit_resolution"] < 7 and body["correlation"] > 0.7 and body["tile"] == 1024
+    # the first zero: where the phase reaches pi, 1 / sqrt((1 - asin(A) / pi) / (lambda * defocus))
+    first_zero = 1 / np.sqrt((1 - np.arcsin(0.07) / np.pi) / (0.019687 * 1.8e4))
+    assert body["zeros"][0] == pytest.approx(first_zero, rel=0.02)
+    assert body["zeros"] == sorted(body["zeros"], reverse=True)
+    assert (
+        client.get(
+            CTF, params={"path": "public/thon.mrc"}, headers={"If-None-Match": r.headers["etag"]}
+        ).status_code
+        == 304
+    )
+    # read with another microscope, the same rings mean another defocus: the parameters count
+    other = client.get(CTF, params={"path": "public/thon.mrc", "kv": 200, "cs": 1.4, "amp": 0.1}).json()
+    assert (other["kv"], other["cs_mm"], other["amplitude"]) == (200.0, 1.4, 0.1)
+    assert other["defocus_um"] == pytest.approx(1.8 * 0.019687 / 0.025079, rel=0.04)
+    assert (
+        other != body
+        and r.headers["etag"]
+        != client.get(CTF, params={"path": "public/thon.mrc", "kv": 200}).headers["etag"]
+    )
+
+    # no rings: said so, without a number
+    flat = client.get(CTF, params={"path": "public/flat.mrc"}).json()
+    assert flat == {"found": False, "kv": 300.0, "cs_mm": 2.7, "amplitude": 0.07}
+    # a file that does not know its pixel size needs one
+    unknown = client.get(CTF, params={"path": "public/thon_nocal.tif"})
+    assert unknown.status_code == 400 and "pixel size unknown" in unknown.json()["error"]["message"]
+    typed = client.get(CTF, params={"path": "public/thon_nocal.tif", "apix": 1.0}).json()
+    assert typed["found"] is True and typed["defocus_um"] == pytest.approx(1.2, rel=0.02)
+
+
+@pytest.mark.parametrize(
+    ("params", "status"),
+    [
+        ({"path": "public/thon.mrc", "kv": 5}, 400),
+        ({"path": "public/thon.mrc", "cs": -1}, 400),
+        ({"path": "public/thon.mrc", "amp": 0.9}, 400),
+        ({"path": "public/thon.mrc", "apix": 0}, 400),
+        ({"path": "public/thon.mrc", "t": 1}, 400),
+        ({"path": "public/thon.mrc", "lp": 10}, 400),  # filters do not apply to a spectrum
+        ({"path": "light/rgb.png", "apix": 1.0}, 400),
+        ({"path": "public"}, 400),
+        ({"path": "public/missing.mrc"}, 404),
+        ({"path": "../outside/secret.mrc"}, 403),
+        ({"path": "cryo/session/notes.txt"}, 415),
+    ],
+)
+def test_bad_ctf_requests(client, thon: Tree, params, status):
+    r = client.get(CTF, params=params)
+    assert r.status_code == status, r.text
+    assert str(thon.base) not in r.text
+
+
+def test_the_server_knows_its_microscope(thon: Tree):
+    with make_client(thon, kv=200.0, cs_mm=1.4, amplitude_contrast=0.1) as glacios:
+        body = glacios.get(CTF, params={"path": "public/thon.mrc"}).json()
+        assert (body["kv"], body["cs_mm"], body["amplitude"]) == (200.0, 1.4, 0.1)
+        assert glacios.get(CTF, params={"path": "public/thon.mrc", "kv": 300}).json()["kv"] == 300.0
+
+
 def naive_fourier_crop(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """The low frequencies of the whole complex transform, cut out around its centre. Along an
     axis reduced to an even size, the frequencies +n/2 and -n/2 of the image both become the

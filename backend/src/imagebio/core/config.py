@@ -179,6 +179,13 @@ class Settings:
     live_scan: bool = True
     #: Measure each image of a watched session (mean counts, ice ring): reads every image once.
     live_metrics: bool = True
+    #: Estimate the CTF of each image of a watched session (defocus, how far the rings go).
+    live_ctf: bool = True
+    #: The microscope, for the CTF: accelerating voltage (kV, used when a file does not say),
+    #: spherical aberration (mm) and amplitude contrast.
+    kv: float = 300.0
+    cs_mm: float = 2.7
+    amplitude_contrast: float = 0.07
     #: Also measure how far each movie drifted between its first and last frames: reads eight
     #: frames of every movie that arrives. Off unless asked for.
     live_drift: bool = False
@@ -213,6 +220,10 @@ class Settings:
             raise ConfigError("cache sizes must be positive")
         if not 0.5 <= self.live_interval_s <= 3600 or self.thumb_cache_bytes < 0:
             raise ConfigError("live.interval must be between 0.5 and 3600 seconds")
+        if not (20 <= self.kv <= 1500 and 0 <= self.cs_mm <= 20 and 0 <= self.amplitude_contrast <= 0.5):
+            raise ConfigError(
+                "microscope: kv must be 20 to 1500, cs_mm 0 to 20 and amplitude_contrast 0 to 0.5"
+            )
         if self.live_mfp_nm is not None and not 50 <= self.live_mfp_nm <= 5000:
             raise ConfigError("live.mean_free_path_nm must be between 50 and 5000 (nanometres)")
         if not 1 <= self.live_min_stable_s <= 3600:
@@ -266,15 +277,17 @@ class Settings:
                 raise ConfigError(f"[{name}]: unknown key(s) {sorted(unknown)}")
             return sec
 
-        unknown_top = set(data) - {"server", "auth", "cache", "live", "alerts", "roots"}
+        unknown_top = set(data) - {"server", "auth", "cache", "live", "microscope", "alerts", "roots"}
         if unknown_top:
             raise ConfigError(f"unknown section(s) {sorted(unknown_top)}")
         server = section("server", {"host", "port", "allowed_hosts", "trust_network"})
         auth = section("auth", {"mode", "user_header", "groups_header"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
         live = section(
-            "live", {"state_dir", "interval", "min_stable", "scan", "metrics", "drift", "mean_free_path_nm"}
+            "live",
+            {"state_dir", "interval", "min_stable", "scan", "metrics", "ctf", "drift", "mean_free_path_nm"},
         )
+        microscope = section("microscope", {"kv", "cs_mm", "amplitude_contrast"})
         alerts = section("alerts", {"smtp", "channels"})
         raw_channels = alerts.get("channels", [])
         if not isinstance(raw_channels, list):
@@ -345,6 +358,10 @@ class Settings:
             live_scan=bool(live.get("scan", True)),
             live_metrics=bool(live.get("metrics", True)),
             live_drift=bool(live.get("drift", False)),
+            live_ctf=bool(live.get("ctf", True)),
+            kv=float(microscope.get("kv", defaults.kv)),
+            cs_mm=float(microscope.get("cs_mm", defaults.cs_mm)),
+            amplitude_contrast=float(microscope.get("amplitude_contrast", defaults.amplitude_contrast)),
             live_mfp_nm=float(live["mean_free_path_nm"]) if "mean_free_path_nm" in live else None,
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),

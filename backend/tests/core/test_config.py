@@ -84,8 +84,13 @@ interval = 2
 min_stable = 6
 scan = false
 metrics = false
+ctf = false
 drift = true
 mean_free_path_nm = 322
+[microscope]
+kv = 200
+cs_mm = 1.4
+amplitude_contrast = 0.1
 """)
     s = Settings.load(cfg)
     assert (s.live_interval_s, s.live_min_stable_s, s.live_scan) == (2.0, 6.0, False)
@@ -97,11 +102,18 @@ mean_free_path_nm = 322
     assert Settings().live_state_dir == tmp_path / "xdg" / "imagebio"
     assert s.live_mfp_nm == 322.0 and Settings().live_mfp_nm is None
     assert s.live_drift is True and Settings().live_drift is False  # reading frames is asked for
+    assert s.live_ctf is False and Settings().live_ctf is True
+    assert (s.kv, s.cs_mm, s.amplitude_contrast) == (200.0, 1.4, 0.1)
+    assert (Settings().kv, Settings().cs_mm, Settings().amplitude_contrast) == (300.0, 2.7, 0.07)
     for bad in (
         "[live]\ninterval = 0.1",
         "[live]\nmin_stable = 0",
         "[live]\npoll = 3",
         "[live]\nmean_free_path_nm = 3",
+        "[microscope]\nkv = 3",
+        "[microscope]\ncs_mm = -1",
+        "[microscope]\namplitude_contrast = 0.9",
+        "[microscope]\nvoltage = 300",
     ):
         cfg.write_text(bad)
         with pytest.raises(ConfigError):

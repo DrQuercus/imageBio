@@ -917,9 +917,9 @@ def test_an_image_that_cannot_be_read_is_not_measured_again(
     calls: list[str] = []
     real = service.measure
 
-    def counting(planes, path, role, apix=None):
+    def counting(planes, path, *args):
         calls.append(path.name)
-        return real(planes, path, role, apix)
+        return real(planes, path, *args)
 
     monkeypatch.setattr(service, "measure", counting)
     watch = world.watch("public/shared", ALICE)
@@ -1030,6 +1030,44 @@ def test_the_drift_of_movies_is_measured_when_asked_for(tmp_path: Path) -> None:
                 assert item["metrics"]["mean"] == before["metrics"]["mean"]  # the image, as before
             else:
                 assert "drift" not in item["metrics"]
+        finally:
+            world.client.__exit__(None, None, None)
+
+
+def test_the_ctf_of_each_image_is_estimated(tmp_path: Path) -> None:
+    """Images that show Thon rings get a defocus and the resolution of the fit; the others
+    get none, and the estimate can be turned off."""
+    from fixtures.ctf import micrograph
+
+    rng = np.random.default_rng(71)
+    images = {
+        "with_rings": micrograph((1024, 1024), 1.0, 2.2, rng),
+        "without": rng.normal(5, 1, (1024, 1024)),
+    }
+    for ctf_on in (True, False):
+        tree = build_tree(tmp_path / f"data{ctf_on}")
+        session = tree.base / "public/shared"
+        session.mkdir()
+        world = World(tree, tmp_path / f"state{ctf_on}", live_ctf=ctf_on)
+        try:
+            watch = world.watch("public/shared", ALICE)
+            world.run([], 5)
+            for name, pixels in images.items():
+                (session / f"{name}.mrc").write_bytes(mrc_bytes(pixels.astype(np.float32), 1.0))
+                os.utime(session / f"{name}.mrc", (world.now, world.now))
+            os.utime(session, (world.now, world.now))
+            world.run([], 40)
+            items = {i["name"]: i["metrics"] for i in world.items(watch, ALICE)["items"]}
+            assert "ctf" not in items["without"] and "mean" in items["without"]
+            if ctf_on:
+                ctf = items["with_rings"]["ctf"]
+                assert (
+                    ctf["defocus"] == pytest.approx(2.2, rel=0.02)
+                    and 3.4 < ctf["fit"] < 7
+                    and ctf["score"] > 8
+                )
+            else:
+                assert "ctf" not in items["with_rings"]
         finally:
             world.client.__exit__(None, None, None)
 
