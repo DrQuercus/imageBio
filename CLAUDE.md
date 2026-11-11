@@ -30,6 +30,7 @@ Network-deployed scientific image application (web): ImageJ-style viewer/editor 
 - Routes that change something (POST, PUT, DELETE) are refused when another site sends them (`SecurityMiddleware`); a watch belongs to its user and its directory is re-authorised on every request.
 - Alert destinations (`live/alerts.py`) come from the server configuration only: a user picks a channel by name, never gives an address, and never gets one back. A changed index schema bumps `SCHEMA_VERSION` with a migration in `live/index.py`.
 - An alert condition only changes state through `step()` (pure), and delivery is tracked per channel: never resend to a channel that already took the notice. A new condition needs its entry in `HOLD_S` and, if its value can hover around a threshold, a margin in `evaluate(..., told)`.
+- Only the scanner numbers changes (`seq`): what is measured on pixels (`live/metrics.py`) is handed to it with `add_metrics` and enters the index at its next cycle. A spectral ratio is only reported when the field holds enough points (512 px): on small images it is noise.
 - One scanner per watched directory at a time (`_retired` in `live/service.py`). Nothing a scanner or a notifier does may hold the index write lock for long: walk and send outside the transaction.
 
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)

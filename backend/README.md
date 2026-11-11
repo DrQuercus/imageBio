@@ -36,6 +36,7 @@ plane_bytes = "4GiB"
 state_dir = "/var/lib/imagebio"            # index des sessions suivies et vignettes (SQLite)
 interval = 5                               # secondes entre deux passages sur un dossier surveillé
 min_stable = 10                            # un fichier doit garder sa taille ce temps pour être complet
+# metrics = false                          # ne pas mesurer les images (chaque mesure lit l'image en entier)
 
 [[alerts.channels]]                        # où le mode Live peut envoyer ses alertes
 name = "telephone"                         # le nom que les utilisateurs choisissent
@@ -121,6 +122,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Par utilisateur.** Une surveillance appartient à celui qui l'a créée ; le dossier est autorisé de nouveau à chaque requête. Huit surveillances actives au plus par utilisateur, et les 32 dernières surveillances arrêtées ; les plus anciennes sont oubliées.
 - **Index occupé.** Une requête qui doit écrire pendant que l'index est tenu par une autre écriture attend, puis reçoit `503` (`live_index_busy`) avec `Retry-After` : elle peut être renvoyée telle quelle.
 - **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
+- **Mesures.** Après chaque passage, quelques images sont mesurées : coups moyens et écart-type (pixels chauds écartés), rapport de l'anneau de glace (puissance entre 3,40 et 3,95 Å sur celle des bandes voisines ; donné si le champ fait au moins 512 pixels et le pixel au plus 1,5 Å). Elles apparaissent dans `metrics` de chaque exposition (`null` : pas encore mesurée ; `{}` : image illisible), avec un nouveau numéro de séquence. Le résumé donne dans `ice` le nombre d'images mesurées et la référence de la session (les coups des images les plus claires) : la glace relative d'une image est `ln(référence / mean)`. Toutes les images arrivées pendant la surveillance sont mesurées, et les 200 plus récentes d'une session trouvée déjà écrite.
 - **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse ; un canal en panne est retenté seul, cinq fois au plus, sans que les autres reçoivent le message de nouveau. Pour quitter une condition, il faut une marge (disque : un dixième du seuil, au moins un demi-point) et deux minutes sans elle ; une chute de débit doit durer deux minutes avant d'être annoncée, et ne se juge qu'au-dessus de 60 images dans l'heure. Les règles s'arrêtent une semaine après la dernière visite de la surveillance par son utilisateur. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
 
 ## Traitements du mode Cryo
@@ -171,6 +173,7 @@ src/imagebio/
   live/service.py    surveillances par utilisateur, scrutateurs partagés, résumé, vignettes
   live/thumbs.py     vignettes binnées par moyenne
   live/alerts.py     règles d'alerte, jugement, envoi (ntfy, webhook, e-mail)
+  live/metrics.py    mesures sur une image : coups moyens, rapport de l'anneau de glace
   live/simulator.py  microscope simulé (tests et démonstration)
   fs/roots.py        chemins logiques et confinement dans les racines
   service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques

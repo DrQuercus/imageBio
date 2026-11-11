@@ -372,9 +372,9 @@ Critères d'acceptation :
 - Les alertes partent en moins de 2 cycles de scrutation.
 - **Le serveur Node est éteint.**
 
-**Avancement de M3 (11 novembre 2026) : cœur et alertes faits et relus, métriques d'image à faire.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend un essai sur une vraie session. La conception est dans l'[ADR 007](adr/007-live.md).
+**Avancement de M3 (11 novembre 2026) : cœur et alertes faits et relus, premières métriques d'image faites.** Cinq critères d'acceptation sur six passent ; le sixième (éteindre le serveur Node) attend un essai sur une vraie session. La conception est dans l'[ADR 007](adr/007-live.md).
 
-Fait (196 tests côté backend pour le Live, 18 tests unitaires et 5 tests de bout en bout côté interface) :
+Fait (211 tests côté backend pour le Live, 22 tests unitaires et 6 tests de bout en bout côté interface) :
 - **Scrutateur indexé dans SQLite** (`live/scanner.py`, `live/index.py`) : un dossier n'est relu que si sa date a changé ; seuls les fichiers pas encore complets sont suivis un par un ; passage complet toutes les 10 minutes ; un passage est une transaction.
 - **Test de complétude** (`live/completeness.py`) : taille stable sur deux passages espacés de 10 s, contrôle d'intégrité du format, et `.xml` d'EPU présent pour une acquisition EPU.
 - **Parseurs** EPU XML (`cryo/epu.py`) et mdoc SerialEM/Tomo5 (`cryo/mdoc.py`) : taille de pixel, dose, défocus visé, horodatage, position de platine, référence de gain EER.
@@ -397,9 +397,14 @@ Critères d'acceptation :
 | Les alertes partent en moins de 2 cycles de scrutation | Oui : les règles sont jugées juste après chaque passage. Avec le microscope et l'horloge simulés, le message part au plus 10 s après le franchissement du seuil, et le message « résolu » au plus 10 s après la première image acceptée |
 | Le serveur Node est éteint | **Pas encore.** L'interface couvre la grille, l'état, le débit et les alertes ; à éteindre après un essai sur une vraie session |
 
+- **Mesures sur chaque image** (`live/metrics.py`) : coups moyens et écart-type sans les pixels chauds, et **rapport de l'anneau de glace** (puissance entre 3,40 et 3,95 Å rapportée aux bandes voisines, sur le périodogramme moyenné du champ central). Elles sont faites après chaque passage, dans un budget de temps, et arrivent à l'interface comme n'importe quel changement. L'interface affiche sur chaque tuile la **glace relative** ln(I₀/I), où I₀ est le niveau des images les plus claires de la session, marque la glace cristalline (rapport au-dessus de 1,2) et les images dix fois plus sombres que les autres, et résume les 50 dernières images dans une carte. Environ 0,3 s par image 4K.
+
 Reste à faire dans M3 :
-- **Métriques par image** tirées des pixels : comptes moyens et épaisseur de glace, trou vide, spectre de puissance rapide et rapport de l'anneau de glace, dérive entre demi-sommes. Seules les métriques tirées du XML (dose, défocus visé, horodatage) sont là.
-- Filtres et tri dans la grille (par défocus, par dose), vues des carrés et de l'atlas, graphes cumulés.
+- **Épaisseur de glace en nanomètres** : il manque le libre parcours moyen du microscope (300 à 400 nm, à étalonner) et un I₀ mesuré dans un trou vide. La glace relative affichée est à multiplier par ce libre parcours.
+- **Indicateur de trou vide** : sans I₀ étalonné, une image très claire peut être un trou vide ou la glace la plus fine de la session ; rien n'est affiché plutôt qu'une marque fausse.
+- **Dérive entre demi-sommes** : elle demande de lire les frames du film (plusieurs centaines de Mo par exposition) ; pas faite.
+- Visibilité des anneaux de Thon, saturation.
+- Filtres et tri dans la grille (par défocus, par dose, par glace), vues des carrés et de l'atlas, graphes cumulés.
 
 Écarts par rapport au plan :
 - **Pas de WebSocket** : l'interface demande toutes les trois secondes ce qui a changé depuis le dernier numéro de séquence qu'elle connaît. Ce sont les mêmes deltas, sans connexion longue à faire passer par le reverse proxy (ADR 007).
@@ -410,6 +415,8 @@ Reste à faire dans M3 :
 - **Non essayé sur une vraie session.** Les XML d'EPU, les mdoc et l'arborescence viennent de la documentation ; un essai sur un dossier de session réel (même terminé) est le premier à faire. Le comportement sur NFS ou SMB (cache d'attributs, dates des dossiers) n'a pas été mesuré : tout a tourné sur disque local.
 - **Alertes non essayées contre de vrais services.** L'envoi vers ntfy suit sa forme JSON documentée et a été vérifié contre un récepteur local, pas contre ntfy.sh ; l'e-mail contre un faux relais. Le bouton « Tester » du panneau est fait pour cette vérification, une fois le canal configuré. Pas d'alerte « le Live lui-même est arrêté » : elle demande un témoin extérieur au serveur.
 - **Le message d'alerte part chez un tiers** quand le canal est un service public (ntfy.sh) : il contient le chemin logique de la session et le nombre d'images. C'est l'administrateur qui choisit les canaux.
+- **Mesures limitées pour une session ouverte après coup** : chaque mesure lit l'image en entier. Toutes les images qui arrivent pendant la surveillance sont mesurées ; d'une session trouvée déjà écrite, seulement les 200 plus récentes. `[live] metrics = false` coupe les mesures.
+- **Le rapport de l'anneau de glace n'est donné que si le champ fait au moins 512 pixels de côté et le pixel au plus 1,5 Å.** En dessous, les bandes contiennent trop peu de points du spectre : sur du bruit pur, le rapport varie de 20 % sur une image de 64 pixels, et une image sur cinq passait pour de la glace cristalline (trouvé par un test de bout en bout). Le seuil de 1,2 vient des usages de cryoSPARC et n'a pas été confronté à de vraies images.
 - **Débit en chute** : la règle ne s'applique qu'au-dessus de 60 images dans l'heure. En dessous, cinq minutes contiennent trop peu d'images pour distinguer une chute du hasard ; la règle « plus d'image depuis N minutes » est celle des sessions lentes.
 - **Relecture indépendante du Live** (un agent neuf, sur le scrutateur, l'index, le service, les alertes et les routes). Le test de complétude au fil de l'eau, les contrôles d'intégrité, le cloisonnement entre utilisateurs, l'absence d'adresse ou de chemin serveur dans les réponses, les requêtes SQL, les numéros de séquence et la migration de l'index ont été vérifiés et trouvés corrects. Treize défauts ont été trouvés et corrigés, chacun avec un test de régression qui échoue sur l'ancien code :
   - **Grave : un lien symbolique mis à la place d'un dossier déjà indexé était suivi**, ce qui faisait indexer, et donc lire par vignette, un dossier hors de la racine. Chaque dossier est maintenant revérifié à chaque listing.
@@ -648,7 +655,7 @@ imageBio/
 
 **Premier message suggéré pour la prochaine session (fin de M3 et de M4, ou M5) :**
 
-> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. Termine le jalon M3 : métriques d'image du Live (comptes moyens, anneau de glace, dérive). Ou, si c'est la priorité : la suite de M4 (pointés STAR, `.cs`, `.box`, galeries de particules), ou M5 (cœur ImageJ). Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
+> Lis `docs/PLAN.md` (sections 3 et 4, avec l'avancement de M1 à M4), `backend/README.md`, `frontend/README.md` et les ADR. Termine le jalon M3 : épaisseur de glace étalonnée, dérive, tri et filtres de la grille, puis l'essai sur une vraie session. Ou, si c'est la priorité : la suite de M4 (pointés STAR, `.cs`, `.box`, galeries de particules), ou M5 (cœur ImageJ). Tous les critères d'acceptation du jalon doivent passer. Travaille directement, commits atomiques, puis pousse la branche.
 
 ---
 
