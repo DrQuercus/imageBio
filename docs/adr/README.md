@@ -13,3 +13,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [007](007-live.md) | Mode Live : scrutation par dossier, index SQLite, suivi par numéro de séquence | Acceptée |
 | [008](008-pointes-et-galeries.md) | Pointés et galeries : lus par le serveur, jamais retournés d'office | Acceptée |
 | [009](009-perimetre-cryo-et-live.md) | Périmètre recentré sur le cryo et le suivi en direct : pas de cœur ImageJ | Acceptée |
+| [010](010-exploitation.md) | Exploitation : pile réduite, secret partagé avec le proxy, sauvegarde de l'index, `/metrics` | Acceptée |

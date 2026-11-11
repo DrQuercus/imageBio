@@ -554,15 +554,36 @@ Le worker ImageJ et Bio-Formats de la première version de ce jalon est retiré 
 L'authentification et les racines par groupe existent dès M1. Ce jalon durcit l'exploitation.
 
 **Livrables :**
-- Pile docker-compose (Caddy, oauth2-proxy, application, Redis, workers), et unités systemd pour le mode autonome.
-- `/metrics`, Prometheus/Grafana ou Uptime Kuma, sauvegarde de la base et de la configuration (les données sont en lecture seule et le cache est jetable).
-- Environnement de recette, migrations Alembic.
+- Pile docker-compose (Caddy, oauth2-proxy, application), et unités systemd pour l'installation sans Docker. Redis, les workers et Alembic du premier plan sont retirés avec le worker ImageJ ([ADR 010](adr/010-exploitation.md)).
+- `/metrics`, sauvegarde de l'index et de la configuration (les données sont en lecture seule et le cache est jetable).
 - Guide utilisateur d'une page et fiche d'exploitation d'une page.
 
 **Acceptation :**
 - Exercice de restauration réussi.
 - Mise à jour avec retour arrière en moins de 10 min.
-- **Pilote de 2 semaines avec 3 à 5 utilisateurs** (cryo et microscopie optique) et journal des retours.
+- **Pilote de 2 semaines avec 3 à 5 utilisateurs** et journal des retours.
+
+**Avancement de M8 (11 novembre 2026) : fait, sauf le pilote, qui est à vous.** Deux critères d'acceptation sur trois passent. Les décisions sont dans l'[ADR 010](adr/010-exploitation.md) ; le mode d'emploi est la [fiche d'exploitation](exploitation.md).
+
+Fait :
+- **Image et pile Docker** (`deploy/`) : Caddy devant imageBio, avec des comptes locaux ou l'authentification unique (oauth2-proxy, OIDC). Conteneur non root, système de fichiers en lecture seule, données montées en lecture seule.
+- **Installation sans Docker** : unité systemd durcie, sauvegarde quotidienne par un timer, Caddyfile.
+- **Secret partagé entre le proxy et le serveur** (`IMAGEBIO_PROXY_SECRET`). Sans lui, tout compte local de la machine pouvait se faire passer pour n'importe quel utilisateur en écrivant l'en-tête d'identité lui-même. Obligatoire dans la pile fournie.
+- **`/metrics`** (format Prometheus) : caches, suivis, et par dossier suivi l'âge et la durée du dernier balayage, son échec, les fichiers incomplets. Fermé par défaut, jamais servi par le proxy, sans chemin ni nom d'utilisateur.
+- **`imagebio backup` et `imagebio restore`** : copie cohérente de l'index serveur en marche, sans les vignettes ; restauration refusée sous un serveur qui tourne ; l'index remplacé est mis de côté, pas détruit ; `--keep N` élague les anciennes sauvegardes.
+- **Un serveur refuse au démarrage, en une ligne, un index plus récent que lui** (cas du retour arrière) ou illisible, au lieu d'échouer à la première requête du Live.
+- **Guides** : [guide de l'utilisateur](guide-utilisateur.md) et [fiche d'exploitation](exploitation.md).
+
+Critères d'acceptation :
+- **Exercice de restauration : passé, et rejoué à chaque modification.** L'intégration continue construit l'image, lance la pile, suit une session simulée, sauvegarde, détruit l'index, restaure et retrouve le suivi et ses images (`deploy/compose/smoke-test.sh`). Le même scénario existe en test du backend, avec les seuils, la calibration de glace et les mesures.
+- **Mise à jour avec retour arrière : passé, hors Docker.** Exercice fait avec deux versions réellement installées, dont une au schéma d'index plus récent : sauvegarde, mise à jour (index migré), retour à l'ancienne version (qui refuse l'index migré), restauration, état identique. Quelques secondes de temps machine ; le reste des 10 minutes est le temps de reconstruire ou de retrouver l'image.
+- **Pilote : à faire.**
+
+Limites, à connaître avant le pilote :
+- **La pile d'authentification unique n'a jamais tourné** : il faut un fournisseur d'identité. Sa syntaxe est vérifiée, et la documentation d'oauth2-proxy n'était pas accessible à la rédaction. La fiche d'exploitation décrit la vérification à faire (identité forgée).
+- Le Caddyfile de l'installation systemd n'a pas tourné non plus ; il reprend les directives de celui de la pile Docker, qui est testé.
+- Rien n'a tourné sur un vrai montage NFS ou SMB, ni avec le vrai compte du labo.
+- Les comptes locaux de Caddy n'ont pas de groupes : toutes les racines sont visibles de tous les comptes. Les droits par groupe demandent l'authentification unique.
 
 ### Plus tard
 
@@ -582,7 +603,8 @@ L'authentification et les racines par groupe existent dès M1. Ce jalon durcit l
 ```
 imageBio/
   README.md  LICENSE (MIT)  CLAUDE.md
-  docs/  PLAN.md  audit/  research/  adr/  user-guide.md  runbook.md
+  docs/  PLAN.md  audit/  research/  adr/  guide-utilisateur.md  exploitation.md
+  deploy/  Dockerfile  compose/  systemd/
   legacy/cryoviewer/          # CryoViewer.zip décompressé : correctifs M0 seulement, éteint après M2
   legacy/cryoviewer-live/     # tarball décompressé sans node_modules/dist : éteint après M3
   backend/

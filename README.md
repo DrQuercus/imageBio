@@ -1,12 +1,12 @@
 # imageBio
 
-Application web d'imagerie scientifique à déployer sur le réseau du labo. Elle aura trois modes :
+Application web d'imagerie pour la cryo-EM, à déployer sur le réseau du labo :
 
-- une visionneuse et un éditeur dans l'esprit d'ImageJ, capable d'ouvrir la plupart des formats scientifiques ;
-- un mode **Cryo**, avec les outils spécifiques à la cryo-EM ;
-- un mode **Live**, pour suivre en temps réel une collecte au microscope.
+- une **visionneuse** (MRC, TIFF, EER, images courantes) avec la vraie valeur des pixels, la taille de pixel et sa provenance, et un export calibré vers Fiji ;
+- un panneau **Cryo** : moyenne de frames, référence de gain, filtres en Å, spectre de puissance et défocus, pointés, classes 2D ;
+- un mode **Live**, pour suivre une collecte au microscope : images à mesure qu'elles arrivent, glace, défocus, seuils d'acceptation, carte des acquisitions, alertes.
 
-Le backend (jalon M1, [`backend/`](backend/README.md)), la visionneuse web (jalon M2, [`frontend/`](frontend/README.md)), le cœur du mode Live (jalon M3 : suivi d'une session, vignettes, débit) et une première tranche du mode Cryo (jalon M4 : filtres en Å, moyenne de frames, spectre de puissance, référence de gain) sont écrits. Pour essayer :
+L'éditeur dans l'esprit d'ImageJ du premier plan a été retiré ([ADR 009](docs/adr/009-perimetre-cryo-et-live.md)). Le backend ([`backend/`](backend/README.md)) et l'interface ([`frontend/`](frontend/README.md)) sont écrits ; rien n'a encore tourné sur de vraies données du labo. Pour essayer sur un poste :
 
 ```bash
 pip install -e "./backend[dev]" && (cd frontend && npm ci && npm run build)
@@ -24,6 +24,8 @@ imagebio simulate /chemin/vers/mes/donnees/session_test
 
 Documents à lire :
 
+- [`docs/guide-utilisateur.md`](docs/guide-utilisateur.md) : le mode d'emploi, en une page.
+- [`docs/exploitation.md`](docs/exploitation.md) : installer sur un serveur ([`deploy/`](deploy/README.md)), sauvegarder, mettre à jour, surveiller.
 - [`docs/PLAN.md`](docs/PLAN.md) : évaluation du projet, architecture cible, feuille de route et choix du modèle.
 - [`docs/adr/`](docs/adr/README.md) : décisions d'architecture.
 - [`docs/audit/AUDIT.md`](docs/audit/AUDIT.md) : audit vérifié de CryoViewer et de CryoViewer Live.

@@ -35,6 +35,9 @@ Network-deployed scientific image application (web): a viewer, a Cryo mode and a
 - Only the scanner numbers changes (`seq`): what is measured on pixels (`live/metrics.py`) is handed to it with `add_metrics` and enters the index at its next cycle. A spectral ratio is only reported when the field holds enough points (512 px): on small images it is noise.
 - One scanner per watched directory at a time (`_retired` in `live/service.py`). Nothing a scanner or a notifier does may hold the index write lock for long: walk and send outside the transaction.
 
+- Operations (ADR 010, `docs/exploitation.md`): secrets come from the environment, never from the configuration file, which is backed up (`IMAGEBIO_PROXY_SECRET`, `IMAGEBIO_METRICS_TOKEN`, `password_env`). In proxy mode nothing is believed without the proxy secret when one is set. `/metrics` holds no path and no user name. A restore never destroys the index in place (it is set aside) and never runs under a server (`hold_state_dir`).
+- `deploy/` is tested: `backend/tests/core/test_deploy.py` keeps its examples in step with the program, and the CI job "Deployment" builds the image and runs `deploy/compose/smoke-test.sh` (Docker is not available in the cloud sessions: read the job's log). A change to a header, a variable or a route the proxy touches goes with a change there. The single sign-on stack has never run: do not claim it works.
+
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)
 
 - Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `live/store.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.

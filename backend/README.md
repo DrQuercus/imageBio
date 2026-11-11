@@ -25,6 +25,7 @@ imagebio serve --config imagebio.toml
 ```toml
 [server]
 allowed_hosts = ["imagebio.lab.example"]   # nom public, vu par le proxy
+# metrics = true                           # servir /metrics (voir « Exploitation »)
 
 [auth]
 mode = "proxy"                             # l'identité arrive dans X-Forwarded-User / X-Forwarded-Groups
@@ -39,6 +40,12 @@ min_stable = 10                            # un fichier doit garder sa taille ce
 # metrics = false                          # ne pas mesurer les images (chaque mesure lit l'image en entier)
 # drift = true                             # mesurer aussi la dérive de chaque film (lit huit frames par film)
 # mean_free_path_nm = 395                  # libre parcours moyen du microscope : épaisseur de glace en nm
+# ctf = false                              # ne pas estimer le CTF de chaque image
+
+[microscope]                               # pour le CTF, quand un fichier ne le dit pas
+kv = 300
+cs_mm = 2.7
+amplitude_contrast = 0.07
 
 [[alerts.channels]]                        # où le mode Live peut envoyer ses alertes
 name = "telephone"                         # le nom que les utilisateurs choisissent
@@ -61,6 +68,10 @@ groups = ["cryoem"]                        # vide ou absent : tous les utilisate
 ```
 
 Le proxy doit dire à l'application comment elle s'appelle dehors, sans quoi les requêtes qui modifient (surveillances, alertes) sont refusées comme venant d'un autre site : soit il transmet l'en-tête `Host` tel quel, soit il envoie `X-Forwarded-Host`, soit le nom public figure dans `allowed_hosts`. S'il envoie `X-Forwarded-Proto`, le schéma est vérifié aussi. Avec nginx : `proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;`.
+
+En mode `proxy`, la variable d'environnement `IMAGEBIO_PROXY_SECRET` (24 caractères au moins) fait exiger ce secret dans l'en-tête `X-Imagebio-Proxy-Secret` de chaque requête : c'est le proxy qui l'ajoute. Sans lui, tout compte local de la machine peut écrire lui-même l'en-tête d'identité ([ADR 010](../docs/adr/010-exploitation.md)).
+
+L'installation sur un serveur (Docker ou systemd, proxy, sauvegardes, surveillance) est décrite dans la [fiche d'exploitation](../docs/exploitation.md) ; les fichiers sont dans [`deploy/`](../deploy/).
 
 Pour voir ce qu'un lecteur comprend d'un fichier :
 
@@ -89,6 +100,8 @@ Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les
 | `/api/datasets/stats?path=&t=&c=&z=` | Statistiques robustes et histogramme d'un plan |
 | `/api/datasets/spectrum?path=&t=&c=&z=&tile=` | Spectre de puissance d'un plan : image carrée `float32`, fréquence nulle au centre |
 | `/api/datasets/spectrum/profile?…` | Moyenne radiale du spectre : fréquences (cycles par pixel) et puissances |
+| `/api/datasets/ctf?path=&t=&c=&z=&kv=&cs=&amp=` | Défocus estimé d'après les anneaux de Thon du plan, résolution jusqu'à laquelle ils suivent, zéros attendus ; `found: false` quand le spectre n'en montre pas. Accepte `t_end`, `apix` et le gain |
+| `/api/datasets/export?path=&t=&c=&z=&scope=` | Le plan tel qu'il est traité (`scope=plane`) ou tout le fichier tel qu'il est enregistré (`scope=stack`, 1 Gio au plus) en TIFF ImageJ avec sa calibration : « Ouvrir dans Fiji » |
 | `/api/datasets/thumb?path=&t=&z=&size=` | Un plan en petite image JPEG, binnée par moyenne et étirée sur ses propres valeurs : une tuile de la galerie d'une pile |
 | `/api/cryo/gain/check?path=&gain=` | Vérification de l'orientation d'une référence de gain sur un film |
 | `/api/cryo/picks?path=&picks=` | Particules qu'un fichier de pointés (STAR, `.box`, `.cbox`, `.cs`) contient pour l'image `path` : centres en pixels, scores, taille des boîtes |
@@ -119,6 +132,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `PUT /api/live/watches/{id}/alerts?channels=&no_image=&disk_free=&rate_drop=` | Remplacer les règles : canaux (noms séparés par des virgules), minutes sans image, pourcentage d'espace libre, pourcentage du débit horaire |
 | `POST /api/live/watches/{id}/alerts/test` | Envoyer un message d'essai aux canaux de la surveillance |
 | `PUT /api/live/watches/{id}/ice?i0=&mfp=` | Étalonner la glace : coups moyens d'un trou vide et libre parcours moyen en nm. Ce qui est omis est oublié |
+| `PUT /api/live/watches/{id}/quality?fit=&ice=&ring=&drift=&defocus_min=&defocus_max=` | Seuils d'acceptation de la session, rendus dans `quality` du résumé. Ce qui est omis est oublié |
 
 - **Scrutation.** Un dossier n'est relu que si sa date de modification a changé ; seuls les fichiers pas encore complets sont regardés un par un. Une session de 50 000 fichiers coûte un `stat` par dossier à chaque passage.
 - **Complétude.** Un fichier est complet quand sa taille et sa date n'ont pas changé sur deux passages espacés de `min_stable`, qu'il passe le contrôle d'intégrité de son format, et, pour une acquisition EPU, que son `.xml` est là. Une image dont l'écriture fait une pause reste « en cours ».
@@ -130,7 +144,21 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
 - **Mesures.** Après chaque passage, quelques images sont mesurées : coups moyens et écart-type (pixels chauds écartés), rapport de l'anneau de glace (puissance entre 3,40 et 3,95 Å sur celle des bandes voisines ; donné si le champ fait au moins 512 pixels et le pixel au plus 1,5 Å). Elles apparaissent dans `metrics` de chaque exposition (`null` : pas encore mesurée ; `{}` : image illisible), avec un nouveau numéro de séquence. Le résumé donne dans `ice` le nombre d'images mesurées et la référence de la session (les coups des images les plus claires) : la glace relative d'une image est `ln(référence / mean)`. Toutes les images arrivées pendant la surveillance sont mesurées, et les 200 plus récentes d'une session trouvée déjà écrite.
 - **Glace et dérive.** `ice` du résumé donne la référence en vigueur (`reference` : l'I₀ de l'utilisateur, sinon le niveau de la session), si elle est étalonnée (`calibrated`) et le libre parcours moyen connu (`mfp_nm`). L'épaisseur d'une image est `mfp_nm × ln(reference / mean)`. Avec `[live] drift = true`, `metrics` contient aussi `drift` et `drift_unit` (« A » ou « px ») : le déplacement entre les quatre premières et les quatre dernières frames du film, absent quand rien ne se laisse suivre.
+- **CTF.** Chaque image mesurée reçoit aussi `ctf` : `defocus` (µm), `fit` (Å, jusqu'où les anneaux suivent le défocus trouvé) et `score`. Ajustement à une dimension du spectre moyenné (`proc/ctf.py`) : pas d'astigmatisme, pas de lame de phase ; absent quand le spectre ne montre pas d'anneaux ou que le champ fait moins de 512 pixels. La tension vient du XML d'EPU, sinon de `[microscope]`.
+- **Métadonnées tardives.** Une session trouvée déjà écrite est indexée sans ouvrir ses fichiers ; le XML d'EPU d'une image est alors lu quand elle est mesurée (dose, défocus visé, position de platine).
+- **Seuils d'acceptation.** Ils sont gardés avec la surveillance ; le verdict est rendu par l'interface, sur les mesures que chaque exposition porte déjà. Une mesure absente ne compte pas contre une image.
 - **Alertes.** Les règles sont jugées après chaque passage : plus d'image depuis N minutes, espace libre sous un pourcentage, débit sur 5 minutes sous un pourcentage du débit horaire, scrutateur en échec. Un message part quand une condition commence et un autre quand elle cesse ; un canal en panne est retenté seul, cinq fois au plus, sans que les autres reçoivent le message de nouveau. Pour quitter une condition, il faut une marge (disque : un dixième du seuil, au moins un demi-point) et deux minutes sans elle ; une chute de débit doit durer deux minutes avant d'être annoncée, et ne se juge qu'au-dessus de 60 images dans l'heure. Les règles s'arrêtent une semaine après la dernière visite de la surveillance par son utilisateur. Les adresses restent dans la configuration : un utilisateur choisit un canal par son nom. En mode autonome, `imagebio serve --local DOSSIER --ntfy URL` (ou `--webhook URL`) déclare un canal. Le mot de passe d'un relais de messagerie se donne par une variable d'environnement (`password_env`), jamais dans le fichier.
+
+## Exploitation
+
+```bash
+imagebio backup /var/backups/imagebio --config imagebio.toml --keep 14   # serveur en marche
+imagebio restore /var/backups/imagebio/DATE --config imagebio.toml       # serveur arrêté ; --force pour remplacer
+```
+
+- **Sauvegarde** : un dossier daté avec l'index du Live (copie cohérente, sans les vignettes), la configuration et un manifeste. **Restauration** : refusée tant qu'un serveur tient le dossier d'état ; l'index remplacé est mis de côté, pas détruit. Les migrations de l'index ne vont que vers l'avant : revenir à une version précédente, c'est restaurer la sauvegarde prise avant la mise à jour.
+- **`/metrics`** (format Prometheus, `[server] metrics = true`) : caches, suivis par état, et par dossier suivi l'âge et la durée du dernier passage, son échec, les fichiers incomplets, le nombre d'expositions ; taille de l'index. Ni chemin ni nom d'utilisateur. Servi aux clients de la machine elle-même, ou au porteur du jeton `IMAGEBIO_METRICS_TOKEN` (`Authorization: Bearer …`).
+- Au démarrage, un index écrit par une version plus récente, ou illisible, arrête le serveur avec un message d'une ligne.
 
 ## Traitements du mode Cryo
 
@@ -172,7 +200,8 @@ src/imagebio/
   io/registry.py     contrat des lecteurs et registre
   io/readers/        mrc.py, eer.py, tiff.py, raster.py
   proc/              binning.py (moyenne par blocs), stats.py (statistiques robustes),
-                     fourier.py (filtres en Å, spectre de puissance, moyenne radiale)
+                     fourier.py (filtres en Å, spectre de puissance, moyenne radiale, réduction dans Fourier),
+                     ctf.py (défocus d'après les anneaux de Thon)
   cryo/gain.py       références de gain : application, défauts, vérification de l'orientation
   cryo/epu.py        métadonnées EPU (.xml par image), nom commun des fichiers d'une exposition
   cryo/mdoc.py       métadonnées SerialEM et Tomo5 (.mdoc)
@@ -186,19 +215,22 @@ src/imagebio/
   live/service.py    surveillances par utilisateur, scrutateurs partagés, résumé, vignettes
   live/thumbs.py     vignettes binnées par moyenne
   live/alerts.py     règles d'alerte, jugement, envoi (ntfy, webhook, e-mail)
-  live/metrics.py    mesures sur une image : coups moyens, rapport de l'anneau de glace, dérive d'un film
+  live/metrics.py    mesures sur une image : coups moyens, rapport de l'anneau de glace, CTF, dérive d'un film
+  live/quality.py    seuils d'acceptation d'une session
+  live/backup.py     sauvegarde et restauration de l'index et de la configuration
   live/simulator.py  microscope simulé (tests et démonstration)
   fs/roots.py        chemins logiques et confinement dans les racines
   service/planes.py  service de plans : pool, cache, chaîne de traitement, binning, statistiques
-  api/               app.py (FastAPI), live.py (routes du Live), security.py (identité, Host,
-                     requêtes venues d'un autre site), cli.py
+  service/export.py  export en TIFF ImageJ calibré
+  api/               app.py (FastAPI), live.py (routes du Live), security.py (identité, Host, secret
+                     du proxy, requêtes venues d'un autre site), metrics.py (/metrics), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test
 ```
 
 ## Tests
 
 ```bash
-python -m pytest            # suite complète (moins de 30 s)
+python -m pytest            # suite complète (une à deux minutes)
 python -m pytest -m perf    # budgets de performance (plus lents, fichiers de 4K)
 ruff check src tests && ruff format --check src tests
 python -m mypy              # typage strict
