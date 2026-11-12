@@ -400,6 +400,11 @@ ul.reports a:hover { text-decoration: underline; }
 .settings-main input, .settings-main select { background: var(--bg2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; }
 .settings-main .note.saved { color: var(--accent); margin-bottom: 8px; }
 .settings-main .error { position: static; transform: none; left: auto; max-width: none; margin-bottom: 10px; }
+.settings-section .snippet { background: var(--bg2); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 900px; margin: 4px 0 8px; user-select: all; }
+.settings-section .key-once { border: 1px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin: 10px 0; max-width: 900px; }
+.settings-section .key-once p { margin: 0 0 6px; }
+.settings-section .key-value { flex: 1 1 420px; min-width: 0; }
+.settings-table button.small { padding: 1px 6px; margin-left: 6px; font-size: 11px; }
 .chip { display: inline-block; border: 1px solid var(--line); border-radius: 10px; padding: 0 8px; margin: 0 4px 4px 0; font-size: 12px; }
 .chip.warn { color: var(--amber); border-color: rgba(255, 179, 64, 0.4); }
 .config-block dl { grid-template-columns: 220px minmax(0, 1fr); }

@@ -1,10 +1,11 @@
-/** The settings page: one's own account for everybody; for administrators, the accounts, the
- *  data roots, the microscope and the Live settings, the alert channels, the configuration
- *  file (read only) and the log of changes (ADR 014). What is saved applies at once. */
+/** The settings page: one's own account and personal keys for everybody (ADR 015); for
+ *  administrators, the accounts, the data roots, the microscope and the Live settings, the
+ *  alert channels, the configuration file (read only) and the log of changes (ADR 014). What
+ *  is saved applies at once. */
 
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, isAbort } from "../api/client";
-import type { AccountRow, AdminState, LogEntry, Me, SettingSection } from "../api/types";
+import type { AccountRow, AdminState, KeyInfo, LogEntry, Me, SettingSection } from "../api/types";
 import {
   type ChannelDraft,
   channelDraft,
@@ -18,9 +19,11 @@ import {
   rootDraft,
   rootsValue,
 } from "./forms";
+import { claudeCodeCommand, DAY_CHOICES, lifeLeft, mcpConfig, shellExample } from "./assistant";
 
 const TABS = [
   { key: "me", label: "Mon compte", admin: false },
+  { key: "ai", label: "Scripts et IA", admin: false },
   { key: "accounts", label: "Comptes", admin: true },
   { key: "roots", label: "Dossiers de données", admin: true },
   { key: "microscope", label: "Microscope et Live", admin: true },
@@ -67,14 +70,14 @@ export function SettingsView({ tab, onTab, onViewer, onLive }: Props) {
 
   /** Send a change; a refusal because somebody saved meanwhile reloads what is now in force. */
   const save = useCallback(
-    (what: string, send: (version: number) => Promise<AdminState>) => {
+    (what: string, send: (version: number) => Promise<AdminState>, done?: (next: AdminState) => string) => {
       if (!state) return;
       setError(null);
       setNote(null);
       send(state.version)
         .then((next) => {
           setState(next);
-          setNote(`${what} : enregistré, en vigueur.`);
+          setNote(done ? done(next) : `${what} : enregistré, en vigueur.`);
           if (what === "Compte") api.me().then(setMe).catch(() => undefined);
         })
         .catch((e) => {
@@ -118,6 +121,7 @@ export function SettingsView({ tab, onTab, onViewer, onLive }: Props) {
         )}
         {note && <div className="note saved" data-testid="settings-note">{note}</div>}
         {current === "me" && me && <MyAccount me={me} />}
+        {current === "ai" && me && <ScriptsAndAI me={me} />}
         {me?.admin && !state && current !== "me" && <div className="note">Lecture des réglages…</div>}
         {state && current === "accounts" && <Accounts state={state} me={me} save={save} />}
         {state && current === "roots" && <Roots state={state} save={save} />}
@@ -130,7 +134,11 @@ export function SettingsView({ tab, onTab, onViewer, onLive }: Props) {
   );
 }
 
-type Save = (what: string, send: (version: number) => Promise<AdminState>) => void;
+type Save = (
+  what: string,
+  send: (version: number) => Promise<AdminState>,
+  done?: (next: AdminState) => string,
+) => void;
 
 function Source({ state, section }: { state: AdminState; section: SettingSection }) {
   const own = state.sections[section].source === "interface";
@@ -183,6 +191,150 @@ function MyAccount({ me }: { me: Me }) {
   );
 }
 
+/** One's personal keys, and how to plug a script or an assistant in (ADR 015). */
+function ScriptsAndAI({ me }: { me: Me }) {
+  const [keys, setKeys] = useState<KeyInfo[] | null>(null);
+  const [standalone, setStandalone] = useState(me.auth_mode === "none");
+  const [name, setName] = useState("");
+  const [days, setDays] = useState<number>(90);
+  const [made, setMade] = useState<{ key: string; name: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const origin = window.location.origin;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api.keys
+      .list(controller.signal)
+      .then((r) => {
+        setStandalone(r.standalone);
+        setKeys(r.keys);
+      })
+      .catch((e) => !isAbort(e) && setError(message(e)));
+    return () => controller.abort();
+  }, []);
+
+  const make = () => {
+    setError(null);
+    setCopied(false);
+    api.keys
+      .make(name.trim(), days)
+      .then((k) => {
+        setMade({ key: k.key, name: k.name });
+        setName("");
+        return api.keys.list().then((r) => setKeys(r.keys));
+      })
+      .catch((e) => setError(message(e)));
+  };
+  const revoke = (id: string) => {
+    setError(null);
+    api.keys
+      .revoke(id)
+      .then((r) => setKeys(r.keys))
+      .catch((e) => setError(message(e)));
+  };
+  const copy = (text: string) => {
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => setCopied(true))
+      .catch(() => undefined);
+  };
+  const now = Date.now() / 1000;
+
+  return (
+    <section className="settings-section" data-testid="settings-ai">
+      <h2>Clés personnelles</h2>
+      {error && <div className="note warn" data-testid="keys-error">{error}</div>}
+      {standalone ? (
+        <p className="note" data-testid="keys-standalone">
+          Poste seul : pas de clé. Les scripts et assistants de ce poste lisent imageBio à <span className="mono">{origin}</span> sans
+          clé, et personne d'autre ne l'atteint.
+        </p>
+      ) : (
+        <>
+          <p className="note">
+            Une clé permet à un script ou à un assistant (une IA) de <strong>lire</strong> imageBio avec vos droits, sans votre mot
+            de passe : vos dossiers, vos sessions Live, leurs rapports. Elle ne peut rien changer, n'administre jamais, expire, et se
+            révoque ici. Elle n'est montrée qu'une fois : gardez-la comme un mot de passe.
+          </p>
+          <div className="settings-form">
+            <input value={name} placeholder="nom (ex. : portable, assistant)" aria-label="Nom de la clé" data-testid="key-name" maxLength={64}
+              onChange={(e) => setName(e.target.value)} />
+            <label className="check">
+              durée
+              <select value={days} aria-label="Durée de la clé" data-testid="key-days" onChange={(e) => setDays(Number(e.target.value))}>
+                {DAY_CHOICES.map((d) => <option key={d} value={d}>{d === 366 ? "un an" : `${d} jours`}</option>)}
+              </select>
+            </label>
+            <button disabled={!name.trim()} onClick={make} data-testid="key-make">Créer une clé</button>
+          </div>
+          {made && (
+            <div className="key-once" data-testid="key-made">
+              <p>
+                Clé « {made.name} » : copiez-la maintenant, elle ne sera plus montrée.
+              </p>
+              <div className="settings-form">
+                <input readOnly value={made.key} className="mono key-value" aria-label="La clé" data-testid="key-value"
+                  onFocus={(e) => e.target.select()} />
+                <button onClick={() => copy(made.key)} data-testid="key-copy">{copied ? "Copiée" : "Copier"}</button>
+                <button onClick={() => setMade(null)} data-testid="key-hide">C'est fait</button>
+              </div>
+            </div>
+          )}
+          {keys && keys.length > 0 && (
+            <table className="settings-table" data-testid="keys-table">
+              <thead>
+                <tr><th>Nom</th><th>Début</th><th>Créée</th><th>Reste</th><th>Dernier usage</th><th /></tr>
+              </thead>
+              <tbody>
+                {keys.map((k) => (
+                  <tr key={k.id} data-testid="key-row">
+                    <td>{k.name}</td>
+                    <td className="mono">{k.hint}…</td>
+                    <td className="note">{when(k.created)}</td>
+                    <td className="note">{lifeLeft(k.expires, now)}</td>
+                    <td className="note">{k.last_used ? when(k.last_used) : "jamais"}</td>
+                    <td className="actions">
+                      <button onClick={() => revoke(k.id)} data-testid="key-revoke">Révoquer</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {keys && keys.length === 0 && <p className="note" data-testid="keys-none">Aucune clé.</p>}
+        </>
+      )}
+
+      <h2>Brancher une IA ou un script</h2>
+      <p className="note">
+        Un seul fichier Python (3.9 ou plus, rien à installer) : des commandes, et un serveur MCP qui donne à un assistant les
+        outils de lecture d'imageBio. Le skill explique à un assistant comment lire les chiffres.
+      </p>
+      <div className="settings-form">
+        <a className="button" href="/api/ai/imagebio_ai.py" download data-testid="ai-download-client">Télécharger imagebio_ai.py</a>
+        <a className="button" href="/api/ai/SKILL.md" download data-testid="ai-download-skill">Télécharger SKILL.md</a>
+        <a className="button" href="/api/openapi.json" target="_blank" rel="noreferrer" data-testid="ai-openapi">Description de l'API (OpenAPI)</a>
+      </div>
+      <h3>Dans un client MCP (Claude Desktop, et la plupart des autres)</h3>
+      <pre className="snippet" data-testid="ai-mcp-config">{mcpConfig(origin, standalone)}</pre>
+      <h3>Dans Claude Code</h3>
+      <pre className="snippet" data-testid="ai-claude-code">{claudeCodeCommand(origin, standalone)}</pre>
+      <h3>En ligne de commande</h3>
+      <pre className="snippet">{shellExample(origin, standalone)}</pre>
+      <p className="note">
+        Remplacez le chemin du fichier{standalone ? "" : " et la clé"}. Si votre navigateur a dû accepter un certificat propre au
+        laboratoire, donnez au client le certificat de cette autorité : <span className="mono">IMAGEBIO_CA=/chemin/vers/root.crt</span>.
+        Le client ne désactive jamais la vérification du certificat.
+      </p>
+      <p className="note warn" data-testid="ai-privacy">
+        Ce qu'un assistant lit part chez celui qui le fait tourner : un assistant en ligne reçoit les noms de fichiers, les
+        métadonnées et les chiffres qu'il demande. Pour des données confidentielles, un modèle qui tourne au laboratoire.
+      </p>
+    </section>
+  );
+}
+
 function Accounts({ state, me, save }: { state: AdminState; me: Me | null; save: Save }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState({ name: "", groups: "", admin: false });
@@ -209,7 +361,7 @@ function Accounts({ state, me, save }: { state: AdminState; me: Me | null; save:
       {error && <div className="note warn" data-testid="accounts-error">{error}</div>}
       <table className="settings-table" data-testid="accounts-table">
         <thead>
-          <tr><th>Compte</th><th>Groupes donnés ici</th><th>Groupes du proxy</th><th>Administrateur</th><th>Vu</th><th /></tr>
+          <tr><th>Compte</th><th>Groupes donnés ici</th><th>Groupes du proxy</th><th>Administrateur</th><th>Vu</th><th title="Clés personnelles encore valides">Clés</th><th /></tr>
         </thead>
         <tbody>
           {state.accounts.map((a) => {
@@ -234,6 +386,16 @@ function Accounts({ state, me, save }: { state: AdminState; me: Me | null; save:
                   )}
                 </td>
                 <td className="note">{a.seen ? when(a.seen) : "—"}</td>
+                <td data-testid="account-keys">
+                  {a.keys > 0 ? a.keys : "—"}
+                  {a.keys > 0 && (
+                    <button className="small" data-testid="account-revoke-keys" title="Révoquer toutes ses clés personnelles (départ, clé perdue)"
+                      onClick={() =>
+                        save("Clés", () => api.admin.revokeKeys(a.name), (next) =>
+                          `${a.name} : ${"revoked" in next ? String(next.revoked) : ""} clé(s) révoquée(s).`)
+                      }>Révoquer</button>
+                  )}
+                </td>
                 <td className="actions">
                   <button onClick={() => send(a, text, a.admin === "interface")} data-testid="account-save" disabled={drafts[a.name] === undefined}>Enregistrer</button>
                   {(a.groups.length > 0 || a.admin === "interface") && a.name !== me?.user && (

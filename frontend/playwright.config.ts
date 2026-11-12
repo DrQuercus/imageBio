@@ -1,6 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
 const PORT = 8765;
+export const PROXY_PORT = 8767; // 8766: the receiver of alerts of e2e/live.spec.ts
 
 // The tests run against the real backend serving the built interface (npm run build first)
 // and a directory of generated files.
@@ -15,10 +16,19 @@ export default defineConfig({
     viewport: { width: 1280, height: 800 },
     trace: "off",
   },
-  webServer: {
-    command: `python3 e2e/make_fixtures.py .e2e-data && python3 -m imagebio.api.cli serve --config .e2e-data/imagebio.toml --port ${PORT}`,
-    url: `http://127.0.0.1:${PORT}/healthz`,
-    reuseExistingServer: false,
-    timeout: 60_000,
-  },
+  webServer: [
+    {
+      command: `python3 e2e/make_fixtures.py .e2e-data && python3 -m imagebio.api.cli serve --config .e2e-data/imagebio.toml --port ${PORT}`,
+      url: `http://127.0.0.1:${PORT}/healthz`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      // in proxy mode, with its own files, for personal keys (e2e/keys.spec.ts)
+      command: `python3 e2e/proxy_fixtures.py .e2e-proxy && python3 -m imagebio.api.cli serve --config .e2e-proxy/imagebio.toml --port ${PROXY_PORT}`,
+      url: `http://127.0.0.1:${PROXY_PORT}/healthz`,
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+  ],
 });

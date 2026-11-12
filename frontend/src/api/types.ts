@@ -124,6 +124,24 @@ export interface AccountRow {
    *  settings page; null: not one. */
   admin: "file" | "group" | "interface" | null;
   seen: number | null;
+  /** Personal keys still valid (ADR 015). */
+  keys: number;
+}
+
+/** A personal key (ADR 015), without the key itself: it is shown once, when it is made. */
+export interface KeyInfo {
+  id: string;
+  name: string;
+  /** The first characters of the key, to tell keys apart. */
+  hint: string;
+  created: number;
+  expires: number;
+  last_used: number | null;
+}
+
+export interface MadeKey extends KeyInfo {
+  /** The key itself: in this answer only. */
+  key: string;
 }
 
 export interface LogEntry {

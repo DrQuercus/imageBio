@@ -121,3 +121,22 @@ test("microscope, Live, alert channels and accounts; a change made meanwhile is 
   await expect(page.getByTestId("settings-config")).toContainText("Authentification");
   await expect(page.getByTestId("settings-config")).toContainText("mode");
 });
+
+test("scripts and assistants in standalone mode: no key, how to plug one in", async ({ page }) => {
+  await openSettings(page, "ai");
+  await expect(page.getByTestId("keys-standalone")).toBeVisible();
+  await expect(page.getByTestId("key-make")).toHaveCount(0);
+  const config = JSON.parse((await page.getByTestId("ai-mcp-config").textContent()) ?? "{}");
+  expect(config.mcpServers.imagebio.env).toEqual({ IMAGEBIO_URL: "http://127.0.0.1:8765" });
+  expect(config.mcpServers.imagebio.args).toEqual(["/chemin/vers/imagebio_ai.py", "mcp"]);
+  for (const [name, start] of [
+    ["imagebio_ai.py", "#!/usr/bin/env python3"],
+    ["SKILL.md", "---\nname: imagebio"],
+  ] as const) {
+    const r = await page.request.get(`/api/ai/${name}`);
+    expect(r.status()).toBe(200);
+    expect((await r.text()).startsWith(start)).toBe(true);
+  }
+  const spec = await (await page.request.get("/api/openapi.json")).json();
+  expect(Object.keys(spec.paths)).toContain("/api/live/watches/{watch_id}/items");
+});

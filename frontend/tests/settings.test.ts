@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { claudeCodeCommand, DAY_CHOICES, KEY_PLACEHOLDER, lifeLeft, mcpConfig, shellExample } from "../src/settings/assistant";
 import { channelsValue, liveValue, microscopeValue, parseGroups, rootDraft, rootsValue, splitNames } from "../src/settings/forms";
 
 describe("settings forms", () => {
@@ -52,5 +53,39 @@ describe("settings forms", () => {
       { name: "mail", kind: "email", to: ["a@b.org", "c@d.org"] },
     ]);
     expect(channelsValue([{ name: "mail", kind: "email", target: "not an address" }], true).error).toContain("adresses");
+  });
+});
+
+describe("plugging an assistant in", () => {
+  const origin = "https://imagebio.lab.example";
+
+  it("fills the MCP configuration with the address, never with a key", () => {
+    const config = JSON.parse(mcpConfig(origin, false));
+    expect(config.mcpServers.imagebio).toEqual({
+      command: "python3",
+      args: ["/chemin/vers/imagebio_ai.py", "mcp"],
+      env: { IMAGEBIO_URL: origin, IMAGEBIO_KEY: KEY_PLACEHOLDER },
+    });
+    // standalone: the API answers this computer without a key
+    expect(JSON.parse(mcpConfig("http://127.0.0.1:8000", true)).mcpServers.imagebio.env).toEqual({
+      IMAGEBIO_URL: "http://127.0.0.1:8000",
+    });
+  });
+
+  it("gives the command lines", () => {
+    expect(claudeCodeCommand(origin, false)).toBe(
+      `claude mcp add --transport stdio imagebio --env IMAGEBIO_URL=${origin} --env IMAGEBIO_KEY=ibk_… -- python3 /chemin/vers/imagebio_ai.py mcp`,
+    );
+    expect(shellExample(origin, true)).toBe(`export IMAGEBIO_URL=${origin}\npython3 imagebio_ai.py sessions`);
+  });
+
+  it("says what is left of a key", () => {
+    const now = 1_800_000_000;
+    expect(lifeLeft(now + 90 * 86400 - 5, now)).toBe("90 jours");
+    expect(lifeLeft(now + 1.5 * 86400, now)).toBe("2 jours");
+    expect(lifeLeft(now + 86400, now)).toBe("1 jour");
+    expect(lifeLeft(now + 3600, now)).toBe("moins d'un jour");
+    expect(lifeLeft(now, now)).toBe("expirée");
+    expect(DAY_CHOICES).toContain(90);
   });
 });

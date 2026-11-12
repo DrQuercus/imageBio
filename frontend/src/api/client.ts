@@ -14,6 +14,8 @@ import type {
   CtfResponse,
   GainCheck,
   IceReference,
+  KeyInfo,
+  MadeKey,
   LiveAlerts,
   LiveHistory,
   LivePage,
@@ -162,6 +164,17 @@ export const api = {
     removeAccount: (version: number, name: string) =>
       getJson<AdminState>(`/api/admin/accounts?${buildQuery({ name, version })}`, undefined, "DELETE"),
     log: (signal?: AbortSignal) => getJson<{ entries: LogEntry[] }>("/api/admin/log", signal),
+    /** Revoke every personal key of a user. */
+    revokeKeys: (name: string) =>
+      getJson<AdminState & { revoked: number }>(`/api/admin/keys?${buildQuery({ name })}`, undefined, "DELETE"),
+  },
+
+  /** One's personal keys, for scripts and assistants (ADR 015). None in standalone mode. */
+  keys: {
+    list: (signal?: AbortSignal) => getJson<{ standalone: boolean; keys: KeyInfo[] }>("/api/me/keys", signal),
+    make: (name: string, days: number) => getJson<MadeKey>("/api/me/keys", undefined, "POST", { name, days }),
+    revoke: (id: string) =>
+      getJson<{ keys: KeyInfo[] }>(`/api/me/keys/${encodeURIComponent(id)}`, undefined, "DELETE"),
   },
 
   roots: (signal?: AbortSignal) =>
