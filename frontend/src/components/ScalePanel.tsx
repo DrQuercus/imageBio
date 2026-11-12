@@ -25,21 +25,34 @@ interface Props {
  *  (a header can be wrong); "Rétablir" goes back to it. */
 export function ScalePanel({ info, fileApix, userApix, onUserApix, level, children }: Props) {
   const apix = userApix ?? fileApix;
-  const [draft, setDraft] = useState(apix === null ? "" : formatValue(apix));
+  const shown = (value: number | null) => (value === null ? "" : formatValue(value));
+  const [draft, setDraft] = useState(shown(apix));
   const timer = useRef<number | undefined>(undefined);
-  useEffect(() => setDraft(apix === null ? "" : formatValue(apix)), [apix]);
+  // The field is rewritten from the value in effect only when nobody is typing in it ("1." is
+  // on its way to "1.06", not 1), and a value is applied only when it was typed: passing
+  // through the field must not turn the header's value into a typed one.
+  const focused = useRef(false);
+  const edited = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setDraft(shown(apix));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apix]);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
   const commit = (text: string) => {
     window.clearTimeout(timer.current);
+    if (!edited.current) return;
     const typed = text.trim().replace(",", ".");
     if (typed === "") {
+      edited.current = false;
       onUserApix(null);
       return;
     }
     const value = Number(typed);
     if (!(value > 0) || !Number.isFinite(value) || value > 1e7) return; // not a usable size: wait
-    onUserApix(fileApix !== null && Math.abs(value - fileApix) <= 1e-9 * fileApix ? null : value);
+    edited.current = false;
+    // the header's value as the field shows it (six digits) is the header's value
+    onUserApix(fileApix !== null && Math.abs(value - fileApix) <= 5e-6 * fileApix ? null : value);
   };
   const cal = info.calibration.x;
   const source = SOURCES[cal.source] ?? cal.source;
@@ -70,13 +83,21 @@ export function ScalePanel({ info, fileApix, userApix, onUserApix, level, childr
         <label className="apix-label" htmlFor="apix-input">Å / pixel</label>
         <input id="apix-input" className={`apix-input ${apix === null ? "unknown" : ""}`} inputMode="decimal" value={draft}
           placeholder="à saisir" aria-label="Taille de pixel en ångströms" data-testid="user-apix"
+          onFocus={() => { focused.current = true; }}
           onChange={(e) => {
+            edited.current = true;
             setDraft(e.target.value);
             window.clearTimeout(timer.current);
             const text = e.target.value;
-            timer.current = window.setTimeout(() => commit(text), TYPING_MS);
+            if (!/[.,]\s*$/.test(text)) timer.current = window.setTimeout(() => commit(text), TYPING_MS);
           }}
-          onBlur={() => commit(draft)} onKeyDown={(e) => e.key === "Enter" && commit(draft)} />
+          onBlur={() => {
+            focused.current = false;
+            commit(draft);
+            edited.current = false;
+            setDraft(shown(apix)); // replaced by the new value, if one was applied
+          }}
+          onKeyDown={(e) => e.key === "Enter" && commit(draft)} />
       </div>
       {origin}
       {apix !== null && (

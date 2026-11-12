@@ -8,7 +8,7 @@ import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
 import { MeasurePanel } from "./components/MeasurePanel";
 import { ScalePanel } from "./components/ScalePanel";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
-import { averageEnd, type CryoSettings, dirname, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
+import { averageEnd, type CryoSettings, dirname, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf, statsLevel } from "./viewer/cryo";
 import { Gallery } from "./viewer/Gallery";
 import { galleryAxis, type GallerySort, isClassAverages, MAX_EXPORT_BYTES, stackBytes } from "./viewer/gallery";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
@@ -120,6 +120,8 @@ export function App({ onLive }: { onLive: () => void }) {
   // (the file last loaded: while the next one loads, `info` is already null)
   const shownShape = useRef(loaded?.response.info.shape);
   shownShape.current = loaded?.response.info.shape;
+  const shownApix = useRef<number | null>(null);
+  shownApix.current = loaded?.response.info.calibration.x.angstrom ?? null;
   /** Whether the coordinate file in use names micrographs (it then applies to other images). */
   const picksMany = useRef(false);
   const pathRef = useRef(path);
@@ -152,9 +154,13 @@ export function App({ onLive }: { onLive: () => void }) {
         // one update: the file, its options and a plane that exists in it change together
         const before = shownShape.current;
         const sameSize = before !== undefined && before.x === r.info.shape.x && before.y === r.info.shape.y;
+        const sameApix = shownApix.current === (r.info.calibration.x.angstrom ?? null);
         setLoaded({ requested: path, options, response: r });
         setStats(null);
         if (fitOnLoad.current === true || (fitOnLoad.current === "same-size" && !sameSize)) setView(null);
+        // a typed pixel size follows to the next image of the folder only if it is of the same
+        // kind (same size, same pixel size in its file): not to a thumbnail or a raw movie
+        if (fitOnLoad.current === "same-size" && !(sameSize && sameApix)) setUserApix(null);
         fitOnLoad.current = false;
         setIndex((i) => clampIndex(i, r.info.shape));
       })
@@ -217,11 +223,11 @@ export function App({ onLive }: { onLive: () => void }) {
   );
 
   // ── statistics of the plane on screen: histogram and automatic window ──────
-  // Of a filtered plane, those of the overview: they follow a moving filter at once, where
-  // those of the full plane would wait for a filter at full resolution (ADR 013).
+  // While a filter slider is held, those of the overview: they follow it at once, where those
+  // of the full plane would wait for a filter at full resolution (ADR 013).
   const statsChannel = info?.rgb ? 0 : index.c;
   const shownPath = response?.path ?? null;
-  const statsBin = info && (proc.lp !== undefined || proc.hp !== undefined) ? baseBin({ width: info.shape.x, height: info.shape.y }) : 1;
+  const statsBin = info ? statsLevel(proc, adjusting, baseBin({ width: info.shape.x, height: info.shape.y })) : 1;
   useEffect(() => {
     if (!shownPath) return;
     const controller = new AbortController();
@@ -376,8 +382,11 @@ export function App({ onLive }: { onLive: () => void }) {
         case "p": case "P": setCryo((c) => ({ ...c, spectrum: !c.spectrum })); break;
         case "l": case "L": setCryo((c) => (c.lowpass !== null || c.highpass !== null ? { ...c, filtersOff: !c.filtersOff } : c)); break;
         case "c": case "C": if (apix) setCircleOn((on) => !on); break;
-        case "n": case "N": case "PageDown": e.preventDefault(); go(1); break;
-        case "b": case "B": case "PageUp": e.preventDefault(); go(-1); break;
+        case "n": case "N": go(1); break;
+        case "b": case "B": go(-1); break;
+        // on a slider, these move it
+        case "PageDown": if (range) return; e.preventDefault(); go(1); break;
+        case "PageUp": if (range) return; e.preventDefault(); go(-1); break;
         case "g": case "G": setGallery((g) => !g); break;
         case "Escape": setTool("pan"); setRuler(null); break;
         case "f": case "F": case "0": setView(null); break;

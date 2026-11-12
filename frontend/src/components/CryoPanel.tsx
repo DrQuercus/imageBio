@@ -20,6 +20,7 @@ import {
   scoreRange,
   SLIDER_STEPS,
   sliderToAngstrom,
+  stepAngstrom,
 } from "../viewer/cryo";
 
 /** Shortest interval between two values sent while a slider is held, in ms: the server
@@ -84,9 +85,8 @@ function FilterControl({ kind, label, id, value, presets, apix, off, onCommit, o
     setDraft(null);
     onAdjust(false);
   };
-  const move = (position: number) => {
+  const moveTo = (next: number) => {
     hold();
-    const next = sliderToAngstrom(position, range);
     latest.current = next;
     setDraft(next);
     const wait = SLIDER_INTERVAL_MS - (performance.now() - sent.current);
@@ -95,6 +95,9 @@ function FilterControl({ kind, label, id, value, presets, apix, off, onCommit, o
     window.clearTimeout(idle.current);
     idle.current = window.setTimeout(() => !pressed.current && release(), RELEASE_AFTER_MS);
   };
+  const move = (position: number) => moveTo(sliderToAngstrom(position, range));
+  // arrows: to the next value of two digits (one position of the slider is often less)
+  const ARROWS: Record<string, 1 | -1> = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 };
   const press = (down: boolean) => {
     pressed.current = down;
     if (down) hold();
@@ -115,7 +118,14 @@ function FilterControl({ kind, label, id, value, presets, apix, off, onCommit, o
       <input type="range" className={`filter-slider ${shown === null || off ? "idle" : ""}`} min={0} max={SLIDER_STEPS} step={1}
         value={position} aria-label={`${label} (échelle logarithmique, ${range[0]} à ${range[1]} Å)`} data-testid={`${id}-slider`}
         onChange={(e) => move(Number(e.target.value))}
-        onPointerDown={() => press(true)} onPointerUp={() => press(false)} onPointerCancel={() => press(false)}
+        onKeyDown={(e) => {
+          const direction = ARROWS[e.key];
+          if (!direction) return;
+          e.preventDefault();
+          moveTo(stepAngstrom(latest.current ?? shown ?? Number.NaN, direction, range));
+        }}
+        // only the main button drags a slider: a context menu can swallow the release of another
+        onPointerDown={(e) => e.button === 0 && press(true)} onPointerUp={() => press(false)} onPointerCancel={() => press(false)}
         onLostPointerCapture={() => pressed.current && press(false)} onBlur={() => press(false)} />
       <div className="filter-scale">
         <span>{range[0]} Å</span>

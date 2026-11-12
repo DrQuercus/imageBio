@@ -20,13 +20,13 @@ L'adresse de la page décrit ce que vous voyez (fichier, plan, zoom, réglages) 
 | Plan suivant, précédent ; lire la pile | | `→` `←`, `Espace` |
 | Spectre de puissance | | `P` |
 | Toute la pile côte à côte (particules, classes 2D) | | `G` |
-| Image suivante, précédente du dossier, réglages gardés | ◀ ▶ en haut | `N`, `B` (ou `Page ↓`, `Page ↑`) |
+| Image suivante, précédente du dossier, réglages gardés | ◀ ▶ en haut | `N`, `B` (ou `Page ↓`, `Page ↑` hors d'un curseur) |
 | Cercle d'un diamètre en Å autour du curseur | | `C` |
 | Couper ou rallumer les filtres | | `L` |
 
 La valeur sous le curseur est la vraie valeur du pixel. Le contraste, le gamma et la palette se règlent sans rien recharger.
 
-**Taille de pixel.** Elle est en haut à droite, en orange, comme dans la première version : la valeur utilisée, d'où elle vient (en-tête, XML, saisie), la taille à l'écran quand l'image est réduite, et Nyquist. Quand le fichier ne la donne pas, saisissez-la. Quand l'en-tête se trompe, tapez la bonne valeur : elle remplace celle du fichier pour la règle, les filtres, le CTF, le lien et l'export vers Fiji ; « Rétablir » revient à celle du fichier.
+**Taille de pixel.** Elle est en haut à droite, en orange, comme dans la première version : la valeur utilisée, d'où elle vient (en-tête, XML, saisie), la taille à l'écran quand l'image est réduite, et Nyquist. Quand le fichier ne la donne pas, saisissez-la. Quand l'en-tête se trompe, tapez la bonne valeur : elle remplace celle du fichier pour la règle, les filtres, le CTF, le lien et l'export vers Fiji ; « Rétablir » revient à celle du fichier. Elle vous suit avec `N` et `B` vers les images de même taille et de même taille de pixel d'origine, pas vers les autres (vignettes, films bruts).
 
 **Règle, profil, cercle.** La longueur mesurée s'affiche en grand sous la taille de pixel, avec le profil d'intensité le long de la règle ; « Copier » met les valeurs (distance en Å, intensité) dans le presse-papier pour un tableur. Le profil est lu sur les pixels affichés : en vue réduite, ce sont des moyennes, et le panneau le dit ; zoomez pour la pleine résolution. Le cercle (`C`) suit le curseur à un diamètre en Å choisi : la taille d'une particule, d'un trou ou d'une boîte.
 

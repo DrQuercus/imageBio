@@ -86,6 +86,24 @@ export function niceAngstrom(d: number): number {
   return Number(d.toPrecision(2));
 }
 
+/** The next cut-off of two significant digits above (`direction` 1) or below (-1) `d`, kept
+ *  in the range: what an arrow key does to a slider. One position of the slider is too small
+ *  a step once values are rounded, the thumb would come back where it was. */
+export function stepAngstrom(d: number, direction: 1 | -1, [lo, hi]: [number, number]): number {
+  if (!(d > 0) || !Number.isFinite(d)) return direction > 0 ? lo : hi;
+  // the step of the second digit, taken below d when going down (10 -> 9.9, not 9)
+  const decade = Math.floor(Math.log10(direction > 0 ? d : d * (1 - 1e-9)));
+  const next = niceAngstrom(d + direction * 10 ** (decade - 1));
+  return Math.min(hi, Math.max(lo, next));
+}
+
+/** The bin of the statistics to ask for. While a filter slider is held, those of the overview:
+ *  they follow it at once. Otherwise those of the full plane: the overview has lost the fine
+ *  detail, and its window would saturate the image seen at full resolution (ADR 013). */
+export function statsLevel(proc: Processing, adjusting: boolean, overviewBin: number): number {
+  return adjusting && (proc.lp !== undefined || proc.hp !== undefined) ? overviewBin : 1;
+}
+
 /** The cut-off at a slider position. */
 export function sliderToAngstrom(position: number, [lo, hi]: [number, number]): number {
   const f = Math.min(1, Math.max(0, position / SLIDER_STEPS));

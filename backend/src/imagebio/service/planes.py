@@ -336,9 +336,12 @@ class PlaneService:
                     f"{self._max_response_pixels}: use a larger bin or request a region"
                 )
             aligned = x % bin == 0 and y % bin == 0
+            # a filtered view is reduced in Fourier space when it can be; a plane too large for
+            # its transform is filtered and binned by blocks, as before ADR 013, not refused
+            fourier_fits = max(info.plane_nbytes, info.size_x * info.size_y * 24) <= self.max_plane_bytes
             if bin == 1 and region == full:
                 array = self._source(dataset, file_id, okey, t, c, z, proc)
-            elif bin > 1 and (proc.fourier_bin or (proc.filtered and aligned)):
+            elif bin > 1 and (proc.fourier_bin or (proc.filtered and aligned and fourier_fits)):
                 # the whole plane is reduced once, and regions are cut out of the result
                 if not aligned:
                     raise InvalidRequestError(

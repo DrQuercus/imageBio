@@ -13,8 +13,8 @@ L'ADR 006 avait écarté « filtrer la vue binnée », parce que le filtre agira
 1. **Une vue filtrée à un bin supérieur à 1 est réduite dans Fourier, puis filtrée** à la taille de pixel de la grille réduite, axe par axe (`service/planes.py`, `_reduced`). La réduction garde telles quelles les basses fréquences de la transformée, et le filtre multiplie chacune d'elles par son gain : les deux opérations commutent. Seuls les bords diffèrent, parce que chaque calcul prolonge l'image à sa façon.
 2. **La réduction non filtrée est faite une fois par plan et gardée en cache** (0,4 à 0,7 s). Déplacer ensuite un filtre coûte la transformée du plan réduit : 35 ms au bin 4 d'une image 4k, 0,2 s au bin 2.
 3. **La moyenne par blocs n'est jamais filtrée** : elle replie sous la coupure le bruit qu'elle ne retire pas. Avec un filtre, une vue réduite passe donc par Fourier, que la case « Réduction dans Fourier » soit cochée ou non ; la case ne change plus que les vues non filtrées.
-4. **Une région hors de la grille du bin** est calculée comme avant (filtre en pleine résolution, découpe, moyenne par blocs) : le visualiseur aligne toujours ses régions, l'ancien calcul reste pour les autres clients.
-5. **Les statistiques suivent ce qui est montré quand le client le demande** (`/api/datasets/stats?bin=`) : pendant qu'un filtre bouge, l'histogramme et la fenêtre automatique viennent de la vue réduite, pas d'une nouvelle transformée en pleine résolution.
+4. **Une région hors de la grille du bin**, ou un plan trop grand pour sa transformée (24 octets par pixel au-delà de la limite de mémoire d'un plan : un EER en super-résolution, une mosaïque), est calculé comme avant (filtre en pleine résolution, découpe, moyenne par blocs), pas refusé. Le visualiseur aligne toujours ses régions.
+5. **Les statistiques suivent ce qui est montré quand le client le demande** (`/api/datasets/stats?bin=`) : pendant qu'un curseur de filtre est tenu, et seulement alors, l'histogramme et la fenêtre automatique viennent de la vue réduite. Relâché, on revient à celles du plan entier : la vue réduite a perdu le détail fin, et sa fenêtre saturerait l'image vue en pleine résolution (61 % des pixels hors de la fenêtre pour un passe-haut de 500 Å).
 6. **Le détail en pleine résolution vient au relâchement du curseur** : le visualiseur ne demande pas de région de détail tant que le curseur est tenu.
 7. **Un second profil de filtre** (`sharp=true`, Butterworth d'ordre 4) s'ajoute au profil gaussien. Il fait partie de `Processing.key()`, comme le reste.
 
@@ -30,6 +30,20 @@ L'ADR 006 avait écarté « filtrer la vue binnée », parce que le filtre agira
 | Moyenne par blocs puis filtre, au centre, coupure à moins de 5 pixels réduits | 4 à 45 % | au moins 5 fois l'écart de la méthode retenue |
 
 Le décalage uniforme ne change rien à l'affichage : la fenêtre de contraste automatique l'absorbe.
+
+## Relecture indépendante
+
+Une relecture du lot A a trouvé six défauts et un point de conception ; chacun est corrigé avec un test qui échoue sur le code d'avant.
+
+| Constat | Correction |
+|---|---|
+| Statistiques de la vue réduite gardées après le relâchement : détail saturé en zoom | Seulement pendant que le curseur est tenu (`statsLevel`) |
+| Entrer puis sortir du champ de taille de pixel faisait de la valeur de l'en-tête (1,2000000477 lu en float32, affiché « 1.2 ») une valeur saisie ; « 1. » laissé un instant devenait 1, puis 15 | Seule une valeur tapée est appliquée ; le champ n'est pas réécrit pendant la frappe ; « 1. » attend la suite |
+| Les flèches ne déplaçaient pas les curseurs de filtre (un cran de 1/1000 est plus petit qu'une valeur arrondie) | Une flèche passe à la valeur suivante à deux chiffres (`stepAngstrom`) |
+| Page ↓ sur un curseur ouvrait l'image suivante du dossier | Sur un curseur, Page ↑ et Page ↓ le déplacent |
+| Un clic droit sur un curseur pouvait le laisser « tenu » : plus de détail en zoom | Seul le bouton principal tient un curseur |
+| Vue filtrée refusée pour un plan trop grand pour la transformée | Calculée comme avant (point 4) |
+| Une taille de pixel saisie suivait vers des images d'une autre sorte (`N`, `B`) | Elle ne suit que vers une image de même taille et de même taille de pixel dans son fichier |
 
 ## Conséquences
 

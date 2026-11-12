@@ -138,14 +138,44 @@ test("a filter slider follows the hand on the overview; the detail comes on rele
   const value = await page.getByTestId("lp-value").innerText();
   expect(value).toMatch(/^\d+(\.\d)? Å$/);
 
-  // let go: the detail at full resolution, filtered with the last value
+  // let go: the detail at full resolution, filtered with the last value, and the statistics
+  // of the full plane again (regression: those of the overview saturated the detail)
   const detail = page.waitForRequest((r) => r.url().includes("/api/datasets/plane") && r.url().includes("bin=1&") && r.url().includes("lp="));
+  const fullStats = page.waitForRequest((r) => r.url().includes("/api/datasets/stats") && r.url().includes("lp=") && !r.url().includes("bin="));
   await page.mouse.up();
   const url = (await detail).url();
   expect(url).toContain(`lp=${value.replace(" Å", "")}`);
+  expect((await fullStats).url()).toContain(`lp=${value.replace(" Å", "")}`);
   await expect(page.getByTestId("level")).toHaveText("pleine résolution", { timeout: 15_000 });
+  await expect(page.getByTestId("stats-level")).toHaveCount(0);
   await expect(page.getByTestId("error")).toHaveCount(0);
+
+  // Regression: a pointer down from another button than the main one (a right click, whose
+  // menu can swallow the release) left the slider held, and the detail never came back
+  await page.getByTestId("lp-slider").dispatchEvent("pointerdown", { button: 2, pointerId: 7, isPrimary: true });
+  await page.getByTestId("lp-10").click();
+  await expect(page.getByTestId("level")).toHaveText("pleine résolution", { timeout: 15_000 });
   expect(refused).toEqual([]);
+});
+
+test("the keyboard moves a filter slider, and PageDown on it stays on the image", async ({ page }) => {
+  await openFile(page, "demo/lattice.mrc");
+  await page.getByTestId("lp-20").click();
+  await page.getByTestId("lp-slider").focus();
+  // Regression: one position of the slider was less than one rounded value: the thumb came back
+  const up = planeWith(page, "lp=21");
+  await page.keyboard.press("ArrowRight");
+  await up;
+  await expect(page.getByTestId("lp-value")).toHaveText("21 Å");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByTestId("lp-value")).toHaveText("19 Å");
+  await expect.poll(() => page.url()).toContain("lp=19");
+  // Regression: PageDown on a focused slider opened the next file of the folder
+  await page.keyboard.press("PageDown");
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => (window as unknown as { __imagebio: Debug }).__imagebio.path())).toBe("demo/lattice.mrc");
+  await expect(page.getByTestId("error")).toHaveCount(0);
 });
 
 test("the pixel size is in view, can replace the file's and comes back", async ({ page }) => {
@@ -174,6 +204,30 @@ test("the pixel size is in view, can replace the file's and comes back", async (
   await page.getByTestId("user-apix").fill("1.25");
   await page.getByTestId("user-apix").press("Enter");
   await expect(page.getByTestId("apix-reset")).toHaveCount(0);
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+
+test("passing through the pixel size field changes nothing; a pause while typing loses nothing", async ({ page }) => {
+  // 1.2 Å per pixel in an MRC header is 1.2000000477 once read in float32, shown as "1.2"
+  await openFile(page, "demo/picks/mic_001.mrc");
+  const field = page.getByTestId("user-apix");
+  await expect(field).toHaveValue("1.2");
+  // Regression: focus then blur turned the header's value into a typed one
+  await field.focus();
+  await page.getByTestId("viewer").click();
+  await page.waitForTimeout(600);
+  await expect(page.getByTestId("apix-reset")).toHaveCount(0);
+  await expect(page.getByTestId("apix-source")).toHaveText("En-tête du fichier");
+  expect(page.url()).not.toContain("apix=");
+  // Regression: "1." left alone for a moment was applied as 1 and the field rewritten to "1",
+  // so that the next digits made 15 instead of 1.5
+  await field.fill("");
+  await field.pressSequentially("1.");
+  await page.waitForTimeout(700);
+  await expect(field).toHaveValue("1.");
+  await field.pressSequentially("5");
+  await expect.poll(() => page.url()).toContain("apix=1.5");
+  await expect(page.getByTestId("apix-source")).toContainText("remplace 1.2 Å/px");
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
 

@@ -166,6 +166,26 @@ def test_statistics_of_a_reduced_view_are_those_of_what_is_served(image: tuple[P
     assert stats.auto_hi == pytest.approx(full.auto_hi, abs=0.05 * full.std)
 
 
+def test_a_plane_too_large_for_its_transform_is_still_shown_filtered(image: tuple[Path, np.ndarray]) -> None:
+    # Regression: the Fourier path checks that the plane and its transform fit in memory (24
+    # bytes per pixel); a filtered overview of a larger plane (a super-resolution EER, a
+    # montage) was refused, where it used to be filtered and binned by blocks.
+    path, data = image
+    svc = PlaneService(Settings())
+    svc.max_plane_bytes = data.size * 16  # room for the plane, not for its transform
+    proc = Processing(lowpass=20.0)
+    view = svc.plane(path, bin=4, proc=proc).array
+    reference = bin_mean(fourier_filter(data, apix_x=APIX, lowpass=20.0), 4)
+    np.testing.assert_allclose(view, reference, rtol=1e-5, atol=1e-3)
+    stats, _ = svc.stats(path, proc=proc, bin=4)
+    assert stats.mean == pytest.approx(float(view.astype(np.float64).mean()), rel=1e-6)
+    # asked for explicitly, Fourier binning still says why it cannot be done
+    from imagebio.core.errors import InvalidRequestError
+
+    with pytest.raises(InvalidRequestError, match="too large"):
+        svc.plane(path, bin=4, proc=Processing(lowpass=20.0, fourier_bin=True))
+
+
 @pytest.mark.perf
 def test_moving_a_filter_on_a_4k_overview_is_fast(tmp_path: Path) -> None:
     data = np.random.default_rng(0).normal(100, 3, (4096, 4096)).astype(np.float32)

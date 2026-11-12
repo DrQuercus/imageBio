@@ -7,6 +7,8 @@ import {
   niceAngstrom,
   SLIDER_STEPS,
   sliderToAngstrom,
+  statsLevel,
+  stepAngstrom,
   dirname,
   filterProblem,
   formatResolution,
@@ -353,5 +355,42 @@ describe("filter sliders", () => {
     // App.tsx passes apixFromFile = false when the user typed a size
     expect(processingOf({ ...NO_CRYO, lowpass: 20 }, 0, 1, 2, false)).toEqual({ lp: 20, apix: 2 });
     expect(processingOf({ ...NO_CRYO, lowpass: 20 }, 0, 1, 1.25, true)).toEqual({ lp: 20 });
+  });
+});
+
+describe("filter sliders under the keyboard, statistics of a filtered plane", () => {
+  it("an arrow moves to the next value of two digits, within the range", () => {
+    // Regression: one position of 1000 was too small a step once rounded; the thumb came back
+    const range = filterRange("lowpass", 1);
+    expect(stepAngstrom(20, 1, range)).toBe(21);
+    expect(stepAngstrom(20, -1, range)).toBe(19);
+    expect(stepAngstrom(10, -1, range)).toBe(9.9);
+    expect(stepAngstrom(9.9, 1, range)).toBe(10);
+    expect(stepAngstrom(99, 1, range)).toBe(100);
+    expect(stepAngstrom(100, -1, range)).toBe(99);
+    expect(stepAngstrom(100, 1, range)).toBe(110);
+    expect(stepAngstrom(200, 1, range)).toBe(200);
+    expect(stepAngstrom(2, -1, range)).toBe(2);
+    // no filter yet: from the end where it changes nothing
+    expect(stepAngstrom(Number.NaN, 1, range)).toBe(2);
+    expect(stepAngstrom(Number.NaN, -1, filterRange("highpass", 1))).toBe(5000);
+    // every press changes the value until an end
+    let d = 2;
+    for (let k = 0; k < 400 && d < 200; k++) {
+      const next = stepAngstrom(d, 1, range);
+      expect(next).toBeGreaterThan(d);
+      expect(sliderToAngstrom(angstromToSlider(next, range), range)).toBe(next); // the thumb stays there
+      d = next;
+    }
+    expect(d).toBe(200);
+  });
+
+  it("the statistics come from the overview only while a slider is held", () => {
+    // Regression: they did whenever a filter was on, and the window of the overview, which has
+    // lost the fine detail, saturated the image seen at full resolution
+    expect(statsLevel({ lp: 20 }, true, 4)).toBe(4);
+    expect(statsLevel({ hp: 500 }, true, 4)).toBe(4);
+    expect(statsLevel({ lp: 20 }, false, 4)).toBe(1);
+    expect(statsLevel({}, true, 4)).toBe(1);
   });
 });

@@ -341,6 +341,19 @@ test("the next and previous images of the folder keep the settings", async ({ pa
   await expect(page.getByTestId("file-position")).toHaveText("1 / 2");
   await page.getByTestId("file-next").click();
   await ready(page, "demo/picks/mic_002.mrc");
+  // Regression: a typed pixel size followed to images of another kind (another size, another
+  // pixel size in the file); it now stays with images like the one it was typed for
+  await openFile(page, "demo/lattice.mrc"); // 1024 x 1024 at 1.25 Å; next in the folder: movie.mrc
+  await page.getByTestId("user-apix").fill("2");
+  await page.getByTestId("user-apix").press("Enter");
+  await expect(page.getByTestId("apix-reset")).toBeVisible();
+  await page.getByTestId("viewer").click(); // the keys typed in a field stay in the field
+  await page.keyboard.press("n");
+  await ready(page, "demo/movie.mrc");
+  await expect(page.getByTestId("user-apix")).toHaveValue("0.83");
+  await expect(page.getByTestId("apix-reset")).toHaveCount(0);
+  await page.goto("about:blank");
+  await openFile(page, "demo/picks/mic_002.mrc");
   // a file opened from the list starts afresh: its own pixel size, fitted to the window
   await page.getByTestId("browser").getByRole("button", { name: "mic_001.mrc" }).click();
   await ready(page, "demo/picks/mic_001.mrc");
