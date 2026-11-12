@@ -37,6 +37,7 @@ import {
   tilePosition,
   verdict,
 } from "../src/live/store";
+import { histogram, percentile, squareRows, summary, targetDefocus, timeSeries, verdictBins } from "../src/live/stats";
 
 function item(id: number, patch: Partial<LiveItem> = {}): LiveItem {
   return {
@@ -490,5 +491,58 @@ describe("the judgement of an image, as the server makes it for its reports", ()
     expect(verdict(it, c.rules, c.reference)).toBe(c.verdict);
     if (c.verdict !== null) expect(rejectionReasons(it, c.rules, c.reference).map((r) => r.code)).toEqual(c.reasons);
     expect(imageFlags(it, c.reference, c.calibrated)).toEqual(c.flags);
+  });
+});
+
+
+describe("statistics of a session for the charts", () => {
+  const rules = { ...NO_RULES, fit_max: 5 };
+  const measuredItem = (n: number, fit: number, dir = `Images-Disc1/GridSquare_${100 + (n % 2)}/Data`) =>
+    item(n, { dir, time: 1000 + 60 * n, metrics: { mean: 100 - n, ctf: { defocus: 1.5, fit, score: 10 } }, meta: { epu: { applied_defocus: -1.5 } } });
+
+  it("percentiles interpolate between ranks, as numpy does", () => {
+    expect(percentile([1, 2, 3, 4], 0.5)).toBe(2.5);
+    expect(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.1)).toBeCloseTo(1.9);
+    expect(summary([5, 1, 3])).toEqual({ n: 3, median: 3, p10: 1.4, p90: 4.6 });
+    expect(summary([])).toBeNull();
+  });
+
+  it("a histogram keeps a stray value apart", () => {
+    const values = [...Array.from({ length: 200 }, (_, k) => 3 + (k % 50) / 25), 40];
+    const h = histogram(values, 10)!;
+    expect(h.counts.reduce((a, b) => a + b, 0) + h.below + h.above).toBe(201);
+    expect(h.above).toBeGreaterThanOrEqual(1);
+    expect(h.edges[10]!).toBeLessThan(40); // the stray image does not stretch the axis
+    expect(histogram([2, 2, 2])).toEqual({ edges: [2, 2], counts: [3], below: 0, above: 0 });
+    expect(histogram([NaN])).toBeNull();
+  });
+
+  it("follows a measure over time, with each image's verdict", () => {
+    const items = [measuredItem(2, 6), measuredItem(1, 3), item(3, { state: "incoming" }), item(4, { time: null, metrics: { mean: 1, ctf: { defocus: 1, fit: 3, score: 9 } } })];
+    expect(timeSeries(items, (i) => i.metrics?.ctf?.fit ?? null, rules, 100)).toEqual([
+      { t: 1060, v: 3, verdict: "accepted" },
+      { t: 1120, v: 6, verdict: "rejected" },
+    ]);
+    expect(targetDefocus(items[0]!)).toBe(1.5);
+    expect(targetDefocus(item(9, { meta: { mdoc: { target_defocus: -2 } } }))).toBe(2);
+  });
+
+  it("counts images and verdicts per time bucket", () => {
+    const items = Array.from({ length: 30 }, (_, n) => measuredItem(n, n < 20 ? 3 : 6));
+    const bins = verdictBins(items, rules, 100)!;
+    expect(bins.bucket).toBe(60);
+    expect(bins.bins.reduce((a, b) => a + b[0], 0)).toBe(30);
+    expect(bins.bins.reduce((a, b) => a + b[1], 0)).toBe(20);
+    expect(bins.bins.reduce((a, b) => a + b[2], 0)).toBe(10);
+    expect(verdictBins([], rules, 100)).toBeNull();
+  });
+
+  it("groups the images by grid square", () => {
+    const items = [measuredItem(0, 3), measuredItem(1, 6), measuredItem(2, 4), measuredItem(3, 3, "elsewhere")];
+    expect(squareRows(items, rules, 100)).toEqual([
+      // images 0 and 2: counts 100 and 98 against a reference of 100
+      { name: "GridSquare_100", images: 2, accepted: 2, rejected: 0, medianFit: 3.5, medianIce: expect.closeTo(Math.log(100 / 98) / 2, 6), first: 1000 },
+      { name: "GridSquare_101", images: 1, accepted: 0, rejected: 1, medianFit: 6, medianIce: expect.closeTo(Math.log(100 / 99), 6), first: 1060 },
+    ]);
   });
 });

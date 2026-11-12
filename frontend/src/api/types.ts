@@ -373,7 +373,45 @@ export interface LiveSummary {
   /** Acceptance thresholds of the watch; null: not judged. */
   quality: QualityRules;
   processing: ProcessingState;
+  /** What the CTF of this session is estimated with (the voltage of a file comes first). */
+  microscope: MicroscopeState;
+  /** Enough to notice that a report was made (one made by itself, at the end of a silence). */
+  reports: { count: number; last: number | null; auto: boolean };
 }
+
+/** Where a microscope parameter of a session comes from. */
+export type MicroscopeSource = "session" | "root" | "server";
+
+export interface MicroscopeState {
+  kv: { value: number; source: MicroscopeSource };
+  cs_mm: { value: number; source: MicroscopeSource };
+  amplitude: { value: number; source: MicroscopeSource };
+  /** What was set for this session; null: not set. */
+  own: { kv: number | null; cs_mm: number | null; amplitude: number | null };
+  set_at: number | null;
+  /** After a change: how many images are measured again. */
+  remeasure?: number;
+}
+
+/** One quality report of a watch. */
+export interface ReportInfo {
+  id: number;
+  created_at: number;
+  trigger: "manual" | "stop" | "idle";
+  bytes: number;
+  exposures: number;
+  newest: number | null;
+}
+
+export interface ReportListing {
+  /** Whether a report is made when the watch ends. */
+  auto: boolean;
+  /** Minutes of silence after which a report is made; 0: never. */
+  idle_min: number;
+  reports: ReportInfo[];
+}
+
+export type ReportKind = "html" | "json" | "csv" | "zip";
 
 /** What the user of a watch calls a good image (live/quality.py). */
 export interface QualityRules {

@@ -13,7 +13,10 @@ import { ImageGrid } from "./ImageGrid";
 import { RateGraph } from "./RateGraph";
 import { StatsBar } from "./StatsBar";
 import { IcePanel } from "./IcePanel";
+import { StatsView } from "./Charts";
+import { MicroscopePanel } from "./MicroscopePanel";
 import { ProcessingPanel } from "./ProcessingPanel";
+import { ReportPanel } from "./ReportPanel";
 import { QualityPanel } from "./QualityPanel";
 import { StageMap } from "./StageMap";
 import {
@@ -59,7 +62,7 @@ export function LiveView({ dir, onViewer }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("time");
   const [filter, setFilter] = useState<ItemFilter>("all");
   const [category, setCategory] = useState<CategoryView>("data");
-  const [mapOn, setMapOn] = useState(false);
+  const [view, setView] = useState<"grid" | "map" | "stats">("grid");
   const [tile, setTile] = useState(180);
   const onError = useCallback((m: string) => setError(m), []);
 
@@ -201,10 +204,12 @@ export function LiveView({ dir, onViewer }: Props) {
             </div>
           ))}
         </section>
+        {watch && summary && <ReportPanel key={watch.id} watchId={watch.id} last={summary.reports.last} onError={onError} />}
         {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
         {watch && summary && <IcePanel watchId={watch.id} ice={summary.ice} onError={onError} />}
         {watch && summary && <QualityPanel watchId={watch.id} rules={rules} mfp={mfp} onError={onError} />}
         {watch && summary && <ProcessingPanel key={watch.id} watchId={watch.id} state={summary.processing} onError={onError} />}
+        {watch && summary && <MicroscopePanel watchId={watch.id} microscope={summary.microscope} onError={onError} />}
         <div className="live-browser">
           <FileBrowser current={null} onOpen={onViewer} onError={onError} onDirectory={setBrowsed} />
           <button className="watch-here" disabled={!browsed} onClick={() => open(browsed)} data-testid="watch-here">
@@ -247,9 +252,13 @@ export function LiveView({ dir, onViewer }: Props) {
                   <option key={k} value={k}>{FILTER_LABELS[k]}</option>
                 ))}
               </select>
-              <button className={mapOn ? "on" : ""} onClick={() => setMapOn((v) => !v)} data-testid="map-toggle"
+              <button className={view === "map" ? "on" : ""} onClick={() => setView((v) => (v === "map" ? "grid" : "map"))} data-testid="map-toggle"
                 title="Positions de platine des images montrées, colorées selon les seuils d'acceptation">
                 Carte
+              </button>
+              <button className={view === "stats" ? "on" : ""} onClick={() => setView((v) => (v === "stats" ? "grid" : "stats"))} data-testid="stats-toggle"
+                title="Graphiques des images montrées : défocus, CTF, glace, mouvement, par carré de grille">
+                Graphiques
               </button>
               <span className="spacer" />
               <label className="tile-size">
@@ -257,8 +266,10 @@ export function LiveView({ dir, onViewer }: Props) {
                 <input type="range" min={100} max={320} step={20} value={tile} onChange={(e) => setTile(Number(e.target.value))} aria-label="Taille des vignettes" />
               </label>
             </div>
-            {mapOn ? (
+            {view === "map" ? (
               <StageMap items={shown} rules={rules} reference={reference} onOpen={onViewer} />
+            ) : view === "stats" ? (
+              <StatsView items={shown} rules={rules} reference={reference} />
             ) : (
               <ImageGrid items={shown} tile={tile} reference={reference} calibrated={calibrated} mfp={mfp} rules={rules} onOpen={onViewer} />
             )}

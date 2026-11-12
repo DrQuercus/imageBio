@@ -23,8 +23,12 @@ import type {
   PlaneIndex,
   PlaneStats,
   QualityRules,
+  MicroscopeState,
   Processing,
   ProcessingState,
+  ReportInfo,
+  ReportKind,
+  ReportListing,
   ReaderOptions,
   Region,
   Spectrum,
@@ -230,6 +234,26 @@ export const api = {
         signal,
         "PUT",
       ),
+
+    /** Set the microscope of the session of a watch; null forgets a value. */
+    setMicroscope: (id: number, kv: number | null, cs: number | null, amp: number | null, signal?: AbortSignal) =>
+      getJson<MicroscopeState>(
+        `/api/live/watches/${id}/microscope?${buildQuery({ kv: kv ?? undefined, cs: cs ?? undefined, amp: amp ?? undefined })}`,
+        signal,
+        "PUT",
+      ),
+
+    reports: (id: number, signal?: AbortSignal) => getJson<ReportListing>(`/api/live/watches/${id}/reports`, signal),
+
+    /** Make the quality report of the session now. */
+    makeReport: (id: number, signal?: AbortSignal) => getJson<ReportInfo>(`/api/live/watches/${id}/reports`, signal, "POST"),
+
+    setReportAuto: (id: number, auto: boolean, signal?: AbortSignal) =>
+      getJson<ReportListing>(`/api/live/watches/${id}/reports?${buildQuery({ auto })}`, signal, "PUT"),
+
+    /** A file of a report; ``view``: the page to read in the browser rather than to download. */
+    reportUrl: (watch: number, report: number, kind: ReportKind, view = false) =>
+      `/api/live/watches/${watch}/reports/${report}/${kind}${view ? "?view=true" : ""}`,
 
     /** Ask for, or stop asking for, the programs of the server on what arrives in a watch. */
     setProcessing: (id: number, on: boolean, signal?: AbortSignal) =>

@@ -332,3 +332,61 @@ test("the programs of the server run on what arrives, once the session asks for 
   await page.reload();
   await expect(page.getByTestId("processing-on")).not.toBeChecked();
 });
+
+test("the quality of the session in charts, and its report to keep", async ({ page }) => {
+  await page.goto(LINK);
+  await expect(page.getByTestId("stat-ice")).toHaveText(/^-?\d\.\d\d$/, { timeout: 60_000 }); // measured
+
+  // charts of the images shown: the images of this session are too small for a CTF, not for the ice
+  await page.getByTestId("stats-toggle").click();
+  await expect(page.getByTestId("stats-view")).toBeVisible();
+  await expect(page.getByTestId("chart-verdicts")).toBeVisible();
+  await expect(page.getByTestId("chart-ice")).toHaveAttribute("data-points", /^\d{2,}$/);
+  await expect(page.getByTestId("hist-ice")).toBeVisible();
+  // (the defocus is drawn only for images with a CTF: here those an earlier test had a program fit)
+  await expect(page.getByTestId("squares")).toContainText("GridSquare_1000003");
+  await page.getByTestId("stats-toggle").click();
+  await expect(page.getByTestId("stats-view")).toHaveCount(0);
+
+  // a report, now
+  const rows = page.getByTestId("report-row");
+  const before = await rows.count();
+  await page.getByTestId("report-now").click();
+  await expect(rows).toHaveCount(before + 1, { timeout: 30_000 });
+  await expect(rows.first()).toContainText("demandé");
+  const href = await rows.first().getByTestId("report-view").getAttribute("href");
+  expect(href).toMatch(/\/reports\/\d+\/html\?view=true$/);
+  const shown = await page.request.get(href!);
+  expect(shown.status()).toBe(200);
+  expect(shown.headers()["content-security-policy"]).toMatch(/^sandbox; default-src 'none'/);
+  const text = await shown.text();
+  expect(text).toContain("Rapport de qualité de la collecte");
+  expect(text).toContain("demo/epu_session");
+  expect(text).not.toMatch(/<script/i);
+  const [zip] = await Promise.all([page.waitForEvent("download"), rows.first().getByTestId("report-zip").click()]);
+  expect(zip.suggestedFilename()).toMatch(/^rapport_epu_session_\d{4}-\d\d-\d\d_\d{4}\.zip$/);
+
+  // made by itself when the watch ends, unless told not to: the choice is kept by the server
+  const auto = page.getByTestId("report-auto");
+  await expect(auto).toBeChecked();
+  await auto.uncheck();
+  await page.reload();
+  await expect(page.getByTestId("report-auto")).not.toBeChecked();
+  await page.getByTestId("report-auto").check();
+  await expect(page.getByTestId("report-auto")).toBeChecked();
+
+  // the microscope of the session: the voltage of a 200 kV microscope, then back to the server's
+  await expect(page.getByTestId("microscope-source")).toContainText("300 kV (serveur)");
+  await page.getByTestId("microscope-kv").fill("2000"); // not a voltage one can ask for
+  await expect(page.getByTestId("microscope-save")).toBeDisabled();
+  await page.getByTestId("microscope-kv").fill("200");
+  await page.getByTestId("microscope-save").click();
+  await expect(page.getByTestId("microscope-note")).toContainText("enregistré");
+  await expect(page.getByTestId("microscope-source")).toContainText("200 kV (réglé pour la session)", { timeout: 10_000 });
+  await page.reload();
+  await expect(page.getByTestId("microscope-kv")).toHaveValue("200");
+  await page.getByTestId("microscope-kv").fill("");
+  await page.getByTestId("microscope-save").click();
+  await expect(page.getByTestId("microscope-source")).toContainText("300 kV (serveur)", { timeout: 10_000 });
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
