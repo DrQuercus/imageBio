@@ -406,12 +406,21 @@ export interface ReportInfo {
   newest: number | null;
 }
 
+export interface AtlasRef {
+  name: string;
+  /** Logical path. */
+  path: string;
+}
+
 export interface ReportListing {
   /** Whether a report is made when the watch ends. */
   auto: boolean;
   /** Minutes of silence after which a report is made; 0: never. */
   idle_min: number;
   reports: ReportInfo[];
+  /** The atlas the reports show: the one chosen for this watch, else the one found in the
+   *  session (EPU's stitched Atlas_1), else none. */
+  atlas: { chosen: AtlasRef | null; found: AtlasRef | null };
 }
 
 export type ReportKind = "html" | "json" | "csv" | "zip";

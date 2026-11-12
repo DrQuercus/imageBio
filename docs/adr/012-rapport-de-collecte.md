@@ -37,6 +37,15 @@ Le rapport commence par ce que ses chiffres ne disent pas, avec les nombres d'im
 
 La tension, le Cs et le contraste d'amplitude se règlent pour un dossier de données (`[[roots]]`) et pour une session (le dossier surveillé). L'ordre : le fichier d'acquisition, la session, le dossier de données, le serveur. Les valeurs appartiennent au dossier surveillé, pas à la surveillance : les mesures sont partagées par tous ceux qui le suivent. Chaque mesure garde les valeurs avec lesquelles son CTF a été estimé ; les changer fait mesurer de nouveau ce qui en avait utilisé d'autres.
 
+### L'atlas et les carrés (ajouté le 12 novembre 2026)
+
+La page montre l'atlas de la grille et, pour chaque carré où des images ont été prises, la vue qu'EPU en a prise, encadrée selon la part d'images acceptées (vert 70 % et plus, orange 40 à 70 %, rouge en dessous ; 48 carrés au plus, les plus fournis).
+
+- **L'atlas** est celui qu'EPU assemble (`Atlas/Atlas_1.mrc`, pas ses tuiles) quand il est dans le dossier surveillé. EPU le garde le plus souvent dans une session à part : l'utilisateur peut en **choisir** un (`PUT /api/live/watches/{id}/atlas?path=`).
+- Le choix appartient à la **surveillance**, pas au dossier comme le microscope : un autre utilisateur du même dossier n'a peut-être pas le droit de lire ce fichier. Il est autorisé au choix et de nouveau à chaque rapport demandé ; un rapport fait de lui-même (fin, silence) lit le fichier choisi s'il est toujours un fichier ordinaire atteint sans lien, comme la surveillance continue de lire son dossier.
+- Un atlas choisi qui ne peut pas être montré est **dit** (illisible, plus accessible), pas omis en silence.
+- **Les carrés ne sont pas placés sur l'atlas** : il faut le lien entre coordonnées de la platine et pixels de l'atlas tel qu'EPU l'écrit, à lire sur une vraie session. Les positions de la platine restent dans leur carte.
+
 ## Relecture indépendante
 
 Le chemin des rapports a été relu par un agent chargé d'y trouver des défauts réels, chacun reproduit. Cinq, tous corrigés avec un test de régression qui échoue sur l'ancien code :
@@ -51,7 +60,7 @@ Le chemin des rapports a été relu par un agent chargé d'y trouver des défaut
 
 ## Conséquences
 
-- Index au schéma 8 (rapports, historique des alertes, microscope de la session).
+- Index au schéma 8 (rapports, historique des alertes, microscope de la session), puis 9 (atlas choisi par surveillance).
 - Les rapports ne sont pas dans les sauvegardes : ils se téléchargent, et la bibliothèque du laboratoire est leur place.
 - Le dépôt automatique dans la bibliothèque (le serveur écrivant lui-même dans un dossier) n'est pas fait : il ajouterait un chemin d'écriture, à décider.
 - Les graphiques du panneau sont calculés par l'interface (`live/stats.ts`) à la manière du rapport : deux codes pour les mêmes chiffres, testés chacun contre des valeurs calculées à part.

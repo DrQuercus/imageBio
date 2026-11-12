@@ -362,3 +362,14 @@ ul.reports a:hover { text-decoration: underline; }
 .profile-axis { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 4px; color: var(--dim); font: 10px var(--mono); }
 .profile-axis button { padding: 1px 7px; font-size: 11px; }
 .topbar .position { color: var(--dim); font: 12px var(--mono); padding: 0 4px; }
+
+/* the atlas of the reports */
+.atlas-choice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-top: 8px; font-size: 12px; }
+.atlas-choice .field-label { margin: 0; }
+.atlas-choice a { color: var(--accent); word-break: break-all; }
+.atlas-choice .links { margin-left: auto; display: flex; gap: 4px; }
+.atlas-choice .links button { padding: 1px 7px; font-size: 11px; }
+.modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); }
+.modal-box { width: min(420px, calc(100vw - 32px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column;
+  background: var(--bg1); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+.modal-browser { flex: 1; min-height: 240px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; margin: 8px 0; }

@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { ReportInfo, ReportListing } from "../api/types";
+import { FileBrowser } from "../components/FileBrowser";
 
 interface Props {
   watchId: number;
+  /** Logical path of the watched directory: the atlas is looked for from its parent. */
+  session: string;
   /** From the summary: a new report shows up without asking (one made by itself). */
   last: number | null;
   onError: (message: string) => void;
@@ -20,9 +23,10 @@ const when = (t: number) =>
 
 /** The quality report of the session: made now, or by itself when the watch ends; each one
  *  to read, or to download whole (the zip) for the library of collections. */
-export function ReportPanel({ watchId, last, onError }: Props) {
+export function ReportPanel({ watchId, session, last, onError }: Props) {
   const [listing, setListing] = useState<ReportListing | null>(null);
   const [busy, setBusy] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [asked, setAsked] = useState<boolean | null>(null); // what was just asked, until the server says
   const fail = (e: unknown) => onError(e instanceof Error ? e.message : String(e));
 
@@ -42,6 +46,12 @@ export function ReportPanel({ watchId, last, onError }: Props) {
       .catch(fail)
       .finally(() => setBusy(false));
   };
+  const setAtlas = (path: string | null) => {
+    setChoosing(false);
+    api.live.setAtlas(watchId, path).then(setListing).catch(fail);
+  };
+  const atlas = listing?.atlas;
+  const used = atlas?.chosen ?? atlas?.found ?? null;
   const setAuto = (auto: boolean) => {
     setAsked(auto);
     api.live
@@ -64,6 +74,39 @@ export function ReportPanel({ watchId, last, onError }: Props) {
           {listing && listing.idle_min > 0 ? `, et après ${listing.idle_min} min sans image` : ""}
         </span>
       </label>
+      <div className="atlas-choice" data-testid="report-atlas">
+        <span className="field-label">Atlas</span>
+        {used ? (
+          <span>
+            <a href={`/#path=${encodeURIComponent(used.path)}`} title={used.path} data-testid="report-atlas-name">{used.name}</a>
+            {atlas?.chosen ? " (choisi)" : " (trouvé dans la session)"}
+          </span>
+        ) : (
+          <span className="note" data-testid="report-atlas-name">aucun dans la session</span>
+        )}
+        <span className="links">
+          <button onClick={() => setChoosing(true)} disabled={!listing} data-testid="atlas-choose"
+            title="Montrer dans les rapports l'atlas d'une autre session (EPU le garde souvent à part)">Choisir…</button>
+          {atlas?.chosen && (
+            <button onClick={() => setAtlas(null)} data-testid="atlas-clear"
+              title={atlas.found ? `Revenir à ${atlas.found.name}, trouvé dans la session` : "Ne plus montrer d'atlas"}>Retirer</button>
+          )}
+        </span>
+      </div>
+      {choosing && (
+        <div className="modal" role="dialog" aria-label="Choisir l'atlas" data-testid="atlas-dialog">
+          <div className="modal-box">
+            <div className="panel-title">Choisir l'atlas des rapports</div>
+            <p className="note">L'image de toute la grille à basse résolution (EPU : Atlas/Atlas_1.mrc). Cliquez-la.</p>
+            <div className="modal-browser">
+              <FileBrowser current={session} onOpen={(path) => setAtlas(path)} onError={onError} />
+            </div>
+            <div className="buttons">
+              <button onClick={() => setChoosing(false)} data-testid="atlas-cancel">Annuler</button>
+            </div>
+          </div>
+        </div>
+      )}
       <ul className="reports" data-testid="report-list">
         {listing?.reports.map((r) => (
           <li key={r.id} data-testid="report-row" data-id={r.id}>

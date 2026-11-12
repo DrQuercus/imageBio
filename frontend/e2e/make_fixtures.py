@@ -42,7 +42,7 @@ def write_session(directory: Path) -> None:
     """An EPU-like session that ended two days ago: one exposure every six seconds."""
     shutil.rmtree(directory, ignore_errors=True)
     start = time.time() - 2 * 86400
-    sim = MicroscopeSim(directory, SimSettings(rate_per_hour=600, pause_probability=0.0, seed=11))
+    sim = MicroscopeSim(directory, SimSettings(rate_per_hour=600, pause_probability=0.0, seed=11, atlas=True))
     second = 0
     while len(sim.exposures) < LIVE_EXPOSURES:
         sim.step(start + second)

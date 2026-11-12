@@ -204,7 +204,7 @@ export function LiveView({ dir, onViewer }: Props) {
             </div>
           ))}
         </section>
-        {watch && summary && <ReportPanel key={watch.id} watchId={watch.id} last={summary.reports.last} onError={onError} />}
+        {watch && summary && <ReportPanel key={watch.id} watchId={watch.id} session={watch.path} last={summary.reports.last} onError={onError} />}
         {watch?.active && <AlertsPanel watchId={watch.id} firing={summary?.alerts ?? []} onError={onError} />}
         {watch && summary && <IcePanel watchId={watch.id} ice={summary.ice} onError={onError} />}
         {watch && summary && <QualityPanel watchId={watch.id} rules={rules} mfp={mfp} onError={onError} />}

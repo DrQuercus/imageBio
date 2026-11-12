@@ -365,6 +365,28 @@ test("the quality of the session in charts, and its report to keep", async ({ pa
   expect(text).not.toMatch(/<script/i);
   const [zip] = await Promise.all([page.waitForEvent("download"), rows.first().getByTestId("report-zip").click()]);
   expect(zip.suggestedFilename()).toMatch(/^rapport_epu_session_\d{4}-\d\d-\d\d_\d{4}\.zip$/);
+  // the atlas of the session and the overview of each of its four squares are in the page
+  await expect(page.getByTestId("report-atlas")).toContainText("Atlas_1.mrc (trouvé dans la session)");
+  expect(text).toContain('alt="Atlas de la grille"');
+  expect(text.match(/alt="Vue du GridSquare_\d+"/g)).toHaveLength(4);
+
+  // another atlas, chosen in the file browser (EPU usually keeps it in a session of its own)
+  await page.getByTestId("atlas-choose").click();
+  const dialog = page.getByTestId("atlas-dialog");
+  await dialog.getByRole("button", { name: "gradient.mrc" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId("report-atlas")).toContainText("gradient.mrc (choisi)");
+  await page.reload();
+  await expect(page.getByTestId("report-atlas")).toContainText("gradient.mrc (choisi)"); // kept by the server
+  await page.waitForTimeout(10_500); // a report asked for again within ten seconds is the one just made
+  await page.getByTestId("report-now").click();
+  await expect(rows).toHaveCount(before + 2, { timeout: 30_000 });
+  const chosen = await (await page.request.get((await rows.first().getByTestId("report-view").getAttribute("href"))!)).text();
+  expect(chosen).toContain("choisi pour ce rapport");
+  expect(chosen).toContain("gradient.mrc");
+  await page.getByTestId("atlas-clear").click();
+  await expect(page.getByTestId("report-atlas")).toContainText("Atlas_1.mrc (trouvé dans la session)");
+  await expect(page.getByTestId("atlas-clear")).toHaveCount(0);
 
   // made by itself when the watch ends, unless told not to: the choice is kept by the server
   const auto = page.getByTestId("report-auto");

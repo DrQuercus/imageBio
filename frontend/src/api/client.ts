@@ -255,6 +255,10 @@ export const api = {
     setReportAuto: (id: number, auto: boolean, signal?: AbortSignal) =>
       getJson<ReportListing>(`/api/live/watches/${id}/reports?${buildQuery({ auto })}`, signal, "PUT"),
 
+    /** Choose the atlas of the reports (a logical path), or go back to the session's (null). */
+    setAtlas: (id: number, path: string | null, signal?: AbortSignal) =>
+      getJson<ReportListing>(`/api/live/watches/${id}/atlas?${buildQuery({ path: path ?? undefined })}`, signal, "PUT"),
+
     /** A file of a report; ``view``: the page to read in the browser rather than to download. */
     reportUrl: (watch: number, report: number, kind: ReportKind, view = false) =>
       `/api/live/watches/${watch}/reports/${report}/${kind}${view ? "?view=true" : ""}`,

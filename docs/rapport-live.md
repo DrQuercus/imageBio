@@ -28,7 +28,7 @@ Les vingt derniers rapports d'une surveillance sont gardés dans `<dossier d'ét
 5. Le CTF : défocus mesuré face au défocus visé, résolution de l'ajustement dans le temps, histogrammes, et le microscope avec lequel il a été estimé (tension, Cs, contraste d'amplitude, et d'où vient chaque valeur).
 6. La glace et le mouvement.
 7. **Les paramètres d'acquisition** lus dans les fichiers (tension, grandissement, taille de pixel, détecteur, fractions, temps d'exposition, dose, défocus visés, inclinaison, logiciel, microscope) : leurs valeurs, et quand un paramètre qui ne devrait pas bouger a changé.
-8. La grille : un tableau par carré, et les positions de la platine colorées selon le verdict.
+8. La grille : l'**atlas** (celui d'EPU trouvé dans la session, ou celui choisi dans le panneau du rapport), la **vue de chaque carré** où des images ont été prises, encadrée selon la part d'images acceptées, un tableau par carré, et les positions de la platine colorées selon le verdict. Les carrés ne sont pas encore placés sur l'atlas.
 9. Les meilleures images et les rejetées, avec leurs vignettes et leurs raisons.
 10. Les alertes annoncées pendant la surveillance, les programmes du serveur, et toutes les mesures en un tableau.
 
@@ -65,7 +65,8 @@ Les noms des champs sont en anglais, les unités sont dans les noms ou ci-dessou
 | `quality` | `judged`, `accepted`, `rejected`, `accepted_share`, `reasons` (`fit`, `ice`, `ring`, `drift`, `defocus`) ; `null` sans seuil. |
 | `distributions` | `ctf_fit`, `defocus`, `defocus_error`, `astigmatism`, `ice`, `ice_nm`, `ice_ring`, `motion`, `early_motion`, `ctf_thickness`, `mean_counts` : `n`, `min`, `p10`, `median`, `p90`, `max`, `mean`, `histogram` (`edges`, `counts`, `below`, `above`). |
 | `series` | `defocus`, `ctf_fit`, `ice`, `motion` : `[temps, valeur, verdict]` (`a`, `r` ou vide), 1500 points au plus ; `target_defocus` : `[temps, valeur]`. |
-| `squares`, `square_count` | Par carré de grille : `name`, `exposures`, `accepted`, `rejected`, `first`, `median_fit`, `median_defocus`, `median_ice`, `stage`. |
+| `atlas` | `null`, ou `name`, `path` (chemin logique), `source` (`found` : trouvé dans la session ; `chosen` : choisi), `problem` (`null`, `unreadable`, `not_allowed`). |
+| `squares`, `square_count` | Par carré de grille : `name`, `exposures`, `accepted`, `rejected`, `first`, `median_fit`, `median_defocus`, `median_ice`, `stage`, `overview` (`null`, ou `id` et `path` de la vue du carré prise par EPU, la plus récente). |
 | `stage` | `[x, y, verdict]` en µm. |
 | `best`, `worst` | Six images chacune : `id`, `name`, `path`, `time`, `verdict`, `why`, `fit`, `defocus`, `ice`, `flags`. |
 | `alerts` | `condition`, `started`, `ended`, `seconds`. |

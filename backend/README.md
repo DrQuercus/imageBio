@@ -137,6 +137,7 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `GET /api/live/watches/{id}/reports` | Les rapports de qualité de la surveillance, du plus récent au plus ancien, et si un rapport est écrit à sa fin (`auto`, `idle_min`) |
 | `POST /api/live/watches/{id}/reports` | Écrire le rapport maintenant (redemandé dans les dix secondes : celui qui vient d'être fait) |
 | `PUT /api/live/watches/{id}/reports?auto=` | Écrire ou non un rapport à la fin de la surveillance et après un silence de la collecte |
+| `PUT /api/live/watches/{id}/atlas?path=` | Choisir l'atlas que montrent les rapports (un fichier que l'utilisateur peut lire) ; sans `path`, revenir à celui de la session (`Atlas/Atlas_1.mrc` d'EPU), s'il y en a un |
 | `GET /api/live/watches/{id}/reports/{rid}/{html,json,csv,zip}` | Un fichier du rapport, en téléchargement ; `?view=true` pour lire la page dans le navigateur, dans un bac à sable |
 | `PUT /api/live/watches/{id}/microscope?kv=&cs=&amp=` | Le microscope de la session (tension, Cs, contraste d'amplitude) ; ce qui est omis est oublié. Rend les valeurs en vigueur, leur origine, et combien d'images seront mesurées de nouveau |
 | `PUT /api/live/watches/{id}/processing?on=` | Demander, ou ne plus demander, les programmes déclarés sur le serveur pour ce qui arrive dans la session. `processing` du résumé dit s'il y en a (`available`, `steps`), si la session les demande (`on`) et où ils en sont (`done`, `waiting`) |
