@@ -61,6 +61,7 @@ describe("links", () => {
       cryo: {
         lowpass: 20, highpass: 500, average: 5, spectrum: true, gain: "cryo/session 1/ref.gain", gainOrient: 6, gainInvert: true,
         fourierBin: true, picks: "cryo/job 5/particles.star", picksFlipY: true, picksDiameter: 180, picksMinScore: -0.25,
+        sharp: true, filtersOff: true,
       },
       gallery: true,
     };
@@ -78,6 +79,9 @@ describe("links", () => {
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, gain: "r/g.gain" } })).toBe("#path=a.mrc&gain=r%2Fg.gain");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: off })).toBe("#path=a.mrc");
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, lowpass: 7.5 } })).toBe("#path=a.mrc&lp=7.5");
+    // filters switched off are kept in the link; switching off nothing is not written
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, lowpass: 7.5, filtersOff: true } })).toBe("#path=a.mrc&lp=7.5&fo=1");
+    expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: { ...off, filtersOff: true } })).toBe("#path=a.mrc");
     // the settings of the picks mean nothing without a coordinate file
     const noPicks = { ...off, picks: null, picksFlipY: true, picksDiameter: 64, picksMinScore: 0.3 };
     expect(formatLink({ path: "a.mrc", index: { t: 0, c: 0, z: 0 }, options: {}, cryo: noPicks })).toBe("#path=a.mrc");

@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { DirEntry, PicksResponse } from "../src/api/types";
 import {
+  angstromToSlider,
   averageEnd,
+  filterRange,
+  niceAngstrom,
+  SLIDER_STEPS,
+  sliderToAngstrom,
   dirname,
   filterProblem,
   formatResolution,
@@ -297,5 +302,56 @@ describe("power spectrum display", () => {
     expect(formatResolution(12.44)).toBe("12.4 Å");
     expect(formatResolution(250)).toBe("250 Å");
     expect(formatResolution(Infinity)).toBe("∞");
+  });
+});
+
+describe("filter sliders", () => {
+  it("cover Nyquist to coarse cut-offs on a logarithmic scale", () => {
+    expect(filterRange("lowpass", 1.25)).toEqual([2.5, 200]);
+    expect(filterRange("lowpass", 0.5)).toEqual([1, 200]);
+    expect(filterRange("lowpass", 10)).toEqual([20, 500]); // a tomogram: up to 25 Nyquist
+    expect(filterRange("lowpass", null)).toEqual([2, 200]);
+    expect(filterRange("highpass", 1.25)).toEqual([50, 5000]);
+    expect(filterRange("highpass", 10)).toEqual([200, 20000]);
+    const range = filterRange("lowpass", 1);
+    expect(sliderToAngstrom(0, range)).toBe(2);
+    expect(sliderToAngstrom(SLIDER_STEPS, range)).toBe(200);
+    expect(sliderToAngstrom(SLIDER_STEPS / 2, range)).toBe(20); // the geometric middle
+    expect(sliderToAngstrom(-5, range)).toBe(2);
+    expect(sliderToAngstrom(SLIDER_STEPS * 2, range)).toBe(200);
+  });
+
+  it("round values to two significant digits, and place them back", () => {
+    expect([3.749, 12.4, 254, 1949].map(niceAngstrom)).toEqual([3.7, 12, 250, 1900]);
+    const range = filterRange("lowpass", 1);
+    for (const d of [2, 3.7, 12, 20, 55, 200]) expect(sliderToAngstrom(angstromToSlider(d, range), range)).toBe(d);
+    expect(angstromToSlider(1, range)).toBe(0); // outside: at the ends
+    expect(angstromToSlider(900, range)).toBe(SLIDER_STEPS);
+    expect(angstromToSlider(0, range)).toBe(0);
+    // every position gives a value of the range, and moving right never goes finer
+    let previous = 0;
+    for (let k = 0; k <= SLIDER_STEPS; k += 7) {
+      const d = sliderToAngstrom(k, range);
+      expect(d).toBeGreaterThanOrEqual(previous);
+      previous = d;
+    }
+  });
+
+  it("switching the filters off keeps them but asks for nothing", () => {
+    const filtered = { ...NO_CRYO, lowpass: 20, highpass: 400, sharp: true };
+    expect(processingOf(filtered, 0, 1, 1.25, true)).toEqual({ lp: 20, hp: 400, sharp: true });
+    expect(processingOf({ ...filtered, filtersOff: true }, 0, 1, 1.25, true)).toEqual({});
+    // nor complains about filters that are not applied
+    expect(filterProblem({ ...filtered, filtersOff: true }, null)).toBeNull();
+    expect(filterProblem(filtered, null)).toContain("Taille de pixel inconnue");
+    // the profile means nothing without a filter
+    expect(processingOf({ ...NO_CRYO, sharp: true }, 0, 1, 1.25, true)).toEqual({});
+    expect(processingKey({ lp: 20, sharp: true })).not.toBe(processingKey({ lp: 20 }));
+  });
+
+  it("sends a typed pixel size, even one that replaces the file's", () => {
+    // App.tsx passes apixFromFile = false when the user typed a size
+    expect(processingOf({ ...NO_CRYO, lowpass: 20 }, 0, 1, 2, false)).toEqual({ lp: 20, apix: 2 });
+    expect(processingOf({ ...NO_CRYO, lowpass: 20 }, 0, 1, 1.25, true)).toEqual({ lp: 20 });
   });
 });

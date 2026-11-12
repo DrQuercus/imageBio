@@ -63,14 +63,15 @@ def _calibration(
     calibration: Calibration, apix: float | None
 ) -> tuple[dict[str, Any], tuple[float, float] | None]:
     """The ImageJ metadata and the resolution tags (pixels per unit) of a calibration.
-    ``apix``: Å per pixel given by the user for a file that does not know its own."""
+    ``apix``: Å per pixel given by the user; it replaces the file's own, as it does for the
+    filters and the CTF (a header can be wrong)."""
     x, y = calibration.x, calibration.y
-    if x.known and y.known and x.unit == y.unit and x.unit in _UNITS:
-        unit, factor = _UNITS[x.unit]
-        size_x, size_y = x.value * factor, y.value * factor
-    elif apix is not None and apix > 0:
+    if apix is not None and apix > 0:
         unit, factor = _UNITS["Å"]
         size_x = size_y = apix * factor
+    elif x.known and y.known and x.unit == y.unit and x.unit in _UNITS:
+        unit, factor = _UNITS[x.unit]
+        size_x, size_y = x.value * factor, y.value * factor
     else:
         return {}, None
     metadata: dict[str, Any] = {"unit": unit}

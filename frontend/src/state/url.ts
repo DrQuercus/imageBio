@@ -83,6 +83,8 @@ export function parseLink(hash: string): LinkState {
     if (q.get("gi") === "1") cryo.gainInvert = true;
   }
   if (q.get("fb") === "1") cryo.fourierBin = true;
+  if (q.get("fs") === "1") cryo.sharp = true;
+  if (q.get("fo") === "1") cryo.filtersOff = true;
   const picks = q.get("picks");
   if (picks) {
     cryo.picks = picks;
@@ -133,6 +135,8 @@ export function formatLink(state: LinkState): string {
       if (cryo.gainInvert) q.set("gi", "1");
     }
     if (cryo.fourierBin) q.set("fb", "1");
+    if (cryo.sharp) q.set("fs", "1");
+    if (cryo.filtersOff && (cryo.lowpass || cryo.highpass)) q.set("fo", "1");
     if (cryo.picks) {
       q.set("picks", cryo.picks);
       if (cryo.picksFlipY) q.set("pfy", "1");

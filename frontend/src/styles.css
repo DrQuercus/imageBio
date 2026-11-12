@@ -325,3 +325,34 @@ ul.reports a { color: var(--accent); text-decoration: none; }
 ul.reports a:hover { text-decoration: underline; }
 
 .mono { font-family: var(--mono); }
+
+/* pixel size, always in view (as in the first CryoViewer) */
+.scale .apix-row { display: flex; align-items: center; gap: 8px; }
+.scale .apix-label { color: var(--amber); font-size: 12px; min-width: 58px; }
+.scale .apix-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg2);
+  border: 1px solid rgba(255, 179, 64, 0.35);
+  border-radius: 4px;
+  color: var(--amber);
+  font: 15px var(--mono);
+  padding: 5px 8px;
+  outline: none;
+}
+.scale .apix-input:focus { border-color: var(--amber); }
+.scale .apix-input.unknown { border-color: var(--amber); }
+.scale .measure { margin-top: 8px; background: var(--bg2); border: 1px solid rgba(255, 179, 64, 0.22); border-radius: 5px; padding: 8px 10px; }
+.scale .measure-value { font: 700 17px var(--sans); color: var(--amber); }
+.scale .measure-sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
+
+/* filters: log sliders */
+.filter-head { display: flex; align-items: baseline; justify-content: space-between; margin-top: 8px; }
+.filter-head .field-label { margin: 0; }
+.filter-value { font: 12px var(--mono); color: var(--dim); }
+.filter-value.on { color: var(--accent); }
+.filter-slider { width: 100%; margin: 3px 0 0; accent-color: var(--accent); }
+.filter-slider.idle { accent-color: var(--dim); opacity: 0.7; }
+.filter-scale { display: flex; justify-content: space-between; color: var(--dim); font: 10px var(--mono); margin-bottom: 4px; }
+.filter-options { margin-top: 8px; }
+.field-label.inline { margin: 0 2px 0 0; }

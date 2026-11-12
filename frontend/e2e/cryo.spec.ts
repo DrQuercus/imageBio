@@ -79,6 +79,104 @@ test("a low-pass in Å removes what is finer than the cut-off", async ({ page })
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
 
+test("the sharp profile and the key L: the same cut-off, the image before and after", async ({ page }) => {
+  await openFile(page, "demo/lattice.mrc");
+  const raw = Math.sqrt(0.5 + 0.09);
+  await expect.poll(() => shownStd(page)).toBeCloseTo(raw, 2);
+  await page.getByTestId("lp-20").click();
+  await expect.poll(() => shownStd(page)).toBeLessThan(0.065); // Gaussian: 0.052
+  const sharp = planeWith(page, "sharp=true");
+  await page.getByTestId("filter-sharp").click();
+  expect(await sharp).toContain("lp=20");
+  // Butterworth of order 4: 0.4 % of the 10 Å lattice is left (6 % with the Gaussian), and
+  // a little more noise passes (1.0 % of its power instead of 0.9 %): 0.030 in all
+  await expect.poll(() => shownStd(page)).toBeLessThan(0.036);
+  await expect.poll(() => shownStd(page)).toBeGreaterThan(0.025);
+  await expect(page.getByTestId("cryo-filter")).toContainText("Filtre net");
+  await expect.poll(() => page.url()).toContain("fs=1");
+
+  // L: without the filters, the settings kept; L again: with them
+  await page.getByTestId("viewer").hover();
+  await page.keyboard.press("l");
+  await expect.poll(() => shownStd(page)).toBeCloseTo(raw, 2);
+  await expect(page.getByTestId("filters-on")).toHaveText("Filtres coupés");
+  await expect(page.getByTestId("lp-20")).toHaveClass(/on/);
+  await page.keyboard.press("L");
+  await expect.poll(() => shownStd(page)).toBeLessThan(0.036);
+  await expect(page.getByTestId("filters-on")).toHaveText("Filtres actifs");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+
+test("a filter slider follows the hand on the overview; the detail comes on release", async ({ page }) => {
+  const refused = trackRefused(page);
+  await openFile(page, "demo/big.mrc"); // 4096 x 4096 at 1.06 Å per pixel: overview reduced 4 times
+  await expect(page.getByTestId("apix-level")).toContainText("4.24 Å/px (réduit 4×)");
+  await page.getByTestId("one-to-one").click();
+  await expect(page.getByTestId("level")).toHaveText("pleine résolution");
+  await expect(page.getByTestId("apix-level")).toContainText("pleine résolution");
+
+  const planes: string[] = [];
+  const stats: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/api/datasets/plane")) planes.push(r.url());
+    if (r.url().includes("/api/datasets/stats")) stats.push(r.url());
+  });
+  const slider = await page.getByTestId("lp-slider").boundingBox();
+  if (!slider) throw new Error("no slider");
+  const at = (f: number) => [slider.x + slider.width * f, slider.y + slider.height / 2] as const;
+  await page.mouse.move(...at(0.5));
+  await page.mouse.down();
+  for (const f of [0.52, 0.56, 0.6, 0.64, 0.68]) {
+    await page.mouse.move(...at(f));
+    await page.waitForTimeout(150);
+  }
+  // held: several values asked, each of the overview alone, with its statistics
+  await expect.poll(() => planes.filter((u) => u.includes("lp=")).length).toBeGreaterThan(2);
+  expect(planes.filter((u) => u.includes("lp=") && !u.includes("bin=4")).length).toBe(0);
+  await expect.poll(() => stats.filter((u) => u.includes("lp=") && /[?&]bin=4(&|$)/.test(u)).length).toBeGreaterThan(1);
+  await expect(page.getByTestId("level")).toHaveText("binning 4×");
+  const value = await page.getByTestId("lp-value").innerText();
+  expect(value).toMatch(/^\d+(\.\d)? Å$/);
+
+  // let go: the detail at full resolution, filtered with the last value
+  const detail = page.waitForRequest((r) => r.url().includes("/api/datasets/plane") && r.url().includes("bin=1&") && r.url().includes("lp="));
+  await page.mouse.up();
+  const url = (await detail).url();
+  expect(url).toContain(`lp=${value.replace(" Å", "")}`);
+  await expect(page.getByTestId("level")).toHaveText("pleine résolution", { timeout: 15_000 });
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
+});
+
+test("the pixel size is in view, can replace the file's and comes back", async ({ page }) => {
+  await openFile(page, "demo/lattice.mrc");
+  await expect(page.getByTestId("user-apix")).toHaveValue("1.25");
+  await expect(page.getByTestId("apix-source")).toHaveText("En-tête du fichier");
+  await expect(page.getByTestId("apix-level")).toContainText("Nyquist 2.50 Å");
+  await page.getByTestId("lp-20").click();
+  expect(await planeWith(page, "lp=20")).not.toContain("apix=");
+
+  // a header can be wrong: the value typed replaces it, for the filters, the link and Fiji
+  const typed = planeWith(page, "apix=2");
+  await page.getByTestId("user-apix").fill("2");
+  expect(await typed).toContain("lp=20");
+  await expect(page.getByTestId("apix-source")).toContainText("remplace 1.25 Å/px (en-tête du fichier)");
+  await expect(page.getByTestId("cryo-filter")).toContainText("Nyquist 4.00 Å");
+  await expect.poll(() => page.url()).toContain("apix=2");
+  await expect(page.getByTestId("fiji-plane")).toHaveAttribute("href", /apix=2/);
+
+  await page.getByTestId("apix-reset").click();
+  await expect(page.getByTestId("user-apix")).toHaveValue("1.25");
+  await expect(page.getByTestId("apix-source")).toHaveText("En-tête du fichier");
+  await expect.poll(() => page.url()).not.toContain("apix=");
+  await expect(page.getByTestId("fiji-plane")).not.toHaveAttribute("href", /apix=/);
+  // typing the file's own value is no replacement
+  await page.getByTestId("user-apix").fill("1.25");
+  await page.getByTestId("user-apix").press("Enter");
+  await expect(page.getByTestId("apix-reset")).toHaveCount(0);
+  await expect(page.getByTestId("error")).toHaveCount(0);
+});
+
 test("a band-pass that makes no sense is refused in the panel, not sent", async ({ page }) => {
   await openFile(page, "demo/lattice.mrc");
   const sent: string[] = [];

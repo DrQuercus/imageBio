@@ -120,8 +120,11 @@ export interface Processing {
   gain?: string;
   gain_orient?: number;
   gain_inv?: boolean;
-  /** Reduce the plane by keeping the low frequencies of its transform, not by block means. */
+  /** Reduce the plane by keeping the low frequencies of its transform, not by block means.
+   *  A filtered view is always reduced that way (ADR 013). */
   fbin?: boolean;
+  /** Sharp filter profile (Butterworth of order 4) instead of the Gaussian one. */
+  sharp?: boolean;
 }
 
 /** Answer of /api/cryo/gain/check: which orientation of a gain flattens a movie best. */

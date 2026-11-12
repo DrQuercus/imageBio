@@ -153,8 +153,12 @@ export const api = {
   info: (path: string, options?: ReaderOptions, signal?: AbortSignal) =>
     getJson<DatasetInfoResponse>(`/api/datasets/info?${buildQuery({ path }, options)}`, signal),
 
-  stats: (path: string, index: PlaneIndex, options?: ReaderOptions, signal?: AbortSignal, proc?: Processing) =>
-    getJson<PlaneStats>(`/api/datasets/stats?${buildQuery({ path, ...index, ...proc }, options)}`, signal),
+  /** Statistics of a plane: at full resolution, or of the whole plane reduced `bin` times. */
+  stats: (path: string, index: PlaneIndex, options?: ReaderOptions, signal?: AbortSignal, proc?: Processing, bin = 1) =>
+    getJson<PlaneStats>(
+      `/api/datasets/stats?${buildQuery({ path, ...index, ...proc, bin: bin > 1 ? bin : undefined }, options)}`,
+      signal,
+    ),
 
   async plane(path: string, req: PlaneRequest, options?: ReaderOptions, signal?: AbortSignal): Promise<Plane> {
     const [x, y, w, h] = req.region ?? [];

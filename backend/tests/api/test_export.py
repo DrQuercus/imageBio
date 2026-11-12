@@ -70,6 +70,9 @@ def test_the_plane_on_screen_is_exported_with_its_values_and_its_pixel_size(clie
     with read(mean) as tif:
         expected = tree.movie[1:4].astype(np.float64).mean(axis=0).astype(np.float32)
         np.testing.assert_array_equal(tif.asarray(), expected)
+    # a pixel size typed by the user replaces the header's (1.25 Å here), as for the filters
+    with read(client.get(EXPORT, params={"path": "cryo/movie.mrc", "t": 3, "apix": 2.0})) as tif:
+        assert tif.imagej_metadata["unit"] == "nm" and pixels_per_unit(tif) == pytest.approx(5.0, rel=1e-6)
     # reduced views are for the screen: the export is the full plane whatever the reduction
     reduced = client.get(EXPORT, params={"path": "cryo/movie.mrc", "t": 3, "fbin": "true"})
     with read(reduced) as tif:

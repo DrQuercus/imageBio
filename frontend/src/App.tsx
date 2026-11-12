@@ -5,6 +5,7 @@ import { ContrastPanel } from "./components/ContrastPanel";
 import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
+import { ScalePanel } from "./components/ScalePanel";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
 import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
 import { Gallery } from "./viewer/Gallery";
@@ -12,7 +13,7 @@ import { galleryAxis, type GallerySort, isClassAverages, MAX_EXPORT_BYTES, stack
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
-import { clamp, clampIndex, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
+import { baseBin, clamp, clampIndex, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
 
 const DEFAULT_DISPLAY: DisplaySettings = { min: 0, max: 1, gamma: 1, invert: false, lut: "grays", auto: true };
 
@@ -56,6 +57,9 @@ export function App({ onLive }: { onLive: () => void }) {
   const [galleryTile, setGalleryTile] = useState(128);
   const [classes, setClasses] = useState<ClassInfo[] | null>(null);
   const [picksError, setPicksError] = useState<string | null>(null);
+  /** A filter slider is held: the view shows its overview and waits for the release to
+   *  load the detail (a filter at full resolution takes more than a second on a 4k image). */
+  const [adjusting, setAdjusting] = useState(false);
 
   // What is on screen. Every request for pixels is built from these values only: the file as
   // the server described it, the options it was opened with and a plane that exists in it.
@@ -77,14 +81,16 @@ export function App({ onLive }: { onLive: () => void }) {
   );
   const onError = useCallback((m: string) => setError(m), []);
 
-  // Pixel size in effect: the file's, else the one typed by the user. Filters and the frame
-  // average are kept from one file to the next; a typed pixel size is not (see openFile).
+  // Pixel size in effect: the one typed by the user, which replaces the file's (a header can be
+  // wrong), else the file's. Filters and the frame average are kept from one file to the next;
+  // a typed pixel size only when moving to the next file of the folder (see openFile).
   const fileApix = info?.calibration.x.angstrom ?? null;
-  const apix = info ? (fileApix ?? userApix) : null;
+  const apix = info ? (userApix ?? fileApix) : null;
+  const apixTyped = userApix !== null;
   const frames = info?.shape.t ?? 1;
   // the Cryo tools work on one channel of data, not on a colour picture
   const cryoOn = info !== null && !info.rgb;
-  const current = processingOf(cryoOn ? cryo : NO_CRYO, index.t, frames, apix, fileApix !== null);
+  const current = processingOf(cryoOn ? cryo : NO_CRYO, index.t, frames, apix, !apixTyped && fileApix !== null);
   const procKey = processingKey(current);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const proc = useMemo(() => current, [procKey]);
@@ -163,13 +169,16 @@ export function App({ onLive }: { onLive: () => void }) {
   }, []);
 
   // ── statistics of the plane on screen: histogram and automatic window ──────
+  // Of a filtered plane, those of the overview: they follow a moving filter at once, where
+  // those of the full plane would wait for a filter at full resolution (ADR 013).
   const statsChannel = info?.rgb ? 0 : index.c;
   const shownPath = response?.path ?? null;
+  const statsBin = info && (proc.lp !== undefined || proc.hp !== undefined) ? baseBin({ width: info.shape.x, height: info.shape.y }) : 1;
   useEffect(() => {
     if (!shownPath) return;
     const controller = new AbortController();
     api
-      .stats(shownPath, { t: index.t, c: statsChannel, z: index.z }, shownOptions, controller.signal, proc)
+      .stats(shownPath, { t: index.t, c: statsChannel, z: index.z }, shownOptions, controller.signal, proc, statsBin)
       .then((s) => {
         setStats(s);
         setDisplay((d) => (d.auto ? { ...d, min: s.auto[0], max: s.auto[1] } : d));
@@ -177,7 +186,7 @@ export function App({ onLive }: { onLive: () => void }) {
       .catch((e) => !isAbort(e) && setError(message(e)));
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shownPath, etag, shownOptionsKey, index.t, index.z, statsChannel, procKey]);
+  }, [shownPath, etag, shownOptionsKey, index.t, index.z, statsChannel, procKey, statsBin]);
 
   // ── particle coordinates of the image on screen ────────────────────────────
   const picksFile = cryoOn ? cryo.picks : null;
@@ -317,6 +326,7 @@ export function App({ onLive }: { onLive: () => void }) {
         case "i": case "I": changeDisplay({ invert: !display.invert }); break;
         case "r": case "R": setTool((t) => (t === "ruler" ? "pan" : "ruler")); break;
         case "p": case "P": setCryo((c) => ({ ...c, spectrum: !c.spectrum })); break;
+        case "l": case "L": setCryo((c) => (c.lowpass !== null || c.highpass !== null ? { ...c, filtersOff: !c.filtersOff } : c)); break;
         case "g": case "G": setGallery((g) => !g); break;
         case "Escape": setTool("pan"); setRuler(null); break;
         case "f": case "F": case "0": setView(null); break;
@@ -372,7 +382,7 @@ export function App({ onLive }: { onLive: () => void }) {
         {response && info && (
           <div className="group">
             <a className="button" data-testid="fiji-plane" download title="Télécharger le plan affiché, tel qu'il est traité, en TIFF ImageJ avec sa taille de pixel : il s'ouvre dans Fiji"
-              href={api.exportUrl(response.path, index, shownOptions, fileApix === null && userApix ? { ...proc, apix: userApix } : proc, "plane")}>
+              href={api.exportUrl(response.path, index, shownOptions, apixTyped ? { ...proc, apix: userApix } : proc, "plane")}>
               Ouvrir dans Fiji
             </a>
             {axis && stackBytes(info) <= MAX_EXPORT_BYTES && (
@@ -424,6 +434,7 @@ export function App({ onLive }: { onLive: () => void }) {
               onShown={onShown}
               onError={onError}
               onLevel={setLevel}
+              holdDetail={adjusting}
             />
           ) : (
             <div className="empty" data-testid="empty">
@@ -432,21 +443,23 @@ export function App({ onLive }: { onLive: () => void }) {
           )}
         </div>
         {response && cryoOn && cryo.spectrum && (
-          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={shownOptions} apix={apix} apixTyped={fileApix === null} onError={onError} />
+          <SpectrumView path={response.path} etag={etag} index={index} proc={proc} options={shownOptions} apix={apix} apixTyped={apixTyped} onError={onError} />
         )}
       </main>
 
       <aside className="right">
         {response && info && (
           <>
-            <ContrastPanel stats={stats} display={display} rgb={info.rgb} customLut={customLut !== null} onChange={changeDisplay} onLutFile={loadLutFile} />
+            <ScalePanel info={info} fileApix={fileApix} userApix={userApix} onUserApix={setUserApix} level={level} />
+            <ContrastPanel reducedBy={statsBin} stats={stats} display={display} rgb={info.rgb} customLut={customLut !== null} onChange={changeDisplay} onLutFile={loadLutFile} />
             <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps}
               averageEnd={tEnd} />
             {cryoOn && (
               <CryoPanel path={response.path} etag={etag} info={info} cryo={cryo} onChange={changeCryo} t={index.t} apix={apix}
-                problem={filterProblem(cryo, apix)} options={shownOptions} onOptions={setOptions} picks={picks} picksError={picksError} />
+                problem={filterProblem(cryo, apix)} options={shownOptions} onOptions={setOptions} picks={picks} picksError={picksError}
+                onAdjust={setAdjusting} />
             )}
-            <InfoPanel response={response} stats={stats} userApix={userApix} onUserApix={setUserApix} />
+            <InfoPanel response={response} stats={stats} />
           </>
         )}
       </aside>

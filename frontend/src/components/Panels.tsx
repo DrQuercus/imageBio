@@ -55,7 +55,8 @@ export function StackControls({ info, index, onChange, playing, onPlay, fps, onF
   );
 }
 
-const SOURCES: Record<string, string> = {
+/** Where a pixel size comes from, in words. */
+export const SOURCES: Record<string, string> = {
   header: "en-tête du fichier",
   extended_header: "en-tête étendu",
   metadata: "métadonnées",
@@ -67,12 +68,11 @@ const SOURCES: Record<string, string> = {
 interface InfoProps {
   response: DatasetInfoResponse;
   stats: PlaneStats | null;
-  userApix: number | null;
-  onUserApix: (apix: number | null) => void;
 }
 
-/** What is known about the file, including where its pixel size comes from. */
-export function InfoPanel({ response, stats, userApix, onUserApix }: InfoProps) {
+/** What is known about the file, including the pixel size it gives and where that comes
+ *  from (the size in effect, and the one typed, are in the scale panel). */
+export function InfoPanel({ response, stats }: InfoProps) {
   const { info, file } = response;
   const cal = info.calibration.x;
   const s = info.shape;
@@ -91,16 +91,6 @@ export function InfoPanel({ response, stats, userApix, onUserApix }: InfoProps) 
         <dd data-testid="pixel-size" className={cal.known ? "" : "warn"}>
           {cal.known ? `${formatValue(cal.value)} ${cal.unit}/px (${SOURCES[cal.source] ?? cal.source})` : "taille inconnue"}
         </dd>
-        {!cal.known && (
-          <>
-            <dt>Å/px</dt>
-            <dd>
-              <input type="number" step="any" min={0} placeholder="à saisir" value={userApix ?? ""} data-testid="user-apix"
-                aria-label="Taille de pixel en ångströms"
-                onChange={(e) => onUserApix(e.target.valueAsNumber > 0 ? e.target.valueAsNumber : null)} />
-            </dd>
-          </>
-        )}
         {stats && (
           <>
             <dt>Moyenne</dt>

@@ -1,19 +1,24 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, isAbort } from "../api/client";
 import type { DatasetInfo, DirEntry, GainCheck, PicksResponse, ReaderOptions } from "../api/types";
 import {
+  angstromToSlider,
   averageEnd,
   type CryoSettings,
   dirname,
+  filterRange,
   formatResolution,
   gainCandidates,
   gainOf,
   groupForDose,
+  HIGHPASS_PRESETS,
   LOWPASS_PRESETS,
   ORIENTATION_LABELS,
   pickCandidates,
   pickDiameter,
   scoreRange,
+  SLIDER_STEPS,
+  sliderToAngstrom,
 } from "../viewer/cryo";
 
 interface FieldProps {
@@ -50,6 +55,119 @@ function NumberField({ value, onCommit, label, testid, min, max, integer, placeh
     <input inputMode="decimal" value={draft} placeholder={placeholder} aria-label={label} data-testid={testid}
       onChange={(e) => setDraft(e.target.value)} onBlur={commit}
       onKeyDown={(e) => e.key === "Enter" && commit()} />
+  );
+}
+
+/** Shortest interval between two values sent while a slider is held, in ms: the server
+ *  filters the overview in some 35 ms, the transfer takes about as long. */
+const SLIDER_INTERVAL_MS = 90;
+const RELEASE_AFTER_MS = 400;
+
+interface FilterProps {
+  kind: "lowpass" | "highpass";
+  label: string;
+  /** Prefix of the test ids: "lp" or "hp". */
+  id: string;
+  value: number | null;
+  presets: number[];
+  apix: number | null;
+  /** The filters are kept but not applied. */
+  off: boolean;
+  onCommit: (value: number | null) => void;
+  /** True while the slider is held: the view waits for the release to load its detail. */
+  onAdjust: (held: boolean) => void;
+}
+
+/** One filter: a slider on a logarithmic scale of Å, a field for any value, and presets.
+ *  The slider sends a value at most every SLIDER_INTERVAL_MS while it moves, and the last
+ *  one when it is let go. It counts as held while the pointer is down on it, and for
+ *  RELEASE_AFTER_MS after the last change made otherwise (keys, scripts). */
+function FilterControl({ kind, label, id, value, presets, apix, off, onCommit, onAdjust }: FilterProps) {
+  const range = filterRange(kind, apix);
+  const [draft, setDraft] = useState<number | null>(null);
+  const sent = useRef(0);
+  const timer = useRef<number | undefined>(undefined);
+  const latest = useRef<number | null>(null);
+  const held = useRef(false);
+  const pressed = useRef(false);
+  const idle = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      window.clearTimeout(timer.current);
+      window.clearTimeout(idle.current);
+      if (held.current) onAdjust(false);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const send = () => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    sent.current = performance.now();
+    if (latest.current !== null && latest.current !== value) onCommit(latest.current);
+  };
+  const hold = () => {
+    if (held.current) return;
+    held.current = true;
+    onAdjust(true);
+  };
+  const release = () => {
+    window.clearTimeout(idle.current);
+    if (!held.current) return;
+    held.current = false;
+    if (timer.current !== undefined) send();
+    latest.current = null;
+    setDraft(null);
+    onAdjust(false);
+  };
+  const move = (position: number) => {
+    hold();
+    const next = sliderToAngstrom(position, range);
+    latest.current = next;
+    setDraft(next);
+    const wait = SLIDER_INTERVAL_MS - (performance.now() - sent.current);
+    if (wait <= 0) send();
+    else if (timer.current === undefined) timer.current = window.setTimeout(send, wait);
+    window.clearTimeout(idle.current);
+    idle.current = window.setTimeout(() => !pressed.current && release(), RELEASE_AFTER_MS);
+  };
+  const press = (down: boolean) => {
+    pressed.current = down;
+    if (down) hold();
+    else release();
+  };
+  // no filter: the thumb rests at the end where the filter would change nothing
+  const shown = draft ?? value;
+  const position = shown === null ? (kind === "lowpass" ? 0 : SLIDER_STEPS) : angstromToSlider(shown, range);
+  const custom = value !== null && !presets.includes(value);
+  return (
+    <>
+      <div className="filter-head">
+        <span className="field-label">{label}</span>
+        <span className={`filter-value ${value !== null && !off ? "on" : ""}`} data-testid={`${id}-value`}>
+          {shown === null ? "aucun" : `${shown} Å`}
+        </span>
+      </div>
+      <input type="range" className={`filter-slider ${shown === null || off ? "idle" : ""}`} min={0} max={SLIDER_STEPS} step={1}
+        value={position} aria-label={`${label} (échelle logarithmique, ${range[0]} à ${range[1]} Å)`} data-testid={`${id}-slider`}
+        onChange={(e) => move(Number(e.target.value))}
+        onPointerDown={() => press(true)} onPointerUp={() => press(false)} onPointerCancel={() => press(false)}
+        onLostPointerCapture={() => pressed.current && press(false)} onBlur={() => press(false)} />
+      <div className="filter-scale">
+        <span>{range[0]} Å</span>
+        <span>{range[1]} Å</span>
+      </div>
+      <div className="buttons tight">
+        <button className={value === null ? "on" : ""} data-testid={`${id}-off`} onClick={() => onCommit(null)}>Aucun</button>
+        {presets.map((d) => (
+          <button key={d} className={value === d ? "on" : ""} data-testid={`${id}-${d}`} onClick={() => onCommit(d)}>{d}</button>
+        ))}
+        <label className={`unit ${custom ? "on" : ""}`}>
+          <NumberField value={value} onCommit={onCommit} label={`${label} en ångströms`} testid={`${id}-input`} placeholder="autre" />
+          Å
+        </label>
+      </div>
+    </>
   );
 }
 
@@ -264,15 +382,17 @@ interface Props {
   /** Particles read in the coordinate file for this image, and why they could not be. */
   picks: PicksResponse | null;
   picksError: string | null;
+  /** Called with true while a filter slider is held, false when it is let go. */
+  onAdjust: (held: boolean) => void;
 }
 
 /** Cryo-EM tools: resolution filters, frame average, EER grouping, picks, power spectrum. */
-export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, options, onOptions, picks, picksError }: Props) {
+export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, options, onOptions, picks, picksError, onAdjust }: Props) {
   const frames = info.shape.t;
   const end = averageEnd(t, cryo.average, frames);
   const fractions = typeof info.metadata.n_fractions === "number" ? info.metadata.n_fractions : null;
   const group = typeof info.metadata.group === "number" ? info.metadata.group : null;
-  const custom = cryo.lowpass !== null && !LOWPASS_PRESETS.includes(cryo.lowpass);
+  const filtered = cryo.lowpass !== null || cryo.highpass !== null;
   const setGroup = (v: number | null) => {
     const { group: _dropped, ...rest } = options;
     onOptions(v === null ? rest : { ...rest, group: v });
@@ -291,30 +411,28 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
     <section className="panel" data-testid="cryo">
       <div className="panel-title">Cryo</div>
 
-      <div className="field-label">Passe-bas</div>
-      <div className="buttons tight">
-        <button className={cryo.lowpass === null ? "on" : ""} data-testid="lp-off" onClick={() => onChange({ lowpass: null })}>Aucun</button>
-        {LOWPASS_PRESETS.map((d) => (
-          <button key={d} className={cryo.lowpass === d ? "on" : ""} data-testid={`lp-${d}`} onClick={() => onChange({ lowpass: d })}>{d} Å</button>
-        ))}
-        <label className={`unit ${custom ? "on" : ""}`}>
-          <NumberField value={cryo.lowpass} onCommit={(v) => onChange({ lowpass: v })} label="Passe-bas en ångströms" testid="lp-input" placeholder="autre" />
-          Å
-        </label>
-      </div>
-
-      <div className="field-label">Passe-haut</div>
-      <div className="buttons tight">
-        <button className={cryo.highpass === null ? "on" : ""} data-testid="hp-off" onClick={() => onChange({ highpass: null })}>Aucun</button>
-        <label className={`unit ${cryo.highpass !== null ? "on" : ""}`}>
-          <NumberField value={cryo.highpass} onCommit={(v) => onChange({ highpass: v })} label="Passe-haut en ångströms" testid="hp-input" placeholder="500" />
-          Å
-        </label>
-      </div>
+      <FilterControl kind="lowpass" label="Passe-bas" id="lp" value={cryo.lowpass} presets={LOWPASS_PRESETS} apix={apix}
+        off={cryo.filtersOff} onCommit={(v) => onChange({ lowpass: v, filtersOff: false })} onAdjust={onAdjust} />
+      <FilterControl kind="highpass" label="Passe-haut" id="hp" value={cryo.highpass} presets={HIGHPASS_PRESETS} apix={apix}
+        off={cryo.filtersOff} onCommit={(v) => onChange({ highpass: v, filtersOff: false })} onAdjust={onAdjust} />
+      {filtered && (
+        <div className="buttons tight filter-options">
+          <button className={cryo.filtersOff ? "" : "on"} data-testid="filters-on" title="Voir l'image avec ou sans les filtres, sans perdre leurs réglages (L)"
+            onClick={() => onChange({ filtersOff: !cryo.filtersOff })}>{cryo.filtersOff ? "Filtres coupés" : "Filtres actifs"}</button>
+          <span className="spacer" />
+          <span className="field-label inline">Profil</span>
+          <button className={cryo.sharp ? "" : "on"} data-testid="filter-soft"
+            title="Gaussien : doux, sans oscillations ; à 20 Å, il garde 74 % à 30 Å et laisse 29 % à 15 Å"
+            onClick={() => onChange({ sharp: false })}>Doux</button>
+          <button className={cryo.sharp ? "on" : ""} data-testid="filter-sharp"
+            title="Butterworth d'ordre 4 : plat jusqu'près de la coupure, puis raide ; à 20 Å, il garde 96 % à 30 Å et laisse 9 % à 15 Å. Oscille un peu près des bords francs"
+            onClick={() => onChange({ sharp: true })}>Net</button>
+        </div>
+      )}
       {problem && <div className="warn note" data-testid="cryo-problem">{problem}</div>}
-      {!problem && apix && (cryo.lowpass !== null || cryo.highpass !== null) && (
+      {!problem && apix && filtered && (
         <div className="note" data-testid="cryo-filter">
-          Filtre gaussien, gain ½ à la coupure · Nyquist {formatResolution(2 * apix)}
+          {cryo.filtersOff ? "Filtres coupés (L pour les rallumer)" : `${cryo.sharp ? "Filtre net (Butterworth)" : "Filtre gaussien"}, gain ½ à la coupure`} · Nyquist {formatResolution(2 * apix)}
         </div>
       )}
 
@@ -356,7 +474,7 @@ export function CryoPanel({ path, etag, info, cryo, onChange, t, apix, problem, 
         </>
       )}
 
-      <label className="check" title="Les vues réduites (image entière, zoom arrière) gardent les basses fréquences de la transformée de Fourier au lieu de moyenner des blocs de pixels : aucun repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. Une transformée par plan : plus lent.">
+      <label className="check" title="Les vues réduites (image entière, zoom arrière) gardent les basses fréquences de la transformée de Fourier au lieu de moyenner des blocs de pixels : aucun repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. Une transformée par plan : plus lent. Avec un filtre, les vues réduites passent toujours par Fourier.">
         <input type="checkbox" checked={cryo.fourierBin} data-testid="fourier-bin" onChange={(e) => onChange({ fourierBin: e.target.checked })} />
         Réduction dans Fourier
       </label>

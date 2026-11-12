@@ -10,6 +10,8 @@ interface Props {
   customLut: boolean;
   onChange: (patch: Partial<DisplaySettings>) => void;
   onLutFile: (file: File) => void;
+  /** The statistics are those of the overview, reduced this many times (a filter is on). */
+  reducedBy?: number;
 }
 
 const STEPS = 1000;
@@ -23,7 +25,7 @@ export function formatValue(v: number): string {
 
 /** Contrast window, gamma, colour table and the histogram of the plane. Everything here is
  *  applied on the GPU: no request is made when a control moves. */
-export function ContrastPanel({ stats, display, rgb, customLut, onChange, onLutFile }: Props) {
+export function ContrastPanel({ stats, display, rgb, customLut, onChange, onLutFile, reducedBy = 1 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   // the sliders cover the robust range, widened to the window when it lies outside
   const lo = Math.min(stats?.histogram.lo ?? display.min, display.min);
@@ -75,6 +77,11 @@ export function ContrastPanel({ stats, display, rgb, customLut, onChange, onLutF
         <span>{stats ? formatValue(stats.histogram.lo) : "—"}</span>
         <span>{stats ? formatValue(stats.histogram.hi) : "—"}</span>
       </div>
+      {reducedBy > 1 && (
+        <div className="note" data-testid="stats-level" title="Pour suivre un filtre qui bouge, l'histogramme et la fenêtre automatique viennent de la vue d'ensemble filtrée">
+          Histogramme de la vue réduite {reducedBy}×
+        </div>
+      )}
       <label className="slider">
         <span>Noir</span>
         <input type="range" min={0} max={STEPS} value={toSlider(display.min)} data-testid="min-slider"

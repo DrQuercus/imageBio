@@ -8,6 +8,10 @@ export interface CryoSettings {
   lowpass: number | null;
   /** High-pass cut-off in Å (variations coarser than this are removed), or null. */
   highpass: number | null;
+  /** The filters are kept but not applied (key L: the image before and after). */
+  filtersOff: boolean;
+  /** Sharp filter profile (Butterworth of order 4) instead of the Gaussian one. */
+  sharp: boolean;
   /** Number of consecutive frames averaged, starting at the current one. 1: no average. */
   average: number;
   /** Show the power spectrum next to the image. */
@@ -33,6 +37,8 @@ export interface CryoSettings {
 export const NO_CRYO: CryoSettings = {
   lowpass: null,
   highpass: null,
+  filtersOff: false,
+  sharp: false,
   average: 1,
   spectrum: false,
   gain: null,
@@ -57,8 +63,41 @@ export const ORIENTATION_LABELS = [
   "anti-transposée",
 ];
 
-/** Low-pass cut-offs offered as buttons, in Å. */
-export const LOWPASS_PRESETS = [20, 10, 5];
+/** Cut-offs offered as buttons, in Å. */
+export const LOWPASS_PRESETS = [30, 20, 10, 5];
+export const HIGHPASS_PRESETS = [2000, 1000, 500];
+
+/** Positions of a filter slider: the cut-off moves on a logarithmic scale. */
+export const SLIDER_STEPS = 1000;
+
+/** The range of the slider of a filter, in Å, for an image of `apix` Å per pixel (null:
+ *  unknown, 1 is assumed). A low-pass finer than Nyquist removes nothing the image holds; a
+ *  high-pass is of use from a few hundred Å, where ice and illumination vary. */
+export function filterRange(kind: "lowpass" | "highpass", apix: number | null): [number, number] {
+  const nyquist = 2 * (apix && apix > 0 ? apix : 1);
+  return kind === "lowpass"
+    ? [niceAngstrom(nyquist), Math.max(200, niceAngstrom(25 * nyquist))]
+    : [Math.max(50, niceAngstrom(10 * nyquist)), Math.max(5000, niceAngstrom(1000 * nyquist))];
+}
+
+/** A cut-off rounded to two significant digits: 3.7, 12, 250 Å. The slider then goes through
+ *  about ninety values per decade, which the caches of the server and the page can hold. */
+export function niceAngstrom(d: number): number {
+  return Number(d.toPrecision(2));
+}
+
+/** The cut-off at a slider position. */
+export function sliderToAngstrom(position: number, [lo, hi]: [number, number]): number {
+  const f = Math.min(1, Math.max(0, position / SLIDER_STEPS));
+  return Math.min(hi, Math.max(lo, niceAngstrom(lo * (hi / lo) ** f)));
+}
+
+/** The slider position of a cut-off; values outside the range sit at its ends. */
+export function angstromToSlider(d: number, [lo, hi]: [number, number]): number {
+  if (!(d > 0)) return 0;
+  const f = Math.log(d / lo) / Math.log(hi / lo);
+  return Math.round(Math.min(1, Math.max(0, f)) * SLIDER_STEPS);
+}
 
 /** The diffuse ring of vitreous ice, in Å. */
 export const ICE_RING = 3.7;
@@ -90,7 +129,7 @@ export function groupForDose(
 
 /** Why the filters asked for cannot be applied, as a message for the user, or null. */
 export function filterProblem(cryo: CryoSettings, apix: number | null): string | null {
-  if (cryo.lowpass === null && cryo.highpass === null) return null;
+  if ((cryo.lowpass === null && cryo.highpass === null) || cryo.filtersOff) return null;
   if (!apix) return "Taille de pixel inconnue : saisissez-la (panneau Fichier) pour filtrer en Å.";
   if (cryo.lowpass !== null && cryo.highpass !== null && cryo.lowpass >= cryo.highpass) {
     return "Le passe-bas doit être plus fin (plus petit en Å) que le passe-haut.";
@@ -100,8 +139,9 @@ export function filterProblem(cryo: CryoSettings, apix: number | null): string |
 
 /** The processing to request for frame `t`.
  *
- *  `apix` is the pixel size in effect and `apixFromFile` tells whether the server already knows
- *  it: a value typed by the user has to be sent along. Filters that cannot be applied
+ *  `apix` is the pixel size in effect and `apixFromFile` tells whether it is the file's own,
+ *  which the server knows: a value typed by the user (even one that replaces the file's) has
+ *  to be sent along. Filters that cannot be applied
  *  (see filterProblem) are left out rather than sent to fail. */
 export function processingOf(
   cryo: CryoSettings,
@@ -113,10 +153,13 @@ export function processingOf(
   const proc: Processing = {};
   const end = averageEnd(t, cryo.average, sizeT);
   if (end !== null) proc.t_end = end;
-  if (filterProblem(cryo, apix) === null && apix) {
+  if (filterProblem(cryo, apix) === null && apix && !cryo.filtersOff) {
     if (cryo.lowpass !== null) proc.lp = cryo.lowpass;
     if (cryo.highpass !== null) proc.hp = cryo.highpass;
-    if ((proc.lp !== undefined || proc.hp !== undefined) && !apixFromFile) proc.apix = apix;
+    if (proc.lp !== undefined || proc.hp !== undefined) {
+      if (!apixFromFile) proc.apix = apix;
+      if (cryo.sharp) proc.sharp = true;
+    }
   }
   Object.assign(proc, gainOf(cryo));
   if (cryo.fourierBin) proc.fbin = true;
@@ -135,7 +178,7 @@ export function gainOf(cryo: CryoSettings): Pick<Processing, "gain" | "gain_orie
 /** Identifies a processing in cache keys. */
 export function processingKey(proc: Processing): string {
   const gain = proc.gain ? `${proc.gain_orient ?? 0}${proc.gain_inv ? "i" : ""}:${proc.gain}` : "";
-  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""};${gain};${proc.fbin ? "f" : ""}`;
+  return `${proc.t_end ?? ""};${proc.lp ?? ""};${proc.hp ?? ""};${proc.apix ?? ""};${gain};${proc.fbin ? "f" : ""};${proc.sharp ? "s" : ""}`;
 }
 
 /** Directory of a logical path ("root/a/b.eer" gives "root/a"). */

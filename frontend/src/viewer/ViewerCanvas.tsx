@@ -64,6 +64,8 @@ interface Props {
   onShown: (index: PlaneIndex) => void;
   onError: (message: string) => void;
   onLevel: (bin: number) => void;
+  /** Do not load a detail for now (a filter slider is held): the overview follows it. */
+  holdDetail?: boolean;
 }
 
 interface Loaded {
@@ -74,7 +76,7 @@ interface Loaded {
 const DETAIL_DELAY_MS = 120;
 
 export function ViewerCanvas(props: Props) {
-  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix, picks } = props;
+  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix, picks, holdDetail = false } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const glRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -242,6 +244,10 @@ export function ViewerCanvas(props: Props) {
     const wanted = detailRequest(view, viewport, image, dpr);
     const visible = detailRequest(view, viewport, image, dpr, 0);
     const level = wanted ? Math.min(wanted.bin, base.set.bin) : base.set.bin;
+    if (holdDetail) {
+      callbacks.current.onLevel(base.set.bin); // the overview alone, until the slider is let go
+      return;
+    }
     callbacks.current.onLevel(level);
     if (!wanted || !visible || wanted.bin >= base.set.bin) return; // the overview is enough
     const current = detailRef.current;
@@ -273,7 +279,7 @@ export function ViewerCanvas(props: Props) {
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, viewport, baseVersion, planeKey, path, image, draw]);
+  }, [view, viewport, baseVersion, planeKey, path, image, draw, holdDetail]);
 
   // ── interaction ────────────────────────────────────────────────────────────
   const drag = useRef<{ kind: Tool; x: number; y: number } | null>(null);
