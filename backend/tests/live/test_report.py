@@ -146,6 +146,7 @@ def test_what_a_session_gave() -> None:
     assert timeline["bucket"] == 60 and sum(b[0] for b in timeline["bins"]) == 30
     assert sum(b[1] for b in timeline["bins"]) == 20 and sum(b[2] for b in timeline["bins"]) == 10
     assert report["rate"]["pauses"] == []
+    assert report["rate"]["per_hour_peak"] == 30.0  # less than an hour: the busiest hour is all of it
 
     squares = {s["name"]: s for s in report["squares"]}
     assert set(squares) == {"GridSquare_100", "GridSquare_101", "GridSquare_102"}
@@ -260,4 +261,6 @@ def test_an_empty_session_and_a_large_one() -> None:
     series = report["series"]["ctf_fit"]
     assert len(series) == 1500 and series[0][0] == T0 and series[-1][0] == T0 + 7 * 4999
     assert len(report["timeline"]["bins"]) <= 96 and sum(b[0] for b in report["timeline"]["bins"]) == 5000
+    # one image every seven seconds: about 514 in any hour, whatever the buckets of the chart
+    assert report["timeline"]["bucket"] == 600 and abs(report["rate"]["per_hour_peak"] - 3600 / 7) < 3
     assert len(report["stage"]) == 0  # no stage position given

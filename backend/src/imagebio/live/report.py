@@ -31,7 +31,15 @@ from imagebio.live.quality import (
     verdict,
 )
 
-__all__ = ["SCHEMA", "SCHEMA_VERSION", "Exposure", "ReportContext", "build_report"]
+__all__ = [
+    "CSV_COLUMNS",
+    "SCHEMA",
+    "SCHEMA_VERSION",
+    "Exposure",
+    "ReportContext",
+    "build_report",
+    "exposure_rows",
+]
 
 SCHEMA: Final = "imagebio.live-report"
 SCHEMA_VERSION: Final = 1
@@ -394,11 +402,19 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
             "bins": [bins.get(k, [0, 0, 0]) for k in range(last_slot + 1)],
         }
     hours = (end - start) / 3600 if start is not None and end is not None and end > start else None
-    peak = (
-        max(row[0] for row in timeline["bins"]) * 3600 / timeline["bucket"]
-        if timeline["bins"] and timeline["bucket"]
-        else None
-    )
+    peak = None
+    if timeline["bins"] and timeline["bucket"] and start is not None and end is not None:
+        # the busiest hour: buckets summed over an hour; a shorter session is its own hour
+        counts = [row[0] for row in timeline["bins"]]
+        window = round(3600 / timeline["bucket"])
+        if window >= len(counts):
+            peak = len(times) * 3600 / max(end - start, 3600.0) if hours else None
+        else:
+            peak = (
+                max(sum(counts[k : k + window]) for k in range(len(counts) - window + 1))
+                * 3600
+                / (window * timeline["bucket"])
+            )
 
     def series(get: Callable[[Exposure], float | None]) -> list[list[Any]]:
         return _thin(
@@ -648,3 +664,75 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
         "programs": ctx.programs,
         "limits": limits,
     }
+
+
+#: Columns of the table of exposures (exposures.csv), in order.
+CSV_COLUMNS: Final = (
+    "name",
+    "path",
+    "time",
+    "grid_square",
+    "verdict",
+    "reasons",
+    "flags",
+    "mean_counts",
+    "ice",
+    "ice_nm",
+    "ice_ring",
+    "ctf_defocus_um",
+    "ctf_fit_A",
+    "ctf_astigmatism_um",
+    "ctf_source",
+    "target_defocus_um",
+    "motion_A",
+    "dose",
+    "pixel_size_A",
+    "stage_x_um",
+    "stage_y_um",
+    "verified",
+)
+
+
+def exposure_rows(exposures: Sequence[Exposure], ctx: ReportContext) -> list[dict[str, Any]]:
+    """One row per acquired, complete exposure, in acquisition order: what the report counted."""
+    reference = _number(ctx.ice.get("reference"))
+    calibrated = bool(ctx.ice.get("calibrated"))
+    mfp = _number(ctx.ice.get("mfp_nm"))
+    rows = []
+    for e in sorted(
+        (e for e in exposures if e.category in ACQUIRED and e.state == "complete"),
+        key=lambda e: (e.time if e.time is not None else math.inf, e.id),
+    ):
+        v = verdict(e.state, e.metrics, e.processing, ctx.rules, reference)
+        why = rejections(e.metrics, e.processing, ctx.rules, reference) if v == "rejected" else []
+        c = ctf_of(e.metrics, e.processing)
+        d = drift_of(e.metrics, e.processing)
+        ice = relative_ice(e.metrics, reference)
+        stage = _stage_of(e)
+        rows.append(
+            {
+                "name": e.name,
+                "path": e.path,
+                "time": e.time,
+                "grid_square": _square_of(e),
+                "verdict": v,
+                "reasons": "; ".join(text for _, text in why),
+                "flags": " ".join(image_flags(e.metrics, reference, calibrated)),
+                "mean_counts": _round(_number((e.metrics or {}).get("mean"))),
+                "ice": _round(ice),
+                "ice_nm": _round(ice * mfp, 1) if ice is not None and mfp is not None else None,
+                "ice_ring": _round(_number((e.metrics or {}).get("ice_ring"))),
+                "ctf_defocus_um": _round(c["defocus"]) if c else None,
+                "ctf_fit_A": _round(c["fit"]) if c else None,
+                "ctf_astigmatism_um": _round(c["astigmatism"]) if c else None,
+                "ctf_source": c["source"] if c else None,
+                "target_defocus_um": _parameter(e, "target_defocus"),
+                "motion_A": _round(d["value"]) if d and d["unit"] == "A" else None,
+                "dose": _parameter(e, "dose"),
+                "pixel_size_A": _parameter(e, "pixel_size"),
+                "stage_x_um": _round(stage[0], 3) if stage else None,
+                "stage_y_um": _round(stage[1], 3) if stage else None,
+                "verified": e.verified,
+            }
+        )
+    return rows

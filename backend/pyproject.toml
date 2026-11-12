@@ -65,6 +65,7 @@ extend-immutable-calls = ["fastapi.Depends"]  # FastAPI dependencies are declare
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B011", "E501"]  # tables of test cases read better on one line
+"src/imagebio/live/report_render.py" = ["E501"]  # markup and SVG read better a tag per line
 
 [tool.mypy]
 python_version = "3.11"
