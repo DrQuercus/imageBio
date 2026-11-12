@@ -16,9 +16,12 @@
 		reverse_proxy imagebio:8000
 	}
 
-	# a personal key (ADR 015): no password asked here, imageBio checks the key, which only
-	# reads; the identity headers a client may have sent are removed
-	@key header Authorization "Bearer ibk_*"
+	# a personal key (ADR 015), on the API only: no password asked here, imageBio checks the
+	# key, which only reads; the identity headers a client may have sent are removed
+	@key {
+		header Authorization "Bearer ibk_*"
+		path /api/*
+	}
 	handle @key {
 		reverse_proxy imagebio:8000 {
 			header_up -X-Forwarded-User

@@ -170,11 +170,14 @@ def test_the_commands(lab: Lab, tmp_path: Path) -> None:
     done = run(lab, "info", "cryo/movie.mrc")
     assert done.returncode == 0 and json.loads(done.stdout)["info"]["shape"]["t"] == 5
 
-    done = run(lab, "whoami", key="ibk_wrong")
-    assert done.returncode == 1 and "401" in done.stderr and "ibk_wrong" not in done.stderr
+    wrong = "ibk_" + "w" * 43  # well formed, unknown to the server
+    done = run(lab, "whoami", key=wrong)
+    assert done.returncode == 1 and "401" in done.stderr and wrong not in done.stderr
+    done = run(lab, "whoami", key="ibk_wrong")  # not even a key: refused before anything is sent
+    assert done.returncode == 1 and "not a key" in done.stderr and "ibk_wrong" not in done.stderr
     key_file = tmp_path / "key"
     key_file.write_text(lab.key + "\n")
-    done = run(lab, "--key-file", str(key_file), "whoami", key="ibk_wrong")  # the file wins
+    done = run(lab, "--key-file", str(key_file), "whoami", key=wrong)  # the file wins
     assert done.returncode == 0 and json.loads(done.stdout)["user"] == "alice"
     done = subprocess.run([OLDEST, "-I", str(lab.script), "whoami"], capture_output=True, text=True, env={})
     assert done.returncode == 2 and "IMAGEBIO_URL" in done.stderr

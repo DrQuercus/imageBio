@@ -25,7 +25,7 @@ Sur la même page : **Télécharger imagebio_ai.py**. Un seul fichier, Python 3.
 | `IMAGEBIO_KEY` | votre clé (ou `--key-file chemin` : un fichier qui ne contient qu'elle, lisible par vous seul) |
 | `IMAGEBIO_CA` | si le navigateur a dû accepter un certificat propre au laboratoire : le certificat de cette autorité (votre administrateur vous le donne) |
 
-Le client n'envoie une clé qu'en https (ou à ce poste), et ne désactive jamais la vérification du certificat.
+Le client n'envoie une clé qu'en https (ou à ce poste), ne suit aucune redirection, et ne désactive jamais la vérification du certificat. Une clé n'ouvre que l'API (`/api/…`), pas les pages.
 
 ## 3. Avec un assistant (MCP)
 
@@ -87,6 +87,8 @@ Toute l'API qui lit accepte la clé : `curl -H "Authorization: Bearer $IMAGEBIO_
 | 403 | un dossier que votre compte ne lit pas |
 | `certificate verify failed` | le certificat du laboratoire : donner `IMAGEBIO_CA` |
 | « a personal key is sent over https only » | l'adresse commence par `http://` et n'est pas ce poste |
+| « the key is not a key of imageBio » | la variable ou le fichier ne contient pas une clé (`ibk_…`) : mal copiée, ou autre chose |
+| « answered with a redirection » | l'adresse n'est pas celle d'imageBio (un ancien nom, une page de connexion) : le client ne suit pas, pour ne pas emporter la clé ailleurs |
 
 ## Ce qui a été vérifié
 

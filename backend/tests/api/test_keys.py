@@ -11,6 +11,7 @@ import pytest
 
 from fixtures.api import ALICE, BOB, Tree, build_tree, make_client
 from imagebio.api.keys import AI_FILES
+from imagebio.api.security import key_of
 
 ADMIN = {"X-Forwarded-User": "root", "X-Forwarded-Groups": "it"}
 AI_DIR = Path(__file__).resolve().parents[2] / "src" / "imagebio" / "ai"
@@ -232,3 +233,17 @@ def test_the_files_that_plug_an_assistant_in(client, name: str) -> None:
 )
 def test_nothing_else_is_downloaded_from_there(client, name: str) -> None:
     assert client.get(f"/api/ai/{name}", headers=ALICE).status_code == 404
+
+
+def test_the_key_header_is_read_one_way_only(client) -> None:
+    """The middleware and the identity read it with the same function: spaces and tabs around
+    the key, the scheme in any case; nothing else."""
+    key = make_key(client)["key"]
+    assert key_of(f"Bearer {key}") == key
+    assert key_of(f"bearer \t {key} ") == key
+    for other in (f"Bearer \xa0{key}", f"Basic {key}", key, f"Bearer{key}", "Bearer abc"):
+        assert key_of(other) is None, other
+    spaced = {"Authorization": f"bearer \t {key} "}
+    assert client.get("/api/me", headers=spaced).json()["user"] == "alice"
+    r = client.post("/api/live/watches", params={"path": "cryo"}, headers=spaced)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "read_only_key"

@@ -87,8 +87,12 @@ def test_every_proxy_lets_a_personal_key_through_without_an_identity() -> None:
     has to choose."""
     for name in ("compose/caddy/Caddyfile", "compose/caddy/Caddyfile.sso", "systemd/Caddyfile"):
         text = (DEPLOY / name).read_text()
+        # a key passes only on the API: the pages are for people who signed in
         found = re.search(
-            r'@key header Authorization "Bearer (\w+)\*"\n\thandle @key \{(.*?)\n\t\}', text, re.S
+            r'@key \{\n\t\theader Authorization "Bearer (\w+)\*"\n\t\tpath /api/\*\n\t\}\n'
+            r"\thandle @key \{(.*?)\n\t\}",
+            text,
+            re.S,
         )
         assert found, name
         assert found.group(1) == KEY_PREFIX, name

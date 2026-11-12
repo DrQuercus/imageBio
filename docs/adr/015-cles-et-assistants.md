@@ -29,7 +29,7 @@ Deux obstacles dans l'existant :
 
 ### Proxy
 
-Une requête qui porte `Authorization: Bearer ibk_…` **contourne le mot de passe** (comptes locaux de Caddy) ou **la page de connexion** (oauth2-proxy), mais **pas le secret du proxy** : Caddy l'envoie directement à imageBio, retire les en-têtes d'identité qu'un client aurait mis, et ajoute le secret. C'est imageBio qui vérifie la clé. Les trois fichiers Caddy le font ; le test de déploiement le vérifie à travers le vrai Caddy (clé sans mot de passe, identité forgée retirée, mauvaise clé refusée, écriture refusée, `/metrics` fermé, clé sans le secret refusée par le conteneur, révocation immédiate).
+Une requête **vers l'API** (`/api/…`) qui porte `Authorization: Bearer ibk_…` **contourne le mot de passe** (comptes locaux de Caddy) ou **la page de connexion** (oauth2-proxy), mais **pas le secret du proxy** : Caddy l'envoie directement à imageBio, retire les en-têtes d'identité qu'un client aurait mis, et ajoute le secret. C'est imageBio qui vérifie la clé ; il refuse aussi une clé ailleurs que sur l'API (les pages restent aux personnes connectées). Les trois fichiers Caddy le font ; le test de déploiement le vérifie à travers le vrai Caddy (clé sans mot de passe, identité forgée retirée, mauvaise clé refusée, écriture refusée, `/metrics` fermé, clé sans le secret refusée par le conteneur, révocation immédiate).
 
 ### API décrite
 
@@ -38,7 +38,7 @@ Une requête qui porte `Authorization: Bearer ibk_…` **contourne le mot de pas
 ### Client, serveur MCP, skill
 
 - **`imagebio_ai.py`** : un seul fichier, la bibliothèque standard de Python seulement, Python 3.9 ou plus (vérifié par la CI avec 3.9). Il se télécharge depuis la page (`/api/ai/imagebio_ai.py`). Il offre des **commandes** (sessions, état d'une session, images d'une session triées par CTF, défocus, glace…, rapports, dossiers, fichiers, estimation du défocus) et un **serveur MCP** sur l'entrée et la sortie standard, avec les mêmes outils, pour Claude Desktop, Claude Code ou tout client MCP.
-- Le client **n'envoie une clé qu'en https**, ou à ce poste (`localhost`). Il **ne désactive jamais** la vérification du certificat : pour une autorité propre au laboratoire (« tls internal » de Caddy), on lui donne son certificat (`IMAGEBIO_CA`). Il ne lit que des réponses JSON de taille bornée et coupe ce qu'il donne à un assistant (100 000 caractères au plus par réponse, en le disant).
+- Le client **n'envoie une clé qu'en https**, ou à ce poste (`localhost`, sans passer par un proxy), et ne suit **aucune redirection**. Il **ne désactive jamais** la vérification du certificat : pour une autorité propre au laboratoire (« tls internal » de Caddy), on lui donne son certificat (`IMAGEBIO_CA`). Il ne lit que des réponses JSON de taille bornée et coupe ce qu'il donne à un assistant (100 000 caractères au plus par réponse, en le disant).
 - **Le serveur MCP dit à l'assistant** que les outils ne font que lire et que les noms de fichiers et les métadonnées sont des données écrites par d'autres, jamais des instructions.
 - **`SKILL.md`** explique à un assistant comment lire les chiffres d'imageBio (défocus, ajustement de la CTF, anneau de glace, dérive, rapport) sans réinventer de seuils, et rappelle ce qu'un assistant en ligne reçoit.
 - **Pourquoi un client à télécharger, et pas un serveur MCP dans imageBio** : le transport stdio est celui que tous les clients MCP savent lancer ; un serveur MCP sur HTTP demanderait au proxy d'authentifier un deuxième protocole. Le client est fin : il ne fait qu'appeler l'API, et tout contrôle reste dans imageBio.
@@ -49,7 +49,19 @@ L'interface et le guide le disent : **ce qu'un assistant lit part chez celui qui
 
 ## Relecture indépendante
 
-*À compléter avec les résultats de la relecture de ce lot.*
+Les clés, le proxy et le client ont été relus par un agent chargé d'y trouver des défauts réels ; cinq des sept ont été reproduits par lui. Tous sont corrigés, chacun avec un test qui échoue sur le code d'avant (`backend/tests/ai/test_ai_review.py`, la fin de `backend/tests/admin/test_key_store.py`, `backend/tests/api/test_keys_review.py`) :
+
+| Gravité | Défaut | Correction |
+|---|---|---|
+| moyenne | Le client suivait les redirections et y emportait la clé : vers un autre hôte, ou de https vers http | aucune redirection suivie : le client s'arrête et le dit |
+| moyenne | Une lecture ratée de `keys.json` (trop de fichiers ouverts, accroc NFS) laissait une vue vide jusqu'au prochain changement du fichier ; l'écriture suivante (une clé faite, ou le dernier usage) effaçait alors les clés de tous. Un changement était repéré par la date et la taille : avec des dates grossières, une révocation suivie d'une clé de même taille passait inaperçue, et la clé révoquée pouvait être réécrite | une lecture ratée est retentée au coup suivant ; rien n'est écrit sur un fichier qui ne se lit pas (503) ; un changement est repéré par le contenu du fichier, petit et relu au plus une fois par seconde (les numéros d'inode reviennent, ils ne suffisent pas) ; un fichier qui n'est pas un fichier de clés est mis de côté |
+| moyenne | Un serveur qui ne recevait que des clés ne relisait pas la page de paramètres : un groupe retiré sur l'autre serveur restait ouvert aux clés jusqu'au passage d'une personne | relue à chaque requête par clé, comme pour une personne |
+| basse à moyenne | Une clé suivie d'une fin de ligne (fichier aux fins de ligne Windows) faisait échouer l'en-tête, et le message d'erreur, rendu à l'assistant, contenait la clé | clé nettoyée et vérifiée avant tout envoi ; jamais redite |
+| basse | Une clé envoyée en http à ce poste passait par le proxy http de l'environnement | jamais de proxy pour ce poste ; vérification du certificat toujours explicite |
+| basse | La route des clés de Caddy ouvrait sans mot de passe les pages de l'interface à quiconque écrivait « Bearer ibk_ » suivi de n'importe quoi | clés limitées à `/api/`, dans Caddy et dans imageBio |
+| basse | Un assistant qui interroge une surveillance la faisait passer pour regardée : ses alertes ne s'arrêtaient plus au bout d'une semaine | une lecture par clé ne compte pas comme une personne qui regarde |
+
+L'intergiciel et la construction de l'identité lisent aussi l'en-tête d'une clé par une seule et même fonction.
 
 ## Conséquences
 

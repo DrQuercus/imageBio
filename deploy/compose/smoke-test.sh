@@ -159,6 +159,7 @@ expect 401 "a wrong key is refused" -H "Authorization: Bearer ibk_${key:4:20}wro
 expect 403 "a key only reads" --request POST -H "Authorization: Bearer $key" \
     "$base/api/live/watches?path=microscope/session"
 expect 404 "monitoring is not served to a key either" -H "Authorization: Bearer $key" "$base/metrics"
+expect 401 "a key opens nothing but the API" -H "Authorization: Bearer $key" "$base/"
 by_key "$base/api/ai/imagebio_ai.py" >"$work/imagebio_ai.py"
 grep -q "^def serve_mcp" "$work/imagebio_ai.py" ||
     { echo "FAILED  the client for assistants is not served" >&2; exit 1; }

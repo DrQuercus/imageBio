@@ -24,9 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from imagebio.core.errors import InvalidRequestError, NotFoundError
+from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 
-__all__ = ["FILE_NAME", "PREFIX", "KeyInfo", "KeyStore"]
+__all__ = ["FILE_NAME", "PREFIX", "KeyInfo", "KeyStore", "KeysUnavailableError"]
 
 FILE_NAME: Final = "keys.json"
 SCHEMA: Final = "imagebio.keys"
@@ -40,6 +40,14 @@ _MAX_PER_USER: Final = 10
 _MAX_NAME: Final = 64
 _SEEN_WRITE_S: Final = 600.0  # "last used" reaches the file at most this often
 _LOOK_EVERY_S: Final = 1.0  # how often the file is looked at for a change made by another process
+
+
+class KeysUnavailableError(ImageBioError):
+    """The file of the keys is there but could not be read just now: nothing is written over it
+    (that would lose the keys of everybody)."""
+
+    status = 503
+    code = "keys_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,33 +92,47 @@ class KeyStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._keys: dict[str, dict[str, Any]] = {}  # by digest
-        self._file: tuple[int, int] | None = None
+        self._raw: bytes | None = None  # the content of the file last read or written
+        self._unread = False  # the file is there but its last read failed: never written over
+        self._damaged = False  # the file reads but is not a file of keys: set aside before writing
         self._looked_at = 0.0
         self._used: dict[str, float] = {}  # digest -> last use not yet written
         self._written_at = 0.0
-        self._load()
+        with self._lock:
+            self._unread = True  # read at once, whatever is in memory
+            self._fresh()
 
     # ── the file ─────────────────────────────────────────────────────────────
-    def _stat(self) -> tuple[int, int] | None:
+    def _fresh(self) -> None:
+        """Take what another process wrote (the lock is held). The file is small and read
+        whole: its content tells a change, where file times can be too coarse and inode
+        numbers come back. Until it reads, no key opens anything (a key that cannot be checked
+        does not open anything); a read that fails is tried again at the next look, and
+        nothing is written over the file meanwhile. A file that reads but is not a file of keys
+        is set aside when the next key is written."""
         try:
-            st = os.stat(self.path)
+            raw: bytes | None = self.path.read_bytes()
+        except FileNotFoundError:
+            raw = None
         except OSError:
-            return None
-        return st.st_mtime_ns, st.st_size
-
-    def _load(self) -> None:
-        """Read the file. One that does not read is taken as no key at all: a key that cannot
-        be checked does not open anything (and its owner makes another)."""
-        self._file = self._stat()
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            self._keys = {}
+            self._keys, self._unread, self._raw = {}, True, None
             return
+        if raw == self._raw and not self._unread:
+            return
+        self._raw, self._unread, self._damaged, self._keys = raw, False, False, {}
+        if raw is None:  # no file: no key
+            return
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            data = None
         keys = data.get("keys") if isinstance(data, dict) and data.get("schema") == SCHEMA else None
+        if not isinstance(keys, list):
+            self._damaged = True
+            return
         self._keys = {
             k["hash"]: k
-            for k in (keys if isinstance(keys, list) else [])
+            for k in keys
             if isinstance(k, dict)
             and isinstance(k.get("hash"), str)
             and isinstance(k.get("user"), str)
@@ -119,25 +141,27 @@ class KeyStore:
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self._damaged and self.path.exists():  # kept for whoever wants to see what it was
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(self._clock()))
+            os.replace(self.path, self.path.with_name(f"{FILE_NAME}.unusable-{stamp}"))
+            self._damaged = False
         for digest, when in self._used.items():
             if digest in self._keys:
                 self._keys[digest]["last_used"] = when
         self._used.clear()
+        raw = (
+            json.dumps({"schema": SCHEMA, "keys": list(self._keys.values())}, indent=2, ensure_ascii=False)
+            + "\n"
+        ).encode()
         staging = self.path.with_name(f".{FILE_NAME}.part")
         fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"schema": SCHEMA, "keys": list(self._keys.values())}, f, indent=2, ensure_ascii=False)
-            f.write("\n")
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
             f.flush()
             os.fsync(f.fileno())
         os.replace(staging, self.path)
-        self._file = self._stat()
+        self._raw = raw
         self._written_at = self._clock()
-
-    def _fresh(self) -> None:
-        """Take what another process wrote (the lock is held)."""
-        if self._stat() != self._file:
-            self._load()
 
     @contextlib.contextmanager
     def _writing(self) -> Iterator[None]:
@@ -155,6 +179,8 @@ class KeyStore:
                 except ImportError:  # not a POSIX system: one process only
                     pass
                 self._fresh()
+                if self._unread:
+                    raise KeysUnavailableError("the keys cannot be read just now: try again in a moment")
                 yield
                 self._save()
             finally:
@@ -255,7 +281,8 @@ class KeyStore:
             self._used[digest] = now
             if now - self._written_at >= _SEEN_WRITE_S:
                 self._written_at = now  # one try per period, whatever happens
-                with contextlib.suppress(OSError), self._writing():  # a full disk does not stop a key
+                # a full disk does not stop a key; a file that does not read is not written over
+                with contextlib.suppress(OSError, KeysUnavailableError), self._writing():
                     pass
                 if digest not in self._keys:  # revoked by another process meanwhile
                     return None

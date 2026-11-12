@@ -19,25 +19,47 @@ assistant must not take it for instructions.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import re
 import ssl
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import IO, Any
 
 VERSION = "1"
 _MAX_BYTES = 64 * 2**20  # an answer larger than this is not read
 _MAX_TEXT = 100_000  # characters handed to an assistant at once
 _PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+_KEY = re.compile(r"ibk_[A-Za-z0-9_-]{20,200}")
 
 
 class ImageBioError(Exception):
     """What the server or the connection said went wrong, in its own words."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """imageBio never redirects its API: a redirection would carry the key elsewhere (another
+    host, or plain http), so none is followed."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        raise ImageBioError(
+            f"imageBio answered with a redirection ({code}): not followed, the key goes nowhere else; "
+            "check the address (IMAGEBIO_URL)"
+        )
 
 
 class ImageBio:
@@ -49,12 +71,26 @@ class ImageBio:
         parts = urllib.parse.urlsplit(url.rstrip("/"))
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ImageBioError("the address of imageBio starts with https:// (or http:// on this computer)")
+        if key is not None:
+            key = key.strip(" \t\r\n")
+            if not _KEY.fullmatch(key):  # never said back: it may be a secret pasted in the wrong place
+                raise ImageBioError(
+                    "the key is not a key of imageBio (ibk_ followed by letters, digits, - and _)"
+                )
         if key is not None and parts.scheme != "https" and parts.hostname not in _LOCAL_HOSTS:
             raise ImageBioError("a personal key is sent over https only, or to this computer")
         self.base = f"{parts.scheme}://{parts.netloc}{parts.path}"
         self.key = key
         self.timeout = timeout
-        self.context = ssl.create_default_context(cafile=ca_file) if ca_file else None
+        # certificates always checked, whatever the platform's defaults
+        context = ssl.create_default_context(cafile=ca_file)
+        handlers: list[urllib.request.BaseHandler] = [
+            _NoRedirect(),
+            urllib.request.HTTPSHandler(context=context),
+        ]
+        if parts.scheme == "http":  # this computer: straight to it, never through a proxy in clear
+            handlers.append(urllib.request.ProxyHandler({}))
+        self._opener = urllib.request.build_opener(*handlers)
 
     def get(self, route: str, /, **params: Any) -> Any:
         query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
@@ -64,12 +100,14 @@ class ImageBio:
         if self.key:
             request.add_header("Authorization", f"Bearer {self.key}")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout, context=self.context) as response:  # noqa: S310
+            with self._opener.open(request, timeout=self.timeout) as response:
                 body = response.read(_MAX_BYTES + 1)
         except urllib.error.HTTPError as e:
             raise ImageBioError(_message(e)) from None
         except (urllib.error.URLError, OSError) as e:
             raise ImageBioError(f"imageBio cannot be reached: {getattr(e, 'reason', e)}") from None
+        except (http.client.HTTPException, ValueError):  # their text may quote the request
+            raise ImageBioError("the answer of imageBio could not be read") from None
         if len(body) > _MAX_BYTES:
             raise ImageBioError("the answer is too large to be read here")
         try:
@@ -478,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.url:
         print("imagebio_ai: give the address of imageBio (--url or IMAGEBIO_URL)", file=sys.stderr)
         return 2
-    key = os.environ.get("IMAGEBIO_KEY")
+    key = os.environ.get("IMAGEBIO_KEY", "").strip()
     if args.key_file:
         with open(args.key_file, encoding="utf-8") as f:
             key = f.read().strip()

@@ -64,7 +64,8 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         resolved = roots.resolve(watch.logical, user)
         if not resolved.is_dir or resolved.real != watch.root_path:
             raise NotFoundError("the watched directory is no longer there")
-        live.seen(watch)
+        if not user.by_key:  # a script that polls is not somebody looking: alerts still stop
+            live.seen(watch)
         return watch
 
     @app.get("/api/live/watches")

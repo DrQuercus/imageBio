@@ -11,10 +11,13 @@
 		respond 404
 	}
 
-	# a personal key (ADR 015): straight to imageBio, around oauth2-proxy (no login page for a
-	# script); imageBio checks the key, which only reads; the identity headers a client may have
-	# sent are removed
-	@key header Authorization "Bearer ibk_*"
+	# a personal key (ADR 015), on the API only: straight to imageBio, around oauth2-proxy (no
+	# login page for a script); imageBio checks the key, which only reads; the identity headers
+	# a client may have sent are removed
+	@key {
+		header Authorization "Bearer ibk_*"
+		path /api/*
+	}
 	handle @key {
 		reverse_proxy imagebio:8000 {
 			header_up -X-Forwarded-User

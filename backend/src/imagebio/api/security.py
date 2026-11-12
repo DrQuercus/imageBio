@@ -69,12 +69,20 @@ class AuthenticationRequired(ImageBioError):
     code = "authentication_required"
 
 
+def key_of(value: str) -> str | None:
+    """The personal key an Authorization header holds (``Bearer ibk_…``), or None. The one
+    reading of the header, for the middleware and for the identity alike."""
+    if value[: len(_BEARER)].lower() != _BEARER:
+        return None
+    key = value[len(_BEARER) :].strip(" \t")
+    return key if key.startswith(KEY_PREFIX) else None
+
+
 def personal_key(request: Request) -> str | None:
     """The personal key a request carries (``Authorization: Bearer ibk_…``), or None. Several
     Authorization headers with a key among them are no identity at all."""
     values = request.headers.getlist("authorization")
-    keys = [v[len(_BEARER) :].strip() for v in values if v[: len(_BEARER)].lower() == _BEARER]
-    keys = [k for k in keys if k.startswith(KEY_PREFIX)]
+    keys = [k for k in map(key_of, values) if k is not None]
     if not keys:
         return None
     if len(values) != 1:
@@ -100,6 +108,8 @@ def _key_user(request: Request, settings: Settings, key: str) -> User:
     if request.method not in _KEY_METHODS:
         raise AccessDeniedError("a personal key only reads")
     store = getattr(request.app.state, "store", None)
+    if store is not None:
+        store.refresh()  # another server on the same state directory may have taken a group away
     given = store.groups_of(found.user) if store is not None else frozenset()
     return User(found.user, frozenset(found.groups) | given, admin=False, by_key=True)
 
@@ -233,13 +243,18 @@ class SecurityMiddleware:
             if len(given) != 1 or not hmac.compare_digest(given[0], self.proxy_secret):
                 await refuse("authentication_required", "authentication required", 401)
                 return
-        if scope["method"] not in _KEY_METHODS and any(
-            name == b"authorization"
-            and value[: len(_BEARER)].lower() == _BEARER.encode()
-            and value[len(_BEARER) :].strip().startswith(KEY_PREFIX.encode())
+        carries_key = any(
+            name == b"authorization" and key_of(value.decode("latin-1")) is not None
             for name, value in scope["headers"]
-        ):  # checked again where the identity is made: a key never writes
+        )
+        if carries_key and scope["method"] not in _KEY_METHODS:
+            # checked again where the identity is made: a key never writes
             await refuse("read_only_key", "a personal key only reads")
+            return
+        if carries_key and self.proxied and not scope["path"].startswith("/api/"):
+            # a key reads the API, nothing else: the pages and their files are for people who
+            # signed in (the proxy lets a key through without a password)
+            await refuse("authentication_required", "a personal key only reads the API", 401)
             return
         if scope["method"] not in _SAFE_METHODS and not self._same_site(scope, hosts):
             await refuse("cross_site_request", "cross-site request refused")

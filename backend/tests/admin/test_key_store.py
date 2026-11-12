@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 
 import pytest
 
 from imagebio.admin import keys as keys_module
-from imagebio.admin.keys import DAYS_MAX, PREFIX, KeyStore
+from imagebio.admin.keys import DAYS_MAX, PREFIX, KeyStore, KeysUnavailableError
 from imagebio.core.errors import InvalidRequestError, NotFoundError
 
 
@@ -152,3 +153,90 @@ def test_a_damaged_file_opens_nothing(tmp_path: Path, clock: Clock, content: byt
     assert store.check(secret) is None and store.of("alice") == []
     _, info = store.create("alice", "new", 10, frozenset())  # and a new one can be made
     assert [k.id for k in store.of("alice")] == [info.id]
+
+
+# ── regressions found by the independent review of lot E ──────────────────────
+def _flaky_reads(monkeypatch: pytest.MonkeyPatch, failures: int) -> dict[str, int]:
+    """The next ``failures`` reads of keys.json fail (EMFILE, EIO, an NFS hiccup)."""
+    real_bytes, real_text = Path.read_bytes, Path.read_text
+    left = {"n": failures}
+
+    def fail(path: Path) -> None:
+        if path.name == "keys.json" and left["n"] > 0:
+            left["n"] -= 1
+            raise OSError(24, "Too many open files")
+
+    def read_bytes(self: Path) -> bytes:
+        fail(self)
+        return real_bytes(self)
+
+    def read_text(self: Path, *args: object, **kwargs: object) -> str:
+        fail(self)
+        return real_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return left
+
+
+def test_a_failed_read_is_tried_again_and_never_wipes_the_keys_of_others(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keys_module, "_LOOK_EVERY_S", 0.0)
+    one, two = KeyStore(tmp_path, clock), KeyStore(tmp_path, clock)
+    bob, _ = one.create("bob", "his", 30, frozenset())
+    _flaky_reads(monkeypatch, 1)
+    assert two.check(bob) is None  # cannot be checked just now: opens nothing
+    assert two.check(bob) is not None  # read again at the next look (before: refused for good)
+    two.create("alice", "hers", 30, frozenset())  # before: written from an empty view
+    assert sorted(k["user"] for k in json.loads((tmp_path / "keys.json").read_text())["keys"]) == [
+        "alice",
+        "bob",
+    ]
+    assert one.check(bob) is not None
+
+
+def test_nothing_is_written_over_a_file_that_does_not_read(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keys_module, "_LOOK_EVERY_S", 0.0)
+    one, two = KeyStore(tmp_path, clock), KeyStore(tmp_path, clock)
+    bob, _ = one.create("bob", "his", 30, frozenset())
+    before = (tmp_path / "keys.json").read_bytes()
+    _flaky_reads(monkeypatch, 10)
+    with pytest.raises(KeysUnavailableError):
+        two.create("alice", "hers", 30, frozenset())
+    clock.now += 3600  # time to write the last use: not over a file that does not read
+    assert two.check(bob) is None
+    with open(tmp_path / "keys.json", "rb") as f:  # past the failing reads of the store
+        assert f.read() == before
+
+
+def test_a_change_of_the_same_size_at_the_same_time_is_seen(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coarse file times (some network file systems): a revocation and a new key of the same size
+    within one tick. Before, the other process missed it, and its next write brought the
+    revoked key back."""
+    monkeypatch.setattr(keys_module, "_LOOK_EVERY_S", 0.0)
+    monkeypatch.setattr(keys_module, "_SEEN_WRITE_S", 1e12)  # no last use written: same sizes
+    one, two = KeyStore(tmp_path, clock), KeyStore(tmp_path, clock)
+    first, info = one.create("alice", "k1", 30, frozenset())
+    assert two.check(first) is not None
+    path = tmp_path / "keys.json"
+    stat = path.stat()
+    one.revoke("alice", info.id)
+    second, _ = one.create("alice", "k2", 30, frozenset())
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert path.stat().st_size == stat.st_size and path.stat().st_mtime_ns == stat.st_mtime_ns
+    assert two.check(first) is None and two.check(second) is not None
+    two.create("bob", "his", 30, frozenset())
+    assert one.check(first) is None
+
+
+def test_a_file_that_is_not_a_file_of_keys_is_set_aside(tmp_path: Path, clock: Clock) -> None:
+    (tmp_path / "keys.json").write_text("[]")
+    store = KeyStore(tmp_path, clock)
+    store.create("alice", "k", 10, frozenset())
+    kept = list(tmp_path.glob("keys.json.unusable-*"))
+    assert len(kept) == 1 and kept[0].read_text() == "[]"
