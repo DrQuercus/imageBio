@@ -739,7 +739,9 @@ def test_images_are_measured_as_they_arrive(world: World) -> None:
         with mrcfile.open(world.tree.base / item["path"]) as m:
             pixels = np.asarray(m.data, np.float64)
         metrics = item["metrics"]
-        assert metrics.keys() == {"mean", "std", "ice_ring"}, item["name"]
+        assert metrics.keys() == {"mean", "std", "ice_ring", "microscope"}, item["name"]
+        # what the CTF was looked for with: the voltage of the acquisition, the rest from the server
+        assert metrics["microscope"] == {"kv": 300.0, "kv_from": "xml", "cs_mm": 2.7, "amplitude": 0.07}
         assert metrics["mean"] == pytest.approx(pixels.mean(), rel=5e-3)  # no hot pixel here: the plain mean
         assert metrics["std"] == pytest.approx(pixels.std(), rel=0.05)
         assert 0.85 < metrics["ice_ring"] < 1.15  # no crystalline ice in this microscope
@@ -820,7 +822,11 @@ def test_of_a_session_found_already_written_only_the_last_images_are_measured(
     for path in (data / "FoilHole_1_Data_99_99_20270115_101500.mrc", data):
         os.utime(path, (world.now, world.now))
     world.run([], 150)  # an EPU image without its metadata file is accepted after two minutes
-    assert measured(world)["FoilHole_1_Data_99_99_20270115_101500"] == {"mean": 7.0, "std": 0.0}
+    assert measured(world)["FoilHole_1_Data_99_99_20270115_101500"] == {
+        "mean": 7.0,
+        "std": 0.0,
+        "microscope": {"kv": 300.0, "kv_from": "server", "cs_mm": 2.7, "amplitude": 0.07},  # no XML
+    }
 
 
 def test_an_image_that_cannot_be_read_is_not_measured_again(

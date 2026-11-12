@@ -50,7 +50,7 @@ def hold_state_dir(directory: Path, *, alone: bool = False) -> IO[str] | None:
     return handle
 
 
-SCHEMA_VERSION: Final = 7
+SCHEMA_VERSION: Final = 8
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
 _BUSY_TIMEOUT_S = 30.0
 
@@ -68,6 +68,11 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
         "ALTER TABLE watches ADD COLUMN processing INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE exposures ADD COLUMN processing TEXT",
     ),
+    7: (
+        "ALTER TABLE roots ADD COLUMN microscope TEXT",
+        "ALTER TABLE roots ADD COLUMN microscope_at REAL",
+        "ALTER TABLE watches ADD COLUMN report_auto INTEGER NOT NULL DEFAULT 1",
+    ),
 }
 
 _SCHEMA: Final = """
@@ -81,7 +86,9 @@ CREATE TABLE IF NOT EXISTS roots (
     full_at    REAL,                     -- last full rescan
     cycle_ms   REAL,                     -- duration of the last cycle
     error      TEXT,                     -- public message of the last failed cycle
-    seq        INTEGER NOT NULL DEFAULT 0
+    seq        INTEGER NOT NULL DEFAULT 0,
+    microscope TEXT,                     -- JSON {kv, cs_mm, amplitude} set for this session; NULL: none
+    microscope_at REAL                   -- when it was set
 );
 
 CREATE TABLE IF NOT EXISTS watches (
@@ -99,8 +106,30 @@ CREATE TABLE IF NOT EXISTS watches (
     ice_mfp_nm REAL,                     -- mean free path for the ice thickness, nm; NULL: the server's
     quality    TEXT,                     -- JSON acceptance thresholds (live/quality.py), NULL: none
     processing INTEGER NOT NULL DEFAULT 0,  -- 1: its user asked for the external programs
+    report_auto INTEGER NOT NULL DEFAULT 1, -- 1: a quality report is made when the watch ends
     UNIQUE (user, logical)
 );
+
+CREATE TABLE IF NOT EXISTS reports (         -- live/report.py: one row per report written
+    id         INTEGER PRIMARY KEY,
+    watch_id   INTEGER NOT NULL REFERENCES watches(id),
+    created_at REAL NOT NULL,
+    trigger    TEXT NOT NULL,            -- manual | stop | idle
+    name       TEXT NOT NULL,            -- its directory under <state>/reports/
+    bytes      INTEGER NOT NULL,
+    exposures  INTEGER NOT NULL,         -- acquired exposures it covers
+    newest     REAL                      -- acquisition time of the newest of them
+);
+CREATE INDEX IF NOT EXISTS reports_watch ON reports (watch_id, created_at);
+
+CREATE TABLE IF NOT EXISTS alert_events (    -- when each alert condition was announced, and ended
+    id        INTEGER PRIMARY KEY,
+    watch_id  INTEGER NOT NULL REFERENCES watches(id),
+    condition TEXT NOT NULL,
+    started   REAL NOT NULL,
+    ended     REAL
+);
+CREATE INDEX IF NOT EXISTS alert_events_watch ON alert_events (watch_id, started);
 
 CREATE TABLE IF NOT EXISTS alert_states (    -- live/alerts.py, AlertState
     watch_id    INTEGER NOT NULL REFERENCES watches(id),

@@ -152,6 +152,21 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         rules = AlertRules(names, no_image, disk_free, rate_drop)
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
 
+    @app.put("/api/live/watches/{watch_id}/microscope")
+    def live_watch_microscope_set(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        kv: float | None = Query(None),
+        cs: float | None = Query(None),
+        amp: float | None = Query(None),
+    ) -> Response:
+        """Set the microscope of the session a watch looks at: accelerating voltage (kV),
+        spherical aberration (mm), amplitude contrast. What is left out is forgotten (the
+        data root's or the server's value applies). The voltage an acquisition file gives
+        comes first all the same."""
+        _only(request, frozenset({"kv", "cs", "amp"}))
+        return _json(live.set_microscope(own_watch(request, watch_id), kv, cs, amp))
+
     @app.put("/api/live/watches/{watch_id}/processing")
     def live_watch_processing_set(
         request: Request,

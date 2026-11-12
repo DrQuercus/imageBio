@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Final
 
-from imagebio.core.config import ConfigError, Settings
+from imagebio.core.config import MICROSCOPE_BOUNDS, ConfigError, RootConfig, Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
 from imagebio.cryo.epu import read_epu_xml
@@ -86,6 +86,9 @@ MOVIE_WAIT_S: Final = 120.0
 _PROCESS_IDLE_S: Final = 2.0  # a worker with nothing to run looks again after this
 _RUN_PREFIX: Final = "run-"  # directories of the runs of the external programs (tools/pipeline.py)
 _UNAVAILABLE_PAUSE_S: Final = 60.0  # after a program could not be started at all
+#: The microscope of a session: its keys here, and the settings they default to.
+_MICROSCOPE_KEYS: Final = (("kv", "kv"), ("cs_mm", "cs_mm"), ("amplitude", "amplitude_contrast"))
+_ALERT_EVENTS_KEPT: Final = 200  # alerts remembered per watch, for its report
 
 
 class _NotAsIndexedError(Exception):
@@ -434,16 +437,102 @@ class LiveService:
         limit = _MEASURE_BATCH + len(skip)
         rows = db.execute(select + "e.arrived = 1" + order, (root_id, *_ACQUIRED, limit)).fetchall()
         if len(rows) < limit:
-            oldest = db.execute(
-                f"SELECT time FROM exposures WHERE root_id = ? AND category IN ({marks}) "  # noqa: S608
-                "AND time IS NOT NULL ORDER BY time DESC LIMIT 1 OFFSET ?",
-                (root_id, *_ACQUIRED, MEASURED_WHEN_FOUND - 1),
-            ).fetchone()
             rows += db.execute(
                 select + "e.arrived = 0 AND e.time >= ?" + order,
-                (root_id, *_ACQUIRED, oldest["time"] if oldest is not None else -1e300, limit),
+                (root_id, *_ACQUIRED, self._found_window(db, root_id), limit),
             ).fetchall()
         return [row for row in rows if row["id"] not in skip][:_MEASURE_BATCH]
+
+    @staticmethod
+    def _found_window(db: sqlite3.Connection, root_id: int) -> float:
+        """Of a session found already written, only the most recent images are measured: the
+        acquisition time from which they are (``MEASURED_WHEN_FOUND`` of them)."""
+        marks = ",".join("?" * len(_ACQUIRED))
+        oldest = db.execute(
+            f"SELECT time FROM exposures WHERE root_id = ? AND category IN ({marks}) "  # noqa: S608
+            "AND time IS NOT NULL ORDER BY time DESC LIMIT 1 OFFSET ?",
+            (root_id, *_ACQUIRED, MEASURED_WHEN_FOUND - 1),
+        ).fetchone()
+        return float(oldest["time"]) if oldest is not None else -1e300
+
+    # ── the microscope of a session ──────────────────────────────────────────
+    def _data_root(self, db: sqlite3.Connection, root_id: int) -> RootConfig | None:
+        """The data root (``[[roots]]``) a watched directory belongs to."""
+        row = db.execute(
+            "SELECT logical FROM watches WHERE root_id = ? ORDER BY id LIMIT 1", (root_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        name = str(row["logical"]).split("/", 1)[0]
+        return next((r for r in self._settings.roots if r.name == name), None)
+
+    def _microscope(self, db: sqlite3.Connection, root_id: int) -> dict[str, Any]:
+        """What the CTF of the images of a session is estimated with, and where each value
+        comes from: set for this session, declared for its data root, or the server's
+        ``[microscope]``. The voltage an acquisition file gives comes before all of them."""
+        row = db.execute("SELECT microscope, microscope_at FROM roots WHERE id = ?", (root_id,)).fetchone()
+        own: dict[str, Any] = json.loads(row["microscope"]) if row is not None and row["microscope"] else {}
+        data_root = self._data_root(db, root_id)
+        out: dict[str, Any] = {}
+        for key, setting in _MICROSCOPE_KEYS:
+            declared = getattr(data_root, setting) if data_root is not None else None
+            if isinstance(own.get(key), int | float):
+                out[key] = {"value": float(own[key]), "source": "session"}
+            elif declared is not None:
+                out[key] = {"value": float(declared), "source": "root"}
+            else:
+                out[key] = {"value": float(getattr(self._settings, setting)), "source": "server"}
+        out["own"] = {key: own.get(key) for key, _ in _MICROSCOPE_KEYS}
+        out["set_at"] = row["microscope_at"] if row is not None else None
+        return out
+
+    def microscope(self, watch: WatchInfo) -> dict[str, Any]:
+        return self._microscope(self.index.connection(), watch.root_id)
+
+    def set_microscope(
+        self, watch: WatchInfo, kv: float | None, cs_mm: float | None, amplitude: float | None
+    ) -> dict[str, Any]:
+        """Set, or forget (None), the microscope of the session a watch looks at. It belongs to
+        the directory, not to the watch: everybody who watches it measures with it. What was
+        measured with other values is measured again (``remeasure``: how many images)."""
+        given = {"kv": kv, "cs_mm": cs_mm, "amplitude": amplitude}
+        for key, setting in _MICROSCOPE_KEYS:
+            value = given[key]
+            low, high = MICROSCOPE_BOUNDS[setting]
+            if value is not None and not (math.isfinite(value) and low <= value <= high):
+                raise InvalidRequestError(f"{key} must be between {low:g} and {high:g}")
+        own = {key: float(value) for key, value in given.items() if value is not None}
+        with self.index.write() as db:
+            db.execute(
+                "UPDATE roots SET microscope = ?, microscope_at = ? WHERE id = ?",
+                (json.dumps(own) if own else None, self.clock() if own else None, watch.root_id),
+            )
+            chosen = self._microscope(db, watch.root_id)
+            stale = []
+            for row in db.execute(
+                "SELECT id, metrics FROM exposures WHERE root_id = ? AND metrics IS NOT NULL "
+                "AND state = 'complete' AND (arrived = 1 OR time >= ?)",
+                (watch.root_id, self._found_window(db, watch.root_id)),
+            ):
+                metrics = json.loads(row["metrics"])
+                if not metrics:
+                    continue  # an image that could not be read stays so
+                used = metrics.get("microscope")
+                if (
+                    not isinstance(used, dict)  # measured before the values were recorded
+                    or (used.get("kv_from") != "xml" and used.get("kv") != chosen["kv"]["value"])
+                    or used.get("cs_mm") != chosen["cs_mm"]["value"]
+                    or used.get("amplitude") != chosen["amplitude"]["value"]
+                ):
+                    stale.append(row["id"])
+            # the mean counts are kept: the ice of the session does not move meanwhile
+            for start in range(0, len(stale), 500):
+                chunk = stale[start : start + 500]
+                db.execute(
+                    f"UPDATE exposures SET metrics = NULL WHERE id IN ({','.join('?' * len(chunk))})",  # noqa: S608
+                    chunk,
+                )
+        return {**self.microscope(watch), "remeasure": len(stale)}
 
     def _measure(
         self, scanner: Scanner, root_id: int, root: Path, stop: threading.Event | None = None
@@ -455,6 +544,7 @@ class LiveService:
             return 0
         started = time.perf_counter()
         done = 0
+        chosen = self._microscope(self.index.connection(), root_id)
         while not (stop is not None and stop.is_set()):
             rows = self._unmeasured(root_id, scanner.measuring)
             for row in rows:
@@ -465,13 +555,17 @@ class LiveService:
                     epu = late["epu"] if late else {}
                 apix = epu.get("pixel_size")
                 microscope = None
+                used: dict[str, Any] = {}
                 if self._settings.live_ctf:  # the voltage the acquisition itself gives comes first
                     kv = epu.get("voltage")
-                    microscope = Microscope(
-                        kv if isinstance(kv, int | float) and 20 <= kv <= 1500 else self._settings.kv,
-                        self._settings.cs_mm,
-                        self._settings.amplitude_contrast,
-                    )
+                    from_file = isinstance(kv, int | float) and not isinstance(kv, bool) and 20 <= kv <= 1500
+                    used = {
+                        "kv": float(kv) if from_file else chosen["kv"]["value"],
+                        "kv_from": "xml" if from_file else chosen["kv"]["source"],
+                        "cs_mm": chosen["cs_mm"]["value"],
+                        "amplitude": chosen["amplitude"]["value"],
+                    }
+                    microscope = Microscope(used["kv"], used["cs_mm"], used["amplitude"])
                 path = self._plain_file(root, row["rel"], row["primary_name"])
                 try:
                     if path is None:  # no longer the regular file that was indexed
@@ -487,6 +581,8 @@ class LiveService:
                     metrics = {}
                 if metrics and self._settings.live_drift and row["arrived"]:
                     metrics.update(self._drift(root, row))
+                if metrics and used:  # what the CTF was estimated with (an empty result stays so)
+                    metrics["microscope"] = used
                 identity = (row["id"], row["primary_name"], row["size"], row["mtime_ns"])
                 try:
                     scanner.add_metrics(*identity, metrics, late)
@@ -864,8 +960,12 @@ class LiveService:
                 )
             ]
             db.execute("DELETE FROM alert_states WHERE watch_id = ?", (watch_id,))  # nothing left to resolve
+            db.execute(
+                "UPDATE alert_events SET ended = ? WHERE watch_id = ? AND ended IS NULL", (now, watch_id)
+            )
             for doomed_id in doomed:
                 db.execute("DELETE FROM alert_states WHERE watch_id = ?", (doomed_id,))
+                db.execute("DELETE FROM alert_events WHERE watch_id = ?", (doomed_id,))
                 db.execute("DELETE FROM watches WHERE id = ?", (doomed_id,))
         self._sync_scanners()
         with self._lock:
@@ -949,6 +1049,7 @@ class LiveService:
             "ice": self._ice(db, watch),
             "quality": self.quality(watch),
             "processing": self._processing_of(db, watch),
+            "microscope": self._microscope(db, watch.root_id),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
@@ -1276,7 +1377,35 @@ class LiveService:
                     after = None  # said, or given up: nothing left to remember
                 if after != before:
                     self._keep_state(watch["id"], condition, after)
+                    self._note_alert(watch["id"], condition, before, after, now)
         return delivered
+
+    def _note_alert(
+        self, watch_id: int, condition: str, before: AlertState | None, after: AlertState | None, now: float
+    ) -> None:
+        """Keep the history of what was announced, for the report of the session: when a
+        condition was told, and when it ended."""
+        was, told = before is not None and before.told, after is not None and after.told
+        if was == told:
+            return
+        with self.index.write() as db:
+            if told and after is not None:
+                db.execute(
+                    "INSERT INTO alert_events (watch_id, condition, started) VALUES (?, ?, ?)",
+                    (watch_id, condition, after.since),
+                )
+                db.execute(
+                    "DELETE FROM alert_events WHERE watch_id = ? AND id NOT IN (SELECT id FROM alert_events "
+                    "WHERE watch_id = ? ORDER BY started DESC LIMIT ?)",
+                    (watch_id, watch_id, _ALERT_EVENTS_KEPT),
+                )
+            else:
+                ended = after.clear_since if after is not None and after.clear_since is not None else now
+                db.execute(
+                    "UPDATE alert_events SET ended = ? "
+                    "WHERE watch_id = ? AND condition = ? AND ended IS NULL",
+                    (ended, watch_id, condition),
+                )
 
     def _deliver(
         self, state: AlertState, sentence: str | None, session: str, reading: Reading

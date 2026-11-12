@@ -465,7 +465,7 @@ _V2_ALERT_STATES = (
 )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7])
 def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
@@ -483,10 +483,15 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
         db.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
     index.close()
     old = sqlite3.connect(path)  # what the earlier versions looked like
-    old.executescript(  # 6 and before: no external programs
-        "DROP INDEX exposures_unprocessed; ALTER TABLE watches DROP COLUMN processing; "
-        "ALTER TABLE exposures DROP COLUMN processing;"
+    old.executescript(  # 7 and before: no microscope per session, no reports, no alert history
+        "ALTER TABLE roots DROP COLUMN microscope; ALTER TABLE roots DROP COLUMN microscope_at; "
+        "ALTER TABLE watches DROP COLUMN report_auto; DROP TABLE reports; DROP TABLE alert_events;"
     )
+    if version <= 6:  # no external programs
+        old.executescript(
+            "DROP INDEX exposures_unprocessed; ALTER TABLE watches DROP COLUMN processing; "
+            "ALTER TABLE exposures DROP COLUMN processing;"
+        )
     if version <= 5:  # no acceptance thresholds
         old.executescript("ALTER TABLE watches DROP COLUMN quality;")
     if version <= 4:  # no calibration of the ice thickness
@@ -516,8 +521,12 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "7"
+        == "8"
     )
+    assert db.execute("SELECT report_auto FROM watches").fetchone()[0] == 1  # a report when it ends
+    assert db.execute("SELECT microscope, microscope_at FROM roots").fetchone()[:] == (None, None)
+    assert db.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM alert_events").fetchone()[0] == 0
     assert db.execute("SELECT processing FROM watches").fetchone()[0] == 0  # nothing runs unless asked for
     assert db.execute("SELECT processing FROM exposures").fetchone()[0] is None
     row = db.execute(

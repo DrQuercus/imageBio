@@ -86,6 +86,13 @@ _SIZE_FACTORS: Final[Mapping[str, int]] = {
 }  # fmt: skip
 
 AuthMode = Literal["none", "proxy"]
+#: What a microscope parameter may be: accelerating voltage (kV), spherical aberration (mm),
+#: amplitude contrast (fraction).
+MICROSCOPE_BOUNDS: Final[Mapping[str, tuple[float, float]]] = {
+    "kv": (20.0, 1500.0),
+    "cs_mm": (0.0, 20.0),
+    "amplitude_contrast": (0.0, 0.5),
+}
 AlertKind = Literal["ntfy", "webhook", "email"]
 
 
@@ -113,11 +120,17 @@ def is_loopback_host(host: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class RootConfig:
-    """A directory tree that users may read. ``groups`` empty = every authenticated user."""
+    """A directory tree that users may read. ``groups`` empty = every authenticated user.
+
+    ``kv``, ``cs_mm`` and ``amplitude_contrast``: the microscope whose sessions this tree holds,
+    when it is not the one of ``[microscope]`` (a lab with a 200 kV and a 300 kV microscope)."""
 
     name: str
     path: Path
     groups: frozenset[str] = frozenset()
+    kv: float | None = None
+    cs_mm: float | None = None
+    amplitude_contrast: float | None = None
 
     def __post_init__(self) -> None:
         if not ROOT_NAME_RE.fullmatch(self.name) or self.name in (".", ".."):
@@ -127,6 +140,17 @@ class RootConfig:
             raise ConfigError(f"root {self.name!r}: path must be absolute, got {str(self.path)!r}")
         object.__setattr__(self, "path", p)
         object.__setattr__(self, "groups", frozenset(self.groups))
+        for key, value in (
+            ("kv", self.kv),
+            ("cs_mm", self.cs_mm),
+            ("amplitude_contrast", self.amplitude_contrast),
+        ):
+            if value is None:
+                continue
+            low, high = MICROSCOPE_BOUNDS[key]
+            if isinstance(value, bool) or not isinstance(value, int | float) or not low <= value <= high:
+                raise ConfigError(f"root {self.name!r}: {key} must be between {low:g} and {high:g}")
+            object.__setattr__(self, key, float(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -510,12 +534,22 @@ class Settings:
         for i, r in enumerate(raw_roots):
             if (
                 not isinstance(r, Mapping)
-                or set(r) - {"name", "path", "groups"}
+                or set(r) - {"name", "path", "groups", "kv", "cs_mm", "amplitude_contrast"}
                 or not {"name", "path"} <= set(r)
             ):
-                raise ConfigError(f"[[roots]] #{i + 1}: expected keys name, path and optional groups")
+                raise ConfigError(
+                    f"[[roots]] #{i + 1}: expected keys name, path and optional groups, kv, cs_mm, "
+                    "amplitude_contrast"
+                )
             roots.append(
-                RootConfig(str(r["name"]), Path(str(r["path"])), frozenset(map(str, r.get("groups", []))))
+                RootConfig(
+                    str(r["name"]),
+                    Path(str(r["path"])),
+                    frozenset(map(str, r.get("groups", []))),
+                    kv=r.get("kv"),
+                    cs_mm=r.get("cs_mm"),
+                    amplitude_contrast=r.get("amplitude_contrast"),
+                )
             )
         defaults = cls()
         return cls(
