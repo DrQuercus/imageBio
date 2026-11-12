@@ -633,6 +633,13 @@ Demande : une page de paramètres (comptes, réglages), la taille de pixel et le
 - Jamais par la page : les secrets, les programmes externes, ce qui décide à qui le serveur fait confiance, les caches. La page les montre en lecture seule.
 - Pas essayé : un vrai proxy avec de vrais comptes et un vrai fournisseur d'identité.
 
+**Lot E, scripts et IA (12 novembre 2026) : fait.** Décision : [ADR 015](adr/015-cles-et-assistants.md) ; guide : [`ia.md`](ia.md).
+- **Clés personnelles** (« Paramètres › Scripts et IA ») : une clé lit imageBio avec les droits de sa propriétaire, sans mot de passe, et rien d'autre (toute écriture refusée, jamais administrateur). Montrée une fois, gardée en empreinte, expire (90 jours par défaut, un an au plus), révoquée par sa propriétaire ou, pour tout un compte, par un administrateur. Le proxy la laisse passer sans mot de passe mais avec son secret ; vérifié à travers le vrai Caddy par le test de déploiement.
+- **API décrite** : `/api/openapi.json`, pour les utilisateurs du serveur.
+- **Client** `imagebio_ai.py`, à télécharger depuis la page : un seul fichier, Python 3.9 ou plus, rien à installer ; des commandes (sessions, état, images triées par CTF, défocus ou glace, rapports, dossiers, fichiers) et un **serveur MCP** avec les mêmes outils, pour Claude Desktop, Claude Code ou tout client MCP, y compris avec un modèle local. Un **skill** (`SKILL.md`) apprend à un assistant à lire les chiffres d'imageBio.
+- Ce qu'un assistant en ligne lit part chez lui : la page et le guide le disent ; le choix reste à la personne.
+- Pas essayé : un vrai assistant branché sur un vrai serveur (le serveur MCP est testé par ses messages, contre un vrai serveur imageBio), ni les clés avec l'authentification unique.
+
 ### Plus tard
 
 - Cartes d'atlas.

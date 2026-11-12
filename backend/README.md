@@ -99,6 +99,10 @@ Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les
 | `PUT /api/admin/settings/{roots,microscope,live,alerts}` | Remplacer une section : corps JSON `{"version": n, "value": …}` ; 409 si la version est dépassée. `DELETE …?version=` : revenir au fichier |
 | `PUT /api/admin/accounts` | Groupes et rôle d'un compte : `{"version", "name", "groups", "admin"}` ; `DELETE /api/admin/accounts?name=&version=` les retire |
 | `GET /api/admin/log` | Les 200 derniers changements : quand, qui, quoi (sans adresse ni chemin) |
+| `DELETE /api/admin/keys?name=` | Révoquer toutes les clés personnelles d'un compte ; le nombre de clés valides est dans la liste des comptes |
+| `GET /api/me/keys`, `POST /api/me/keys`, `DELETE /api/me/keys/{id}` | Ses clés personnelles ([ADR 015](../docs/adr/015-cles-et-assistants.md)) : la liste (jamais les clés), en faire une (`{"name", "days"}` ; la clé n'est que dans cette réponse), en révoquer une. Pas en mode autonome |
+| `GET /api/openapi.json` | Description OpenAPI 3 de l'API, aux utilisateurs du serveur seulement |
+| `GET /api/ai/{imagebio_ai.py,SKILL.md}` | Le client pour les scripts et les assistants (commandes, serveur MCP) et son skill |
 | `/api/fs/roots` | Racines visibles par l'utilisateur |
 | `/api/fs/list?path=` | Contenu d'un dossier (`offset`, `limit`, `hidden`) |
 | `/api/datasets/info?path=` | Description du fichier : dimensions, type, calibration et sa provenance, métadonnées, avertissements |
@@ -185,6 +189,7 @@ imagebio restore /var/backups/imagebio/DATE --config imagebio.toml       # serve
 - **`/metrics`** (format Prometheus, `[server] metrics = true`) : caches, suivis par état, et par dossier suivi l'âge et la durée du dernier passage, son échec, les fichiers incomplets, le nombre d'expositions ; taille de l'index. Ni chemin ni nom d'utilisateur. Servi aux clients de la machine elle-même, ou au porteur du jeton `IMAGEBIO_METRICS_TOKEN` (`Authorization: Bearer …`).
 - Au démarrage, un index écrit par une version plus récente, ou illisible, arrête le serveur avec un message d'une ligne ; un `settings.json` illisible ou invalide aussi.
 - **Page de paramètres** ([ADR 014](../docs/adr/014-page-de-parametres.md)). Les administrateurs sont nommés dans le fichier (`[auth] admins = [...]`, `admin_groups = [...]`) ; en mode autonome, l'utilisateur local l'est. Ils donnent aux comptes des groupes (en plus de ceux du proxy) et le rôle, et changent les dossiers de données, le microscope, une partie du Live et les canaux d'alerte. Écrit dans `<état>/settings.json` (droits 0600, historique dans `settings-history/`, journal `settings-log.jsonl`), appliqué sans redémarrer. Un dossier ajouté ainsi est enregistré sous son chemin réel ; il doit se trouver dans une racine du fichier ou sous `[server] root_parents`, et ne contenir ni le dossier d'état ni le dossier de travail des programmes. Ce contrôle est refait chaque fois que les dossiers sont mis en service : un dossier qui ne le passe plus est indisponible. La sauvegarde contient ces réglages ; `restore --settings` les remet. Le serveur tient son dossier d'état tant qu'il tourne.
+- **Clés personnelles** ([ADR 015](../docs/adr/015-cles-et-assistants.md)). `Authorization: Bearer ibk_…` : l'identité de la propriétaire, en lecture seule (toute autre méthode est refusée, 403 `read_only_key`), jamais administrateur ; ses groupes sont ceux du proxy à la création, plus ceux de la page. Une clé avec un en-tête d'identité, ou plusieurs en-têtes `Authorization`, est refusée (401) ; le secret du proxy reste exigé. Empreintes SHA-256 dans `<état>/keys.json` (0600), ni sauvegardé ni restauré. Le client `imagebio/ai/imagebio_ai.py` n'importe rien d'imageBio : ses tests le lancent en copie, hors du paquet, sous Python 3.9 (`IMAGEBIO_OLDEST_PYTHON`, que la CI renseigne).
 
 ## Traitements du mode Cryo
 
@@ -256,7 +261,11 @@ src/imagebio/
                      pipeline.py (alignement puis CTF sur une exposition)
   admin/store.py     page de paramètres : <état>/settings.json (sections qui remplacent celles du
                      fichier, comptes : groupes et rôle), vérifié, versionné, historique, journal
+  admin/keys.py      clés personnelles : empreintes dans <état>/keys.json, expiration, révocation
+  ai/                imagebio_ai.py (client et serveur MCP, bibliothèque standard seule, Python 3.9+),
+                     SKILL.md ; servis par /api/ai/ (fichiers du paquet)
   api/               app.py (FastAPI), live.py (routes du Live), admin.py (page de paramètres),
+                     keys.py (clés personnelles, OpenAPI, fichiers pour les assistants),
                      security.py (identité, groupes, rôle, Host, secret du proxy, requêtes venues d'un
                      autre site), metrics.py (/metrics), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test

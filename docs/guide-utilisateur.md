@@ -64,8 +64,10 @@ Sur chaque tuile : le défocus estimé, jusqu'où vont les anneaux, la glace, et
 
 Le bouton **Paramètres**, en haut, montre votre compte : votre nom, vos groupes et les dossiers de données que vous pouvez lire. Le mot de passe se change auprès du serveur d'accès du laboratoire, pas dans imageBio.
 
+L'onglet **Scripts et IA** fait vos **clés personnelles** : une clé permet à un script ou à un assistant (une IA) de lire imageBio avec vos droits, sans votre mot de passe, et rien d'autre. Il donne aussi le client à télécharger et la configuration à copier. Voir [`ia.md`](ia.md).
+
 Les administrateurs y trouvent aussi :
-- **Comptes** : donner à un compte des groupes (ils ouvrent les dossiers de ces groupes) et le rôle d'administrateur. Le nom est l'identifiant de connexion ; la personne n'a pas besoin d'être déjà venue.
+- **Comptes** : donner à un compte des groupes (ils ouvrent les dossiers de ces groupes) et le rôle d'administrateur. Le nom est l'identifiant de connexion ; la personne n'a pas besoin d'être déjà venue. La colonne « Clés » dit combien de clés personnelles valides a chaque compte ; « Révoquer » les annule toutes (un départ, une clé perdue).
 - **Dossiers de données** : ajouter, retirer ou restreindre un dossier, et y indiquer le microscope s'il n'est pas celui du serveur.
 - **Microscope et Live** : valeurs par défaut (tension, Cs, contraste d'amplitude), rapport après un silence, mesures faites sur chaque image.
 - **Alertes** : les canaux (ntfy, webhook, courriel) que les utilisateurs choisissent par leur nom.

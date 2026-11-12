@@ -18,3 +18,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [012](012-rapport-de-collecte.md) | Rapport de qualité d'une collecte (HTML autonome, JSON, CSV) et microscope d'une session | Acceptée |
 | [013](013-filtrer-la-vue-reduite.md) | Une vue réduite filtrée est réduite dans Fourier, puis filtrée ; profil de filtre net | Acceptée |
 | [014](014-page-de-parametres.md) | Page de paramètres : groupes et rôle d'administrateur gérés par imageBio, réglages modifiables par un administrateur | Acceptée |
+| [015](015-cles-et-assistants.md) | Clés personnelles en lecture seule, client et serveur MCP pour les scripts et les assistants | Acceptée, jamais essayée avec un vrai assistant |
