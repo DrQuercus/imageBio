@@ -619,6 +619,12 @@ Demande : une page de paramètres (comptes, réglages), la taille de pixel et le
 - Le verdict de chaque image est calculé de la même façon par l'interface et par le serveur, vérifié sur des cas communs.
 - Non fait : le dépôt automatique dans la bibliothèque (le serveur écrivant lui-même dans un dossier), à décider ; le PDF généré par le serveur (l'impression du navigateur suffit).
 
+**Lot A, visionneuse (12 novembre 2026) : fait.** Décision : [ADR 013](adr/013-filtrer-la-vue-reduite.md), qui amende l'ADR 006.
+- **Taille de pixel en évidence**, comme dans la première version : une ligne orange « Å / pixel » en haut de la colonne de droite, avec sa provenance, la taille à l'écran quand l'image est réduite et Nyquist. Une valeur tapée **remplace** celle du fichier (un en-tête peut être faux) pour la règle, les filtres, le CTF, le lien et l'export vers Fiji, qui préférait jusque-là l'en-tête ; « Rétablir » y revient.
+- **Filtres réactifs.** Un filtre déplacé coûtait une transformée du plan entier : 1,1 s sur une image 4k, 1,5 s sur un K3. La vue d'ensemble est maintenant réduite dans Fourier (une fois par plan), puis filtrée : 35 ms au bin 4. Les deux ordres donnent la même image hors des bords (écart sous 1,5 % du contraste, mesuré et vérifié par un test contre une référence en numpy) ; la moyenne par blocs, elle, replierait le bruit sous la coupure et n'est jamais filtrée. Le curseur tenu ne demande que la vue d'ensemble ; le détail en pleine résolution vient au relâchement.
+- **Curseurs** passe-bas et passe-haut sur une échelle logarithmique (de Nyquist à 200 Å, de 50 à 5000 Å), préréglages, valeur libre ; profil **Doux** (gaussien) ou **Net** (Butterworth d'ordre 4 : plat jusqu'à la coupure puis raide) ; `L` coupe et rallume les filtres. La comparaison avec cryoSPARC n'a pas été faite : son profil de filtre n'est pas connu ici, le profil net est une proposition à juger sur de vraies images.
+- **Outils** : image suivante et précédente du dossier (`N`, `B`, réglages et vue gardés) ; cercle d'un diamètre en Å autour du curseur (`C`) ; longueur de la règle en grand et profil d'intensité le long d'elle, copiable pour un tableur.
+
 ### Plus tard
 
 - Cartes d'atlas.
@@ -725,7 +731,7 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Où en est le projet (12 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés), ainsi que le lot B (rapport de collecte) des demandes du 12 novembre ; les lots A, C, D et E restent à faire. Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
+**Où en est le projet (12 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés), ainsi que les lots B (rapport de collecte) et A (visionneuse : taille de pixel, filtres réactifs, outils) des demandes du 12 novembre ; les lots C, D et E restent à faire. Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
 
 1. **Essai sur une vraie session** : dossier EPU sur le NAS (NFS ou SMB), un film du Falcon avec sa référence de gain, des fichiers de pointés, un canal d'alerte réel. C'est ce qui permet d'éteindre l'ancien serveur Node.
 2. **Installation sur le serveur du labo** avec la [fiche d'exploitation](exploitation.md), choix entre comptes locaux et authentification unique, puis le pilote de deux semaines.

@@ -99,7 +99,7 @@ Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les
 | `/api/fs/list?path=` | Contenu d'un dossier (`offset`, `limit`, `hidden`) |
 | `/api/datasets/info?path=` | Description du fichier : dimensions, type, calibration et sa provenance, métadonnées, avertissements |
 | `/api/datasets/plane?path=&t=&c=&z=&bin=&x=&y=&w=&h=` | Un plan en octets bruts, petit-boutiste. En-têtes `X-Dtype`, `X-Shape`, `X-Bin`, `X-Region`, `X-Pixel-Size` |
-| `/api/datasets/stats?path=&t=&c=&z=` | Statistiques robustes et histogramme d'un plan |
+| `/api/datasets/stats?path=&t=&c=&z=&bin=` | Statistiques robustes et histogramme d'un plan : en pleine résolution, ou (`bin`) de la vue d'ensemble telle que `plane` la sert à ce bin (une vue qui suit un filtre en mouvement) |
 | `/api/datasets/spectrum?path=&t=&c=&z=&tile=` | Spectre de puissance d'un plan : image carrée `float32`, fréquence nulle au centre |
 | `/api/datasets/spectrum/profile?…` | Moyenne radiale du spectre : fréquences (cycles par pixel) et puissances |
 | `/api/datasets/ctf?path=&t=&c=&z=&kv=&cs=&amp=` | Défocus estimé d'après les anneaux de Thon du plan, résolution jusqu'à laquelle ils suivent, zéros attendus ; `found: false` quand le spectre n'en montre pas. Accepte `t_end`, `apix` et le gain |
@@ -111,7 +111,7 @@ Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les
 
 - `bin=N` renvoie la moyenne des blocs N×N en `float32` (jamais un pixel sur N). `x, y, w, h` découpe une région, en pixels pleine résolution.
 - Les options d'un lecteur passent en paramètres préfixés par `opt.` : `opt.group=40&opt.superres=1` pour un film EER.
-- Les traitements du mode Cryo (voir plus bas) s'ajoutent aux routes `plane` et `stats` : `t_end`, `gain`, `gain_orient`, `gain_inv`, `lp`, `hp`, `apix`. Le spectre accepte `t_end` et le gain.
+- Les traitements du mode Cryo (voir plus bas) s'ajoutent aux routes `plane` et `stats` : `t_end`, `gain`, `gain_orient`, `gain_inv`, `lp`, `hp`, `sharp`, `apix`, `fbin`. Le spectre accepte `t_end` et le gain.
 - Les plans sont compressés en zstd ou gzip quand le client l'accepte et que les données s'y prêtent.
 - Chaque réponse porte un `ETag` lié au contenu du fichier (taille et date) : un fichier modifié est relu.
 - Les erreurs sont en JSON, `{"error": {"code": …, "message": …}}`, sans chemin du serveur.
@@ -182,15 +182,16 @@ imagebio restore /var/backups/imagebio/DATE --config imagebio.toml       # serve
 
 ## Traitements du mode Cryo
 
-Ils sont appliqués par le serveur au plan en pleine résolution, toujours dans cet ordre, puis viennent la découpe (`x, y, w, h`) et le binning. Un plan traité est en `float32`.
+Ils sont appliqués par le serveur au plan en pleine résolution, toujours dans cet ordre, puis viennent la découpe (`x, y, w, h`) et le binning. Un plan traité est en `float32`. Une exception ([ADR 013](../docs/adr/013-filtrer-la-vue-reduite.md)) : une vue filtrée à un bin supérieur à 1 est réduite dans Fourier, puis filtrée à la taille de pixel de la grille réduite ; les deux ordres donnent la même image hors des bords (`tests/service/test_reduced_filter.py`), et déplacer un filtre coûte 35 ms au lieu d'une seconde sur une image 4k.
 
 | Paramètres | Traitement |
 |---|---|
 | `t_end=N` | Le plan devient la moyenne des frames `t` à `N` incluses (accumulée en `float64`) |
 | `gain=<chemin logique>` | Multiplication par une référence de gain ; les pixels de gain nul sont des défauts, remplacés par la médiane de leurs voisins valides. `gain_orient=0..7` : orientation dans laquelle la référence est enregistrée. `gain_inv=true` : la référence est une image de coups (champ plat), convertie en `moyenne / coups` |
-| `lp=D`, `hp=D` | Passe-bas et passe-haut gaussiens, coupures en Å (gain ½ à la coupure) ; les deux ensemble font un passe-bande. L'image est prolongée en miroir avant la transformée pour que les bords ne se mélangent pas ; le passe-haut conserve la moyenne |
-| `apix=A` | Taille de pixel en Å, pour un fichier qui ne la contient pas. Sans elle, un filtre en Å sur un tel fichier est refusé |
-| `fbin=true` | Le binning (`bin` > 1) garde les basses fréquences de la transformée de Fourier au lieu de moyenner des blocs : pas de repliement, détails plus gros que le nouveau pixel à plein contraste. Une région doit commencer sur un multiple du bin |
+| `lp=D`, `hp=D` | Passe-bas et passe-haut, coupures en Å (gain ½ à la coupure) ; les deux ensemble font un passe-bande. L'image est prolongée en miroir avant la transformée pour que les bords ne se mélangent pas ; le passe-haut conserve la moyenne |
+| `sharp=true` | Profil net des filtres : Butterworth d'ordre 4 (gain `1 / (1 + (f·d)⁸)`) au lieu du profil gaussien (`0,5^((f·d)²)`). À 20 Å, il garde 96 % à 30 Å (gaussien : 74 %) et laisse 9 % à 15 Å (gaussien : 29 %) ; il oscille un peu près des bords francs |
+| `apix=A` | Taille de pixel en Å, saisie par l'utilisateur : elle remplace celle du fichier pour les filtres, le CTF et l'export (un en-tête peut être faux). Sans aucune taille, un filtre en Å est refusé |
+| `fbin=true` | Le binning (`bin` > 1) garde les basses fréquences de la transformée de Fourier au lieu de moyenner des blocs : pas de repliement, détails plus gros que le nouveau pixel à plein contraste. Une région doit commencer sur un multiple du bin. Une vue filtrée passe toujours par Fourier ; sa région, si elle ne commence pas sur un multiple du bin, est calculée comme avant (filtre en pleine résolution, moyenne par blocs) |
 
 - La référence de gain est un fichier comme un autre : chemin logique, mêmes droits, mêmes lecteurs (`.gain`, TIFF, MRC). Elle peut être un nombre entier de fois plus fine ou plus grossière que l'image (référence 8K pour un rendu 4K, référence 4K pour un rendu en super-résolution). Un fichier dont plus d'un dixième des pixels sont inutilisables est refusé.
 - **Pointés** ([ADR 008](../docs/adr/008-pointes-et-galeries.md)). Une coordonnée (x, y) est la colonne x et la ligne y de l'image telle qu'elle est enregistrée ; rien n'est retourné par le serveur. Un fichier de jeu entier (`particles.star`, `.cs`) est filtré sur le nom de la micrographie, une fois retiré ce que les programmes y ajoutent (`_fractions`, `_patch_aligned_doseweighted`, identifiant de cryoSPARC). La réponse est bornée à 50 000 points et ses `notes` disent ce qui a été laissé de côté. Conventions non vérifiées sur de vrais fichiers.

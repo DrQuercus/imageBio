@@ -63,13 +63,13 @@ La page demande toutes les trois secondes ce qui a changé depuis le dernier cha
 
 ## Mode Cryo
 
-Le panneau **Cryo** apparaît pour toute image qui n'est pas en couleurs. Les calculs sont faits par le serveur, à pleine résolution, avant la découpe et le binning ; les réglages se conservent d'un fichier au suivant.
+Le panneau **Cryo** apparaît pour toute image qui n'est pas en couleurs. Les calculs sont faits par le serveur, à pleine résolution, avant la découpe et le binning (sauf une vue réduite filtrée, réduite dans Fourier puis filtrée : [ADR 013](../docs/adr/013-filtrer-la-vue-reduite.md)) ; les réglages se conservent d'un fichier au suivant.
 
-- **Passe-bas et passe-haut en Å.** Préréglages 20, 10 et 5 Å ou valeur libre (validée par Entrée). Filtres gaussiens de gain ½ à la coupure. Si la taille de pixel est inconnue, le filtre attend qu'elle soit saisie ; si le passe-bas n'est pas plus fin que le passe-haut, il n'est pas envoyé. Le panneau dit pourquoi dans les deux cas.
+- **Passe-bas et passe-haut en Å.** Un curseur sur une échelle logarithmique (passe-bas de Nyquist à 200 Å, passe-haut de 50 à 5000 Å, valeurs arrondies à deux chiffres), des préréglages (30, 20, 10, 5 Å ; 2000, 1000, 500 Å) et une valeur libre validée par Entrée. Tenu, le curseur envoie une valeur toutes les 90 ms au plus : la vue d'ensemble suit (35 ms de calcul au bin 4 d'une image 4k), et le détail en pleine résolution n'est chargé qu'au relâchement ; l'histogramme et la fenêtre automatique viennent alors de la vue d'ensemble. Profil **Doux** (gaussien) ou **Net** (Butterworth d'ordre 4), gain ½ à la coupure dans les deux cas. **Filtres actifs** ou la touche `L` coupent et rallument les filtres sans perdre leurs réglages. Si la taille de pixel est inconnue, le filtre attend qu'elle soit saisie ; si le passe-bas n'est pas plus fin que le passe-haut, il n'est pas envoyé. Le panneau dit pourquoi dans les deux cas.
 - **Moyenne de frames.** Une fenêtre de N frames à partir de la frame courante : « 5 frames » sur la frame 3 donne la moyenne des frames 3 à 7. La fenêtre suit le curseur de frames et le lecteur ; « Toutes » couvre le film entier.
 - **Fractions EER par frame** : le nombre de fractions sommées dans chaque frame affichée. Le bouton « ≈ 1 e⁻/Å² » le calcule à partir de la dose par fraction donnée par le film et de la taille de pixel.
 - **Référence de gain.** La liste propose les fichiers dont le nom contient « gain » dans le dossier du film et dans le dossier parent, en commençant par celui que le film nomme dans ses métadonnées. Le serveur vérifie l'orientation de la référence sur le film : confirmée, non vérifiable (trop peu de dose), ou enregistrée dans une autre orientation, avec un bouton **Corriger**. L'orientation et l'inversion (image de coups) se règlent aussi à la main. Un gain n'est conservé d'un fichier au suivant que dans le même dossier et pour le même type de fichier, pour ne pas corriger deux fois une image déjà traitée.
-- **Réduction dans Fourier.** Les vues réduites (image entière, zoom arrière) gardent les basses fréquences de la transformée au lieu de moyenner des blocs de pixels : pas de repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. Une transformée par plan : plus lent, donc au choix.
+- **Réduction dans Fourier.** Les vues réduites (image entière, zoom arrière) gardent les basses fréquences de la transformée au lieu de moyenner des blocs de pixels : pas de repliement, et les détails plus gros que le nouveau pixel gardent tout leur contraste. Une transformée par plan : plus lent, donc au choix. Une vue filtrée passe toujours par Fourier, case cochée ou non.
 - **Pointés.** Un fichier `.star`, `.box`, `.cbox` ou `.cs` cliqué dans la liste de gauche est superposé à l'image en cercles à la taille des boîtes ; celui qui porte le nom de l'image est proposé dans le panneau. Un fichier de jeu entier (`particles.star`) suit d'une image à l'autre et ne montre que les particules de l'image affichée. Réglages : diamètre des cercles, seuil de score, et « Retourner Y » pour les programmes qui comptent les lignes depuis le bas (rien n'est retourné d'office). Le panneau dit combien de particules sont montrées et ce que le serveur a remarqué (points hors de l'image, aucune micrographie du fichier ne correspondant).
 - **Spectre de puissance** (touche `P`), à côté de l'image : spectre en échelle logarithmique, anneaux de résolution en Å, anneau de la glace à 3,7 Å, moyenne radiale, résolution sous le curseur, agrandissement du centre ×2 et ×4. Il est calculé sur l'image après moyenne et gain, mais sans les filtres.
 - **Défocus.** Le bouton « CTF » du spectre demande au serveur le défocus d'après les anneaux de Thon et dessine les zéros attendus sur le spectre et sur la moyenne radiale. Quand le spectre ne montre pas d'anneaux, il le dit et ne donne pas de valeur.
@@ -83,6 +83,9 @@ Le panneau **Cryo** apparaît pour toute image qui n'est pas en couleurs. Les ca
 | `R` | Règle ; `Échap` pour revenir au déplacement |
 | `P` | Spectre de puissance |
 | `G` | Galerie des plans d'une pile |
+| `L` | Couper ou rallumer les filtres (réglages gardés) |
+| `C` | Cercle d'un diamètre en Å autour du curseur |
+| `N` ou `Page ↓`, `B` ou `Page ↑` | Image suivante, précédente du dossier (réglages gardés) |
 | `F` ou `0` | Ajuster à la fenêtre |
 | `1` | 1 pixel image = 1 pixel écran |
 | `+` `-` | Zoom |
@@ -98,7 +101,8 @@ src/
   viewer/gl.ts                moteur de rendu WebGL2 (textures flottantes, shader de contraste)
   viewer/planes.ts            chargement des plans, cache côté client
   viewer/luts.ts              palettes et lecture des fichiers .lut
-  viewer/ViewerCanvas.tsx     canevas, interactions, règle, barre d'échelle
+  viewer/ViewerCanvas.tsx     canevas, interactions, règle, barre d'échelle, cercle du curseur
+  viewer/profile.ts, siblings.ts   profil le long de la règle, images voisines d'un dossier (fonctions pures)
   viewer/cryo.ts              mode Cryo : traitements demandés au serveur, pointés, géométrie du spectre (fonctions pures)
   viewer/gallery.ts, Gallery.tsx   galerie d'une pile : ordre et étiquettes (fonctions pures), grille de vignettes
   viewer/SpectrumView.tsx     spectre de puissance, anneaux de résolution, moyenne radiale
@@ -111,7 +115,8 @@ src/
   live/ReportPanel.tsx, MicroscopePanel.tsx  rapports de qualité, microscope de la session
   live/ProcessingPanel.tsx    programmes du serveur : la case de la session, le décompte
   Root.tsx                    choix du mode d'après l'adresse (visionneuse ou Live)
-  components/                 navigateur de fichiers, contraste, pile, panneau Cryo, informations
+  components/                 navigateur de fichiers, contraste, pile, panneau Cryo, informations,
+                              taille de pixel (ScalePanel), règle, profil et cercle (MeasurePanel)
   state/url.ts                état de la vue dans l'adresse
   App.tsx                     l'application
 tests/                        tests unitaires (vitest)
@@ -134,8 +139,8 @@ npm run build && npm run e2e
 
 Les tests de bout en bout lancent le vrai backend sur des fichiers générés par `e2e/make_fixtures.py`, dont les valeurs sont prévisibles à partir de la position du pixel.
 
-- `e2e/viewer.spec.ts` vérifie les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte ; l'export vers Fiji relu comme un TIFF calibré ; un lien qui arrive pendant que la page s'apprête à réécrire son adresse, et qui ne doit pas être perdu ; et la galerie d'une pile de moyennes de classes, triée par population d'après le fichier de RELION.
+- `e2e/viewer.spec.ts` vérifie les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte ; l'export vers Fiji relu comme un TIFF calibré ; un lien qui arrive pendant que la page s'apprête à réécrire son adresse, et qui ne doit pas être perdu ; et la galerie d'une pile de moyennes de classes, triée par population d'après le fichier de RELION ; l'image suivante et précédente d'un dossier avec les réglages gardés, le cercle du curseur dessiné à son diamètre, et le profil le long de la règle copié pour un tableur.
 - `e2e/live.spec.ts` vérifie le mode Live sur une session de 120 expositions écrite par le microscope simulé : affichage immédiat, tuiles limitées à ce qui est visible, image écrite en deux moitiés qui reste « en cours » entre les deux, aller-retour avec la visionneuse, démarrage, arrêt et oubli d'une surveillance, image de glace cristalline déposée dans la session et marquée comme telle, réglage d'une alerte et message d'essai reçu par un récepteur local ; étalonnage de la glace en nanomètres, marques, tri, filtre et vue des carrés ; seuils d'acceptation (tuile rejetée, décompte, filtre) et carte des acquisitions ; graphiques, rapport de qualité (écrit, lu, téléchargé, réglage gardé) et microscope de la session ; programmes du serveur (un remplaçant de CTFFIND déclaré par le serveur de test : la case, le résultat sur la tuile d'une image qui arrive, le choix gardé par le serveur).
-- `e2e/cryo.spec.ts` vérifie le mode Cryo sur des fichiers dont la réponse est connue : un réseau de période 10 Å (passe-bas, pic du spectre sur l'anneau de 10 Å), une pile en escalier (moyenne des frames 3 à 7), un film EER (regroupement des fractions) et un détecteur synthétique dont le gain est enregistré tête en bas (détection et correction) ; des pointés dessinés au pixel près (fichier de boîtes, fichier d'un jeu entier, retournement, diamètre, seuil de score) ; et la réduction dans Fourier demandée pour la vue d'ensemble comme pour le détail ; le défocus lu sur une image synthétique de CTF connu, et aucune valeur annoncée sur une image sans anneaux.
+- `e2e/cryo.spec.ts` vérifie le mode Cryo sur des fichiers dont la réponse est connue : un réseau de période 10 Å (passe-bas, pic du spectre sur l'anneau de 10 Å), une pile en escalier (moyenne des frames 3 à 7), un film EER (regroupement des fractions) et un détecteur synthétique dont le gain est enregistré tête en bas (détection et correction) ; des pointés dessinés au pixel près (fichier de boîtes, fichier d'un jeu entier, retournement, diamètre, seuil de score) ; et la réduction dans Fourier demandée pour la vue d'ensemble comme pour le détail ; le profil net et la touche `L` ; un curseur de filtre tenu qui ne demande que la vue d'ensemble, puis le détail au relâchement ; la taille de pixel saisie qui remplace celle de l'en-tête (filtre, lien, export) puis la rétablit ; le défocus lu sur une image synthétique de CTF connu, et aucune valeur annoncée sur une image sans anneaux.
 
 La page interdit `eval` et les scripts en ligne (Content-Security-Policy). Dans un test Playwright, passez une fonction à `page.waitForFunction`, pas une chaîne.

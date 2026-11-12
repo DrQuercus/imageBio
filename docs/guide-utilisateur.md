@@ -20,8 +20,15 @@ L'adresse de la page décrit ce que vous voyez (fichier, plan, zoom, réglages) 
 | Plan suivant, précédent ; lire la pile | | `→` `←`, `Espace` |
 | Spectre de puissance | | `P` |
 | Toute la pile côte à côte (particules, classes 2D) | | `G` |
+| Image suivante, précédente du dossier, réglages gardés | ◀ ▶ en haut | `N`, `B` (ou `Page ↓`, `Page ↑`) |
+| Cercle d'un diamètre en Å autour du curseur | | `C` |
+| Couper ou rallumer les filtres | | `L` |
 
-La valeur sous le curseur est la vraie valeur du pixel. Le contraste, le gamma et la palette se règlent sans rien recharger. La taille de pixel affichée dit d'où elle vient (en-tête, XML, saisie) ; un avertissement apparaît quand le fichier ne la donne pas : saisissez-la.
+La valeur sous le curseur est la vraie valeur du pixel. Le contraste, le gamma et la palette se règlent sans rien recharger.
+
+**Taille de pixel.** Elle est en haut à droite, en orange, comme dans la première version : la valeur utilisée, d'où elle vient (en-tête, XML, saisie), la taille à l'écran quand l'image est réduite, et Nyquist. Quand le fichier ne la donne pas, saisissez-la. Quand l'en-tête se trompe, tapez la bonne valeur : elle remplace celle du fichier pour la règle, les filtres, le CTF, le lien et l'export vers Fiji ; « Rétablir » revient à celle du fichier.
+
+**Règle, profil, cercle.** La longueur mesurée s'affiche en grand sous la taille de pixel, avec le profil d'intensité le long de la règle ; « Copier » met les valeurs (distance en Å, intensité) dans le presse-papier pour un tableur. Le profil est lu sur les pixels affichés : en vue réduite, ce sont des moyennes, et le panneau le dit ; zoomez pour la pleine résolution. Le cercle (`C`) suit le curseur à un diamètre en Å choisi : la taille d'une particule, d'un trou ou d'une boîte.
 
 **Ouvrir dans Fiji** télécharge le plan affiché, tel qu'il est traité, en TIFF ImageJ avec sa taille de pixel ; « Pile » télécharge tout le fichier. Les mesures de régions, seuillages et comptages se font dans Fiji.
 
@@ -29,7 +36,7 @@ La valeur sous le curseur est la vraie valeur du pixel. Le contraste, le gamma e
 
 - **Moyenne de frames** : choisissez la plage ; l'image affichée est la moyenne de ces frames.
 - **Référence de gain** : choisissez le fichier. imageBio vérifie son orientation contre le film et vous dit si une autre convient mieux : c'est vous qui l'appliquez (« Corriger »), jamais lui en silence.
-- **Passe-bas, passe-haut** : en ångströms.
+- **Passe-bas, passe-haut** : en ångströms, au curseur (échelle logarithmique), aux préréglages ou à la valeur tapée. Pendant que vous tenez le curseur, la vue d'ensemble suit ; le détail en pleine résolution arrive quand vous le lâchez. Profil **Doux** (gaussien, sans oscillations) ou **Net** (plat jusqu'à la coupure puis raide, comme on l'attend pour voir des particules). `L` montre l'image sans filtre et la rend avec.
 - **Spectre de puissance** (`P`) : le bouton d'estimation donne le défocus d'après les anneaux de Thon et dessine les zéros attendus. C'est un ajustement rapide, sans astigmatisme : il sert à juger une image, pas à remplacer CTFFIND.
 - **Pointés** : ouvrez un fichier STAR, `.box`, `.cbox` ou `.cs` pour superposer les particules à l'image. Si les cercles sont en miroir vertical, cochez l'inversion des lignes : certains programmes comptent depuis le bas. Le curseur de score masque les particules faibles.
 - **Classes 2D** : ouvrez la pile des classes d'un job RELION, puis `G`. Les classes peuvent être triées par population.
@@ -57,7 +64,7 @@ Sur chaque tuile : le défocus estimé, jusqu'où vont les anneaux, la glace, et
 
 - Les mesures du Live (défocus, glace, dérive) sont des indicateurs de suivi, calculés vite sur chaque image. Elles ne remplacent pas le traitement.
 - Sur une image de moins de 512 pixels de côté, l'anneau de glace et le défocus ne sont pas calculés : ce serait du bruit.
-- Une taille de pixel saisie à la main fausse la règle et le défocus si elle est erronée.
+- Une taille de pixel saisie à la main remplace celle du fichier : si elle est fausse, la règle, les filtres et le défocus le sont aussi. Le panneau rappelle la valeur du fichier tant qu'elle est remplacée.
 - Une tuile marquée « non vérifié » vient d'un dossier déjà au repos quand le suivi a commencé : son fichier n'a pas été contrôlé.
 
 Un problème, une image qui s'affiche mal : notez l'adresse de la page et envoyez-la à l'administrateur.

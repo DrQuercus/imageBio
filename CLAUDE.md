@@ -42,7 +42,8 @@ Network-deployed scientific image application (web): a viewer, a Cryo mode and a
 
 ## Frontend (`frontend/`, React + TypeScript + WebGL2)
 
-- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `live/store.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
+- Read `frontend/README.md`. Pure logic lives in `viewer/view.ts`, `viewer/luts.ts`, `viewer/cryo.ts`, `viewer/profile.ts`, `viewer/siblings.ts`, `live/store.ts`, `state/url.ts` (unit-tested); rendering in `viewer/gl.ts`.
+- A held filter slider (`adjusting` in `App.tsx`, `holdDetail` in `ViewerCanvas`) asks for the overview only; the detail comes on release. A pixel size typed by the user replaces the file's everywhere (`apixTyped`), and is sent as `apix`.
 - Checks before every commit, from `frontend/`: `npm run typecheck`, `npm test`, then `npm run build && npm run e2e` (Playwright against the real backend on generated files).
 - Contrast, gamma, inversion and colour tables are GPU-side: changing them must never trigger a request. Plane requests are "latest wins" (AbortController).
 - Requests for pixels are built from what is on screen (`onScreen`, `shownOptions` and the clamped `index` in `App.tsx`), never from the `path`, `options` or index being loaded: mixing the two asks the server for planes that do not exist. End-to-end tests can assert it with `trackRefused`.
