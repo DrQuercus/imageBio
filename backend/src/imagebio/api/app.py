@@ -43,8 +43,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imagebio import __version__
+from imagebio.admin.keys import KeyStore
 from imagebio.admin.store import SettingsStore
 from imagebio.api.admin import register_admin_routes
+from imagebio.api.keys import register_key_routes
 from imagebio.api.live import register_live_routes
 from imagebio.api.metrics import CONTENT_TYPE, TOKEN_VARIABLE, render_metrics
 from imagebio.api.security import (
@@ -216,6 +218,8 @@ def create_app(
     app.state.live = live
     app.state.roots = roots
     app.state.store = store
+    keys = KeyStore(settings.live_state_dir)
+    app.state.keys = keys
     metrics_token = os.environ.get(TOKEN_VARIABLE) or None
     proxy_secret = os.environ.get(PROXY_SECRET_VARIABLE) or None
     if proxy_secret is not None and settings.auth_mode == "proxy" and len(proxy_secret) < MIN_PROXY_SECRET:
@@ -682,7 +686,8 @@ def create_app(
         )
 
     register_live_routes(app, settings, roots, live)
-    register_admin_routes(app, settings, store, live)
+    register_admin_routes(app, settings, store, live, keys)
+    register_key_routes(app, settings, keys)
 
     # ── web interface ────────────────────────────────────────────────────────
     index = static_dir / "index.html" if static_dir else None

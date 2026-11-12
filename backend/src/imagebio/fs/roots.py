@@ -54,6 +54,8 @@ class User:
     groups: frozenset[str] = frozenset()
     all_roots: bool = False
     admin: bool = False
+    #: Came with a personal key (admin/keys.py): reads only, never administers.
+    by_key: bool = False
 
 
 LOCAL_USER: Final = User("local", frozenset(), all_roots=True, admin=True)

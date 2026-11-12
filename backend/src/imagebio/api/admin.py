@@ -18,6 +18,7 @@ from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from imagebio import __version__
+from imagebio.admin.keys import KeyStore
 from imagebio.admin.store import SECTIONS, SettingsStore
 from imagebio.api.metrics import TOKEN_VARIABLE
 from imagebio.api.security import PROXY_SECRET_VARIABLE, current_user
@@ -26,7 +27,7 @@ from imagebio.core.errors import AccessDeniedError, ImageBioError, InvalidReques
 from imagebio.fs.roots import User
 from imagebio.live.service import LiveService
 
-__all__ = ["MAX_BODY_BYTES", "register_admin_routes"]
+__all__ = ["MAX_BODY_BYTES", "json_body", "register_admin_routes"]
 
 MAX_BODY_BYTES: Final = 256 * 1024
 _SECTION: Final = PathParam(pattern=f"^({'|'.join(SECTIONS)})$")
@@ -46,7 +47,7 @@ def _json(body: Any, status: int = 200) -> Response:
     )
 
 
-async def _body(request: Request) -> dict[str, Any]:
+async def json_body(request: Request) -> dict[str, Any]:
     """The JSON object of a request, read once its sender is known to be an administrator,
     and no larger than ``MAX_BODY_BYTES``."""
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
@@ -134,7 +135,9 @@ def configuration(settings: Settings) -> dict[str, Any]:
     }
 
 
-def register_admin_routes(app: FastAPI, settings: Settings, store: SettingsStore, live: LiveService) -> None:
+def register_admin_routes(
+    app: FastAPI, settings: Settings, store: SettingsStore, live: LiveService, keys: KeyStore
+) -> None:
     def administrator(request: Request) -> User:
         user = current_user(request, settings)
         if not user.admin:
@@ -143,7 +146,10 @@ def register_admin_routes(app: FastAPI, settings: Settings, store: SettingsStore
 
     def state() -> dict[str, Any]:
         sections = store.sections()
-        accounts = store.accounts(also=live.watch_users())
+        counts = keys.counts()
+        accounts = store.accounts(also=[*live.watch_users(), *counts])
+        for account in accounts:
+            account["keys"] = counts.get(account["name"], 0)
         groups = sorted(
             {g for r in sections["roots"]["value"] for g in r["groups"]}
             | {g for a in accounts for g in a["groups"] + a["proxy_groups"]}
@@ -170,7 +176,7 @@ def register_admin_routes(app: FastAPI, settings: Settings, store: SettingsStore
     async def admin_section_set(request: Request, section: str = _SECTION) -> Response:
         """Replace a section: ``{"version": n, "value": …}`` (as the file would write it)."""
         user = administrator(request)
-        body = await _body(request)
+        body = await json_body(request)
         if set(body) != {"version", "value"}:
             raise InvalidRequestError("expected {version, value}")
         version = _version(body["version"])
@@ -191,7 +197,7 @@ def register_admin_routes(app: FastAPI, settings: Settings, store: SettingsStore
         """Give a user groups and the administrator role: ``{"version", "name", "groups",
         "admin"}``. The user need not have come yet: the name is the one the proxy gives."""
         user = administrator(request)
-        body = await _body(request)
+        body = await json_body(request)
         if set(body) != {"version", "name", "groups", "admin"}:
             raise InvalidRequestError("expected {version, name, groups, admin}")
         name, groups, admin = body["name"], body["groups"], body["admin"]
@@ -212,6 +218,12 @@ def register_admin_routes(app: FastAPI, settings: Settings, store: SettingsStore
         user = administrator(request)
         await run_in_threadpool(store.remove_account, name, by=user.name, version=version)
         return _json(await run_in_threadpool(state))
+
+    @app.delete("/api/admin/keys")
+    def admin_keys_revoke(request: Request, name: str = Query(..., min_length=1, max_length=256)) -> Response:
+        """Revoke every personal key of a user (somebody who leaves, a key that leaked)."""
+        administrator(request)
+        return _json({"revoked": keys.revoke_all(name), **state()})
 
     @app.get("/api/admin/log")
     def admin_log(request: Request) -> Response:

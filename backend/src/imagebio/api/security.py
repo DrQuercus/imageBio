@@ -21,8 +21,9 @@ from typing import Any, Final
 
 from starlette.requests import Request
 
+from imagebio.admin.keys import PREFIX as KEY_PREFIX
 from imagebio.core.config import Settings, is_loopback_host
-from imagebio.core.errors import ImageBioError
+from imagebio.core.errors import AccessDeniedError, ImageBioError
 from imagebio.fs.roots import LOCAL_USER, User
 
 __all__ = [
@@ -50,6 +51,8 @@ _SECURITY_HEADERS: Final = (
 )
 _OPEN_PATHS: Final = frozenset({"/healthz"})
 _SAFE_METHODS: Final = frozenset({"GET", "HEAD", "OPTIONS"})
+_KEY_METHODS: Final = frozenset({"GET", "HEAD"})
+_BEARER: Final = "bearer "
 _DEFAULT_PORTS: Final = {"http": "80", "https": "443"}
 _SECRET_HEADER: Final = PROXY_SECRET_HEADER.lower().encode()
 
@@ -66,6 +69,41 @@ class AuthenticationRequired(ImageBioError):
     code = "authentication_required"
 
 
+def personal_key(request: Request) -> str | None:
+    """The personal key a request carries (``Authorization: Bearer ibk_…``), or None. Several
+    Authorization headers with a key among them are no identity at all."""
+    values = request.headers.getlist("authorization")
+    keys = [v[len(_BEARER) :].strip() for v in values if v[: len(_BEARER)].lower() == _BEARER]
+    keys = [k for k in keys if k.startswith(KEY_PREFIX)]
+    if not keys:
+        return None
+    if len(values) != 1:
+        raise AuthenticationRequired("authentication required")
+    return keys[0]
+
+
+def proxy_groups(request: Request, settings: Settings) -> frozenset[str]:
+    """The groups the proxy gives the user of a request (none in standalone mode)."""
+    if settings.auth_mode == "none":
+        return frozenset()
+    given = request.headers.getlist(settings.groups_header)
+    return frozenset(g.strip() for g in (given[0] if len(given) == 1 else "").split(",") if g.strip())
+
+
+def _key_user(request: Request, settings: Settings, key: str) -> User:
+    """The user a personal key stands for: its owner, reading only (ADR 015)."""
+    keys = getattr(request.app.state, "keys", None)
+    found = keys.check(key) if keys is not None else None
+    # a key and an identity from the proxy together: no telling which is meant
+    if found is None or request.headers.getlist(settings.user_header):
+        raise AuthenticationRequired("authentication required")
+    if request.method not in _KEY_METHODS:
+        raise AccessDeniedError("a personal key only reads")
+    store = getattr(request.app.state, "store", None)
+    given = store.groups_of(found.user) if store is not None else frozenset()
+    return User(found.user, frozenset(found.groups) | given, admin=False, by_key=True)
+
+
 def current_user(request: Request, settings: Settings) -> User:
     """The user of a request. Raises :class:`AuthenticationRequired` in proxy mode when the
     identity header is missing, malformed or sent more than once (an ambiguous identity is no
@@ -75,6 +113,9 @@ def current_user(request: Request, settings: Settings) -> User:
     settings page (``admin/store.py``); so is the administrator role, besides the file's."""
     if settings.auth_mode == "none":
         return LOCAL_USER
+    key = personal_key(request)
+    if key is not None:
+        return _key_user(request, settings, key)
     names = request.headers.getlist(settings.user_header)
     if len(names) != 1 or not _NAME.fullmatch(names[0].strip(" \t")):
         raise AuthenticationRequired("authentication required")
@@ -192,6 +233,14 @@ class SecurityMiddleware:
             if len(given) != 1 or not hmac.compare_digest(given[0], self.proxy_secret):
                 await refuse("authentication_required", "authentication required", 401)
                 return
+        if scope["method"] not in _KEY_METHODS and any(
+            name == b"authorization"
+            and value[: len(_BEARER)].lower() == _BEARER.encode()
+            and value[len(_BEARER) :].strip().startswith(KEY_PREFIX.encode())
+            for name, value in scope["headers"]
+        ):  # checked again where the identity is made: a key never writes
+            await refuse("read_only_key", "a personal key only reads")
+            return
         if scope["method"] not in _SAFE_METHODS and not self._same_site(scope, hosts):
             await refuse("cross_site_request", "cross-site request refused")
             return
