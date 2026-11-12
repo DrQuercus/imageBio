@@ -45,12 +45,35 @@ Les deux décisions ont été prises par l'utilisateur le 12 novembre 2026 :
   - **appliqué aussitôt** : les dossiers sont remplacés dans `RootSet`, et le service Live prend les nouveaux réglages. Rien de ce que la page change ne demande un redémarrage.
 - **Versions** : chaque changement porte la version des réglages sur laquelle il a été fait. Un changement fait sur une version dépassée (un autre administrateur a enregistré entre-temps) est refusé (409), et la page recharge.
 - **Un dossier ajouté par la page** doit :
-  - être un dossier existant, liens suivis ;
-  - se trouver sous `server.root_parents` (par défaut : les dossiers parents des racines du fichier), ou être l'une des racines du fichier ;
-  - ne contenir ni être contenu dans le dossier d'état du serveur (réglages, index, rapports).
+  - être un dossier existant ; il est enregistré sous son chemin réel, liens résolus ;
+  - se trouver **dans un dossier de données du fichier**, ou sous un dossier que le fichier permet (`server.root_parents`). Rien de plus large par défaut : un administrateur nommé dans la page ne doit pas ouvrir ce que l'installateur n'a pas ouvert ;
+  - ne contenir ni être contenu dans le dossier d'état du serveur (réglages, index, rapports), ni le dossier de travail des programmes externes (les sommes de toutes les sessions).
+- **Ce contrôle est refait chaque fois que les dossiers sont mis en service** : au démarrage, à chaque changement de la page, et quand un autre serveur sur le même dossier d'état a changé le fichier. Un dossier dont le chemin réel n'est plus celui enregistré (un lien posé à sa place par quelqu'un qui écrit dans les données), ou qui n'est plus dans un emplacement permis (le fichier a été resserré), n'est plus servi ; il est marqué indisponible.
+- **En mode `--local`**, les dossiers sont ceux de la ligne de commande : la page ne les remplace pas.
 - **Un `settings.json` illisible ou invalide arrête le serveur** avec un message d'une ligne. Démarrer sur le seul fichier rouvrirait aux groupes du fichier un dossier restreint par la page.
 - **Les administrateurs voient les chemins du serveur et les adresses des canaux** : ils les configurent. Les utilisateurs, jamais. Les messages d'erreur, eux, ne contiennent toujours aucun chemin.
-- **Sauvegarde** : `settings.json` et son journal sont sauvegardés avec l'index. La restauration les remet en place avec `--force`, met les actuels de côté, et ajoute une ligne au journal (le journal n'est pas rembobiné).
+- **Sauvegarde** : `settings.json` et son journal sont sauvegardés avec l'index. La restauration ne remet les réglages en place qu'avec `--settings` : réparer un index abîmé ne doit pas ramener, sans qu'on le voie, des groupes et des rôles retirés depuis. Les réglages de la sauvegarde sont lus et vérifiés avant que rien ne soit déplacé ; les actuels sont mis de côté ; la version continue de monter ; le journal reçoit une ligne et n'est pas rembobiné.
+- **Un serveur tient son dossier d'état tant qu'il tourne**, même s'il n'a jamais ouvert le Live : aucune restauration ne passe sous lui.
+- **Deux serveurs sur un même dossier d'état** : chacun relit le fichier quand il a changé (au plus une fois par seconde), et un changement fait sur une version que l'autre a dépassée est refusé.
+
+## Relecture indépendante
+
+Le serveur de ce lot a été relu par un agent chargé d'y trouver des défauts réels. Tous sont corrigés, chacun avec un test qui échoue sur le code d'avant (`backend/tests/admin/test_review.py`) :
+
+| Gravité | Défaut | Correction |
+|---|---|---|
+| haute | Un dossier de la page n'était contrôlé qu'à l'enregistrement : remplacé ensuite par un lien vers le dossier d'état, il montrait les réglages et l'index à tous ; un `settings.json` écrit à la main pouvait servir `/etc` | chemin réel enregistré, contrôle refait à chaque mise en service ; sinon, indisponible |
+| moyenne | Une restauration dont les réglages manquaient laissait le serveur sans réglages : un dossier restreint par la page redevenait ouvert | réglages lus et vérifiés avant tout déplacement |
+| moyenne | Un serveur qui n'avait jamais ouvert le Live ne tenait pas son dossier d'état : une restauration passait sous lui | le serveur tient le dossier d'état tant qu'il tourne |
+| moyenne | Une restauration `--force` (conseillée pour un index abîmé) ramenait aussi des rôles retirés depuis | réglages restaurés seulement avec `--settings` |
+| moyenne | Une sauvegarde contenant des réglages n'était jamais élaguée par `--keep` | élaguée comme les autres |
+| moyenne | La commande `restore` plantait sur une sauvegarde sans index | message, et `--settings` |
+| moyenne | Par défaut, un dossier pouvait être ajouté sous le parent d'une racine du fichier : une racine `/data` ouvrait `/` ; le dossier de travail des programmes n'était pas exclu | seulement dans les racines du fichier, ou sous `server.root_parents` ; dossier de travail exclu |
+| moyenne | `--local` : les dossiers enregistrés par la page remplaçaient ceux d'une autre ligne de commande ; les tests lisaient le dossier d'état du développeur | la ligne de commande décide en `--local` ; les tests ont leur propre dossier |
+| basse | Les dossiers et leurs chemins réels étaient remplacés en deux temps : une requête entre les deux pouvait mélanger les deux | un seul remplacement |
+| basse | Des corps malformés (valeur d'un autre type, nombre de 400 chiffres, JSON très imbriqué, demi-caractère) donnaient une erreur 500 | vérifiés avant tout, refusés en 400 |
+| basse | Les fichiers d'exemple faisaient de « alice » un administrateur | commenté |
+| basse | Journal écrit avant l'application ; deux serveurs s'écrasaient ; caractères invisibles et espace insécable dans les noms ; liste des comptes vus élaguée sans verrou | application d'abord, journal ensuite ; relecture du fichier ; noms vérifiés, seuls les espaces et tabulations sont retirés ; verrou |
 
 ## Conséquences
 

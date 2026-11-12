@@ -189,10 +189,10 @@ def create_app(
     # what an administrator changed in the settings page lies over the file (admin/store.py)
     store = SettingsStore(settings)
     effective = store.effective
-    roots = RootSet(effective.roots)
+    roots = RootSet(effective.roots, store.serving_check())
     service = PlaneService(settings, reg)
     live = LiveService(effective, reg, service)
-    store.on_change(lambda new: roots.replace(new.roots))
+    store.on_change(lambda new: roots.replace(new.roots, store.serving_check()))
     store.on_change(live.reconfigure)
 
     @contextlib.asynccontextmanager

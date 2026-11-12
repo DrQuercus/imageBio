@@ -301,8 +301,10 @@ function Roots({ state, save }: { state: AdminState; save: Save }) {
       <h2>Dossiers de données <Source state={state} section="roots" /></h2>
       <p className="note">
         Chaque dossier est lisible par les comptes de ses groupes (aucun groupe : tous les comptes). Un dossier ajouté ici doit
-        exister et se trouver sous : <span className="mono">{state.root_parents.join(", ") || "aucun dossier parent autorisé (server.root_parents)"}</span>.
-        Tension, Cs et contraste d'amplitude : ceux du microscope de ce dossier, s'il n'est pas celui du serveur.
+        exister, ne passer par aucun lien, et se trouver dans un dossier de données du fichier de configuration ou sous un
+        dossier qu'il permet (server.root_parents) : <span className="mono">{state.root_parents.join(", ") || "aucun"}</span>.
+        Un dossier dont le chemin a changé depuis (un lien posé à sa place) n'est plus servi. Tension, Cs et contraste
+        d'amplitude : ceux du microscope de ce dossier, s'il n'est pas celui du serveur.
       </p>
       {error && <div className="note warn" data-testid="roots-error">{error}</div>}
       <table className="settings-table" data-testid="roots-table">

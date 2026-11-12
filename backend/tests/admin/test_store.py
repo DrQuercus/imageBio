@@ -26,7 +26,7 @@ SECRET_URL = "https://ntfy.example.org/lab-secret-topic-8f3a"
 
 @pytest.fixture
 def base(tmp_path: Path) -> Settings:
-    for d in ("data/krios", "data/glacios", "data/new", "elsewhere"):
+    for d in ("data/krios/project", "data/glacios", "data/new", "elsewhere"):
         (tmp_path / d).mkdir(parents=True)
     return Settings(
         roots=(
@@ -93,15 +93,20 @@ def test_a_change_is_saved_whole_versioned_logged_and_applied(base: Settings, tm
     assert store.version == 0 and not (tmp_path / "state").exists()  # nothing written until a change
     value = [
         {"name": "krios", "path": str(tmp_path / "data/krios"), "groups": ["cryoem", "krios"]},
-        {"name": "new", "path": str(tmp_path / "data/new"), "groups": []},
+        # inside a root of the file: a project of the Krios, for another group
+        {"name": "project", "path": str(tmp_path / "data/krios/../krios/project"), "groups": []},
     ]
     store.set_section("roots", value, by="alice", version=0)
     assert store.version == 1 and roots_of(seen[-1]) == {
         "krios": (str(tmp_path / "data/krios"), ["cryoem", "krios"]),
-        "new": (str(tmp_path / "data/new"), []),
+        "project": (str(tmp_path / "data/krios/project"), []),  # saved as its real path
     }
     saved = json.loads((tmp_path / "state" / FILE_NAME).read_text())
-    assert saved["version"] == 1 and saved["sections"]["roots"] == value and saved["updated_by"] == "alice"
+    assert saved["version"] == 1 and saved["updated_by"] == "alice"
+    assert [r["path"] for r in saved["sections"]["roots"]] == [
+        str(tmp_path / "data/krios"),
+        str(tmp_path / "data/krios/project"),
+    ]
     assert stat.S_IMODE(os.stat(tmp_path / "state" / FILE_NAME).st_mode) == 0o600
     # a change made on the version an other administrator already changed is refused
     with pytest.raises(ConflictError):
@@ -115,7 +120,7 @@ def test_a_change_is_saved_whole_versioned_logged_and_applied(base: Settings, tm
     ]
     log = store.log()
     assert [e["version"] for e in log] == [3, 2, 1] and all(e["by"] == "alice" for e in log)
-    assert log[2]["what"] == "dossiers de données : +new, -glacios, ~krios"
+    assert log[2]["what"] == "dossiers de données : +project, -glacios, ~krios"
     assert log[1]["what"] == "canaux d'alerte : ~phone"
     log_text = (tmp_path / "state" / LOG_NAME).read_text()
     assert "ntfy.example.org" not in log_text and str(tmp_path) not in log_text  # no address, no path
@@ -128,28 +133,30 @@ def test_what_cannot_be_applied_is_refused_and_nothing_changes(base: Settings, t
     store = SettingsStore(base)
     root = lambda path: [{"name": "x", "path": str(path)}]  # noqa: E731
     for value, said in (
-        (root(tmp_path / "elsewhere"), "allowed parent"),  # not under the parent of a root of the file
+        (root(tmp_path / "elsewhere"), "inside a data root"),
+        # next to the roots of the file is not inside them: a root at /data would open /
+        (root(tmp_path / "data/new"), "inside a data root"),
         (root(tmp_path / "data/missing"), "not a directory"),
-        (root(tmp_path / "data/krios/../../elsewhere"), "allowed parent"),
-        (root(tmp_path), "allowed parent"),
+        (root(tmp_path / "data/krios/../../elsewhere"), "inside a data root"),
+        (root(tmp_path), "inside a data root"),
     ):
         with pytest.raises(InvalidRequestError, match=said) as refused:
             store.set_section("roots", value, by="alice", version=0)
         assert str(tmp_path) not in str(refused.value)  # no server path in the message
-    # a link that leads out of the allowed parents is followed before it is judged
-    (tmp_path / "data/link").symlink_to(tmp_path / "elsewhere")
-    with pytest.raises(InvalidRequestError, match="allowed parent"):
-        store.set_section("roots", root(tmp_path / "data/link"), by="alice", version=0)
+    # a link that leads out of the roots is followed before it is judged
+    (tmp_path / "data/krios/link").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(InvalidRequestError, match="inside a data root"):
+        store.set_section("roots", root(tmp_path / "data/krios/link"), by="alice", version=0)
     # a root that would show the server's own state (the settings, the index, the reports)
     state_parent = Settings(
         roots=(RootConfig("all", tmp_path),), state_dir=tmp_path / "data/state", admins=frozenset({"alice"})
     )
-    with pytest.raises(InvalidRequestError, match="state directory"):
+    with pytest.raises(InvalidRequestError, match="state or work"):
         SettingsStore(state_parent).set_section("roots", root(tmp_path / "data"), by="alice", version=0)
     assert store.version == 0 and not (tmp_path / "state" / FILE_NAME).exists()
-    # explicit parents in the file replace those of its roots
-    explicit = Settings(roots=base.roots, state_dir=base.state_dir, root_parents=(tmp_path / "elsewhere",))
-    SettingsStore(explicit).set_section("roots", root(tmp_path / "elsewhere"), by="alice", version=0)
+    # parents named in the file open more places
+    explicit = Settings(roots=base.roots, state_dir=base.state_dir, root_parents=(tmp_path / "data",))
+    SettingsStore(explicit).set_section("roots", root(tmp_path / "data/new"), by="alice", version=0)
 
 
 def test_accounts_add_groups_and_the_role(base: Settings) -> None:

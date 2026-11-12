@@ -133,15 +133,21 @@ class RootSet:
     """The configured data roots. The real path of each root is resolved when the roots are
     set: at start-up, and when an administrator changes them (:meth:`replace`)."""
 
-    def __init__(self, roots: Sequence[RootConfig]) -> None:
-        self._roots: dict[str, RootConfig] = {}
-        self._real: dict[str, str | None] = {}
-        self.replace(roots)
+    def __init__(
+        self, roots: Sequence[RootConfig], check: Callable[[RootConfig, str], bool] | None = None
+    ) -> None:
+        self._state: tuple[dict[str, RootConfig], dict[str, str | None]] = ({}, {})
+        self.replace(roots, check)
 
-    def replace(self, roots: Sequence[RootConfig]) -> None:
-        """Serve these roots from now on. A request under way may still see the previous ones,
-        never a mixture that grants what neither would: a root missing from either table is
-        unavailable."""
+    def replace(
+        self, roots: Sequence[RootConfig], check: Callable[[RootConfig, str], bool] | None = None
+    ) -> None:
+        """Serve these roots from now on. ``check``: whether a root may be served, given its
+        real path (the roots of the settings page are checked again each time: a link in their
+        path may have been repointed since they were saved); a root it refuses is unavailable.
+
+        The roots and their real paths are swapped together: a request sees the previous set
+        or this one, never a mixture."""
         table: dict[str, RootConfig] = {}
         real_paths: dict[str, str | None] = {}
         for root in roots:
@@ -149,28 +155,35 @@ class RootSet:
                 raise ValueError(f"duplicate root name {root.name!r}")
             table[root.name] = root
             try:
-                real = os.path.realpath(root.path, strict=True)
-                real_paths[root.name] = real if os.path.isdir(real) else None
+                found = os.path.realpath(root.path, strict=True)
+                usable = os.path.isdir(found) and (check is None or check(root, found))
+                real_paths[root.name] = found if usable else None
             except OSError:
                 real_paths[root.name] = None  # missing or unreadable: kept, reported as unavailable
-        self._real = real_paths
-        self._roots = table
+        self._state = (table, real_paths)
 
     # ── visibility ───────────────────────────────────────────────────────────
     def _visible(self, root: RootConfig, user: User) -> bool:
         return user.all_roots or not root.groups or bool(root.groups & user.groups)
 
     def visible_roots(self, user: User) -> list[RootConfig]:
-        return [r for r in self._roots.values() if self._visible(r, user)]
+        return [r for r in self._state[0].values() if self._visible(r, user)]
 
     def available(self, root: RootConfig) -> bool:
-        return self._real.get(root.name) is not None
+        return self._state[1].get(root.name) is not None
 
-    def _allowed(self, user: User) -> list[str]:
-        return [real for r in self.visible_roots(user) if (real := self._real.get(r.name)) is not None]
+    def _allowed(self, user: User, state: tuple[dict[str, RootConfig], dict[str, str | None]]) -> list[str]:
+        table, real_paths = state
+        return [
+            real
+            for r in table.values()
+            if self._visible(r, user) and (real := real_paths.get(r.name)) is not None
+        ]
 
     # ── resolution ───────────────────────────────────────────────────────────
-    def _parse(self, logical: object, user: User) -> tuple[RootConfig, list[str]]:
+    def _parse(
+        self, logical: object, user: User, table: dict[str, RootConfig]
+    ) -> tuple[RootConfig, list[str]]:
         """Validate the syntax and the root; return the root and the path segments below it."""
         if not isinstance(logical, str) or not logical or len(logical) > MAX_PATH_LENGTH:
             raise AccessDeniedError(_DENIED)
@@ -183,22 +196,23 @@ class RootSet:
         segments = [s for s in logical.split("/") if s]
         if not segments or any(s in (".", "..") or len(s) > MAX_SEGMENT_LENGTH for s in segments):
             raise AccessDeniedError(_DENIED)
-        root = self._roots.get(segments[0])
+        root = table.get(segments[0])
         if root is None or not self._visible(root, user):
             raise AccessDeniedError(_DENIED)  # same answer for an unknown root and a forbidden one
         return root, segments[1:]
 
     def resolve(self, logical: str, user: User) -> ResolvedPath:
         """Resolve a logical path. Raises :class:`AccessDeniedError` or :class:`NotFoundError`."""
-        root, segments = self._parse(logical, user)
+        state = self._state  # one set of roots for the whole resolution
+        root, segments = self._parse(logical, user, state[0])
         normalised = "/".join([root.name, *segments])
-        root_real = self._real.get(root.name)
+        root_real = state[1].get(root.name)
         if root_real is None:
             raise NotFoundError(f"data root {root.name!r} is not available")
         # Non-strict realpath resolves every symlink of the existing part and appends the rest
         # as is; without '..' segments the appended part cannot climb out.
         real = os.path.realpath(os.path.join(root_real, *segments))
-        if not any(_inside(real, allowed) for allowed in self._allowed(user)):
+        if not any(_inside(real, allowed) for allowed in self._allowed(user, state)):
             raise AccessDeniedError(_DENIED)
         try:
             st = os.stat(real)
@@ -235,7 +249,7 @@ class RootSet:
         target = self.resolve(logical, user)
         if not target.is_dir:
             raise InvalidRequestError(f"not a directory: {target.logical}")
-        allowed = self._allowed(user)
+        allowed = self._allowed(user, self._state)
         entries: list[DirEntry] = []
         try:
             scan = os.scandir(target.real)

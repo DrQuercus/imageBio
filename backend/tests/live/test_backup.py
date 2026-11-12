@@ -236,7 +236,7 @@ def test_backup_and_restore_from_the_command_line(
     assert cli.main(["restore", str(made), "--config", str(config)]) == 2
     assert "already a Live index here" in capsys.readouterr().err
     assert cli.main(["restore", str(made), "--config", str(config), "--force"]) == 0
-    assert "restored, 1 watch(es): start the server" in capsys.readouterr().out
+    assert "restored the Live index (1 watch(es)); start the server" in capsys.readouterr().out
     assert cli.main(["restore", str(tmp_path / "data"), "--config", str(config)]) == 2
     assert "no manifest" in capsys.readouterr().err
 
@@ -254,14 +254,19 @@ def test_the_settings_changed_in_the_settings_page_are_backed_up_and_restored(tm
     assert json.loads((made / FILE_NAME).read_text())["accounts"]["bob"]["groups"] == ["cryoem"]
     assert (made / LOG_NAME).is_file()
 
-    # changed afterwards; restoring needs --force, keeps the current ones aside, and says so
+    # changed afterwards; the settings come back only when asked for, with --force; the
+    # current ones are kept aside, the version goes on up, and the log says so
     SettingsStore(settings).set_account("bob", ["lm"], False, by="alice", version=1)
+    with pytest.raises(ConfigError, match="--settings"):
+        restore(settings, made, force=True)  # an index-only restore of a backup without an index
     with pytest.raises(ConfigError, match="--force"):
-        restore(settings, made)
-    restore(settings, made, force=True)
-    assert SettingsStore(settings).groups_of("bob") == {"cryoem"}
+        restore(settings, made, with_settings=True)
+    done = restore(settings, made, force=True, with_settings=True)
+    assert done["restored"] == {"index": False, "settings": True}
+    again = SettingsStore(settings)
+    assert again.groups_of("bob") == {"cryoem"} and again.version == 3
     assert [p.name for p in state.glob(f"{FILE_NAME}.before-restore-*")]
-    log = SettingsStore(settings).log()
+    log = again.log()
     assert log[0]["by"] == "restore" and len(log) == 3  # the log is not rewound
 
     # a backup with neither an index nor settings has nothing to restore

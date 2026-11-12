@@ -16,7 +16,8 @@ groups_header = "X-Forwarded-Groups"
 # Who administers the server (the settings page: accounts and their groups, data roots,
 # microscope, Live settings, alert channels). Names given by the proxy; an administrator can
 # make others administrators in the page, never remove these. Groups work too (single sign-on).
-admins = ["alice"]
+# With single sign-on, the name is what user_header carries (often an opaque identifier).
+# admins = ["your-login"]
 # admin_groups = ["imagebio-admin"]
 
 [cache]

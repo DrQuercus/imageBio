@@ -36,25 +36,25 @@ test("a data root added here is served at once, and the file comes back", async 
   await page.getByTestId("root-name").nth(1).fill("etc");
   await page.getByTestId("root-path").nth(1).fill("/etc");
   await page.getByTestId("save-roots").click();
-  await expect(page.getByTestId("error")).toContainText("allowed parent directories");
+  await expect(page.getByTestId("error")).toContainText("inside a data root of the configuration file");
   await expect(page.getByTestId("error")).not.toContainText("/etc");
   await page.getByTestId("error").getByRole("button").click();
 
-  // a folder next to the root of the file (the page offers the allowed parent to start from)
+  // a folder inside the root of the file, for a group (the page offers the root to start from)
   const path = page.getByTestId("root-path").nth(1);
   await page.getByTestId("root-remove").nth(1).click();
   await page.getByTestId("root-add").click();
   const parent = await path.inputValue();
-  expect(parent).toMatch(/\/\.e2e-data\/$/);
-  await page.getByTestId("root-name").nth(1).fill("spare");
-  await path.fill(`${parent}spare`);
+  expect(parent).toMatch(/\/\.e2e-data\/demo\/$/);
+  await page.getByTestId("root-name").nth(1).fill("session");
+  await path.fill(`${parent}session`);
   await page.getByTestId("root-groups").nth(1).fill("cryoem");
   await page.getByTestId("save-roots").click();
   await expect(page.getByTestId("settings-note")).toContainText("Dossiers de données : enregistré");
   await expect(page.getByTestId("source-roots")).toContainText("changé ici");
-  expect(await roots(page)).toEqual(["demo", "spare"]);
-  const listed = await (await page.request.get("/api/fs/list?path=spare")).json();
-  expect(listed.entries.map((e: { name: string }) => e.name)).toContain("icy.mrc");
+  expect(await roots(page)).toEqual(["demo", "session"]);
+  const listed = await (await page.request.get("/api/fs/list?path=session")).json();
+  expect(listed.entries.map((e: { name: string }) => e.name)).toContain("inside.mrc");
 
   // kept by the server, then back to the file
   await page.reload();

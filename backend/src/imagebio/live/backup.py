@@ -22,6 +22,7 @@ from typing import Any, Final
 from imagebio import __version__
 from imagebio.admin.store import FILE_NAME as SETTINGS_NAME
 from imagebio.admin.store import LOG_NAME as SETTINGS_LOG_NAME
+from imagebio.admin.store import SettingsFileError, check_settings_data
 from imagebio.core.config import ConfigError, Settings
 from imagebio.live.index import SCHEMA_VERSION, hold_state_dir
 
@@ -119,51 +120,78 @@ def prune(destination: Path, keep: int) -> list[str]:
     )
     removed = []
     for old in made[:-keep]:
-        if {entry.name for entry in old.iterdir()} - {INDEX_NAME, _CONFIG_NAME, MANIFEST_NAME}:
+        ours = (INDEX_NAME, _CONFIG_NAME, MANIFEST_NAME, SETTINGS_NAME, SETTINGS_LOG_NAME)
+        if {entry.name for entry in old.iterdir()} - set(ours):
             continue  # not only a backup: somebody put something there
-        for name in (INDEX_NAME, _CONFIG_NAME, MANIFEST_NAME):
+        for name in ours:
             (old / name).unlink(missing_ok=True)
         old.rmdir()
         removed.append(old.name)
     return removed
 
 
-def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[str, Any]:
+def restore(
+    settings: Settings, source: Path, *, force: bool = False, with_settings: bool = False
+) -> dict[str, Any]:
     """Put the Live index of the backup ``source`` (a directory written by :func:`backup`) in
-    place. The server must be stopped. An index already there is kept aside under another
-    name, and only replaced with ``force``. Returns the manifest of the backup."""
+    place, and its settings page too with ``with_settings``. The server must be stopped. What
+    is already there is kept aside under another name, and only replaced with ``force``.
+    Everything is checked before anything is moved. Returns the manifest of the backup, with
+    ``restored``: what was put in place.
+
+    The settings are restored only when asked for: repairing a damaged index must not bring
+    back, unnoticed, groups and roles taken away since the backup."""
     try:
         manifest = json.loads((source / MANIFEST_NAME).read_text())
     except (OSError, ValueError):
         raise ConfigError("not a backup of imageBio: no manifest in this directory") from None
-    if not isinstance(manifest, dict) or (manifest.get("index") is None and not manifest.get("settings")):
-        raise ConfigError("this backup holds no Live index and no settings: there is nothing to restore")
+    if not isinstance(manifest, dict):
+        raise ConfigError("not a backup of imageBio: no manifest in this directory")
     has_index = manifest.get("index") is not None
+    has_settings = bool(manifest.get("settings"))
+    if with_settings and not has_settings:
+        raise ConfigError("this backup holds no settings of the settings page")
+    if not has_index and not with_settings:
+        raise ConfigError(
+            "this backup holds no Live index, only settings: restore them with --settings"
+            if has_settings
+            else "this backup holds no Live index and no settings: there is nothing to restore"
+        )
     version = _checked(source / INDEX_NAME)[0] if has_index else 0
     if version > SCHEMA_VERSION:
         raise ConfigError(
             f"this backup was made by a newer imageBio (index version {version}, this one reads "
             f"up to {SCHEMA_VERSION}): restore it with that version"
         )
+    saved_settings: dict[str, Any] | None = None
+    if with_settings:  # read and checked before anything here is touched
+        try:
+            saved_settings = json.loads((source / SETTINGS_NAME).read_text(encoding="utf-8"))
+            check_settings_data(settings, saved_settings)
+        except (OSError, ValueError, SettingsFileError) as e:
+            raise ConfigError(
+                f"the settings of this backup cannot be used ({e}): nothing was restored"
+            ) from None
     state = settings.live_state_dir
     state.mkdir(parents=True, exist_ok=True)
     try:  # a server that runs holds the state directory, even when it writes nothing
         held = hold_state_dir(state, alone=True)
     except BlockingIOError:
-        raise ConfigError("the Live index is in use: stop the server before restoring") from None
+        raise ConfigError("the state directory is in use: stop the server before restoring") from None
     try:
         stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
         settings_file = state / SETTINGS_NAME
-        if manifest.get("settings") and settings_file.exists() and not force:
-            raise ConfigError(
-                "there are already settings here: use --force to replace them (they are kept aside)"
-            )
         current = state / INDEX_NAME
-        if has_index and current.exists():
-            if not force:
+        if not force:
+            if saved_settings is not None and settings_file.exists():
+                raise ConfigError(
+                    "there are already settings here: use --force to replace them (they are kept aside)"
+                )
+            if has_index and current.exists():
                 raise ConfigError(
                     "there is already a Live index here: use --force to replace it (it is kept aside)"
                 )
+        if has_index and current.exists():
             # what a stopped server left in its write-ahead log belongs to the index: it is
             # folded into the file before the file is moved aside. An index too damaged for
             # that (a likely reason to restore) is moved as it is, its log with it.
@@ -183,20 +211,34 @@ def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[st
                 contextlib.closing(sqlite3.connect(current)) as fresh,
             ):
                 saved.backup(fresh)
-        if manifest.get("settings"):
+        if saved_settings is not None:
+            # versions only go up: the history and the check of concurrent changes rely on it
+            now_version = 0
+            with contextlib.suppress(OSError, ValueError, TypeError, KeyError):
+                now_version = int(json.loads(settings_file.read_text(encoding="utf-8"))["version"])
+            saved_settings["version"] = max(now_version, int(saved_settings["version"])) + 1
+            saved_settings["updated_at"] = time.time()
+            saved_settings["updated_by"] = "restore"
+            staging = state / f".{SETTINGS_NAME}.part"
+            fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(saved_settings, f, indent=2, ensure_ascii=False, sort_keys=True)
+                f.write("\n")
             if settings_file.exists():
                 settings_file.rename(state / f"{SETTINGS_NAME}.before-restore-{stamp}")
-            staging = state / f".{SETTINGS_NAME}.part"
-            shutil.copyfile(source / SETTINGS_NAME, staging)
-            os.chmod(staging, 0o600)
             os.replace(staging, settings_file)
             # the log tells what happened; it is not rewound, it says this happened too
             fd = os.open(state / SETTINGS_LOG_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as log:
                 what = f"réglages de la sauvegarde {manifest['created']}"
-                entry = {"at": time.time(), "by": "restore", "what": what}
+                entry = {
+                    "at": time.time(),
+                    "by": "restore",
+                    "version": saved_settings["version"],
+                    "what": what,
+                }
                 log.write(json.dumps(entry, ensure_ascii=False) + "\n")
     finally:
         if held is not None:
             held.close()
-    return manifest
+    return {**manifest, "restored": {"index": has_index, "settings": saved_settings is not None}}

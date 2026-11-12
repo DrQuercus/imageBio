@@ -63,7 +63,9 @@ def build_tree(base: Path) -> Tree:
 
 
 def make_client(tree: Tree, *, registry: Registry | None = None, **settings: Any) -> TestClient:
-    """A client on ``http://localhost`` (an allowed Host) that returns 500s instead of raising."""
+    """A client on ``http://localhost`` (an allowed Host) that returns 500s instead of raising.
+    Its state (settings page, Live index) is next to the tree, never the developer's own."""
+    settings.setdefault("state_dir", tree.base.parent / "state")
     cfg = Settings(roots=tree.roots(), **settings)
     return TestClient(create_app(cfg, registry), base_url="http://localhost", raise_server_exceptions=False)
 

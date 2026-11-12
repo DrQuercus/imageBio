@@ -58,8 +58,12 @@ async def _body(request: Request) -> dict[str, Any]:
             raise PayloadTooLargeError(f"the body is larger than {MAX_BODY_BYTES} bytes")
     try:
         body = json.loads(data)
-    except ValueError:
+        # text that cannot be written back (a lone surrogate) is refused here, not when saved
+        json.dumps(body, ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError):
         raise InvalidRequestError("the body is not valid JSON") from None
+    except UnicodeEncodeError:
+        raise InvalidRequestError("the body holds characters that are not text") from None
     if not isinstance(body, dict):
         raise InvalidRequestError("expected a JSON object")
     return body

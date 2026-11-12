@@ -23,17 +23,18 @@ import contextlib
 import copy
 import dataclasses
 import json
+import logging
 import math
 import os
-import re
 import shutil
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from imagebio.core.config import ROOT_NAME_RE, ConfigError, Settings, parse_channels, parse_roots
+from imagebio.core.config import ROOT_NAME_RE, ConfigError, RootConfig, Settings, parse_channels, parse_roots
 from imagebio.core.errors import ConflictError, InvalidRequestError
 
 __all__ = [
@@ -65,8 +66,23 @@ _LIVE: Final[dict[str, str]] = {
     "ctf": "bool",
     "drift": "bool",
 }
-#: A user name as the proxy's header may give it (api/security.py).
-_USER_RE: Final = re.compile(r"[^\x00-\x1f\x7f,]{1,256}")
+_REFRESH_EVERY_S: Final = 1.0  # how often the file is looked at for a change made by another process
+#: Characters a user name given in the page may not hold: controls, invisible formatting
+#: (soft hyphen, zero-width joiners…), private and lone surrogate code points, line breaks.
+_BAD_CATEGORIES: Final = frozenset({"Cc", "Cf", "Co", "Cs", "Zl", "Zp"})
+
+log = logging.getLogger("imagebio.admin")
+
+
+def valid_user_name(name: object) -> bool:
+    """A user name as the proxy gives it, and that cannot pass for another one."""
+    return (
+        isinstance(name, str)
+        and 1 <= len(name) <= 256
+        and "," not in name
+        and name == name.strip()
+        and not any(unicodedata.category(ch) in _BAD_CATEGORIES for ch in name)
+    )
 
 
 class SettingsFileError(ConfigError):
@@ -75,7 +91,12 @@ class SettingsFileError(ConfigError):
 
 
 def _number(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer of a few hundred digits
+        return False
 
 
 def effective_settings(base: Settings, sections: Mapping[str, Any]) -> Settings:
@@ -122,12 +143,34 @@ def _inside(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip(os.sep) + os.sep)
 
 
-def _real(path: Path) -> str | None:
+def _real(path: Path | str) -> str | None:
     try:
         real = os.path.realpath(path, strict=True)
-    except OSError:
+    except (OSError, ValueError):
         return None
     return real if os.path.isdir(real) else None
+
+
+def check_settings_data(base: Settings, data: object) -> int:
+    """That ``data`` (a settings file read as JSON) can be used with ``base``; returns its
+    version. Raises :class:`SettingsFileError`. Used before a restore puts a file in place."""
+    if (
+        not isinstance(data, dict)
+        or data.get("schema") != SCHEMA
+        or not isinstance(data.get("version"), int)
+        or not isinstance(data.get("accounts", {}), dict)
+        or not isinstance(data.get("sections", {}), dict)
+    ):
+        raise SettingsFileError("not a settings file of imageBio")
+    sections = dict(data.get("sections", {}))
+    if base.local_roots:
+        sections.pop("roots", None)
+    try:
+        effective_settings(base, sections)
+        SettingsStore._parse_accounts(data.get("accounts", {}))
+    except (ConfigError, InvalidRequestError) as e:
+        raise SettingsFileError(str(e)) from None
+    return int(data["version"])
 
 
 class SettingsStore:
@@ -140,17 +183,61 @@ class SettingsStore:
         self.path = self.directory / FILE_NAME
         self._clock = clock
         self._lock = threading.Lock()
+        self._seen_lock = threading.Lock()
         self._listeners: list[Callable[[Settings], None]] = []
         self._seen: dict[str, tuple[float, frozenset[str]]] = {}
+        self._looked_at = 0.0
+        self._file = self._stat()
         data = self._read()
         try:
-            self._effective = effective_settings(base, data["sections"])
-            self._accounts = self._parse_accounts(data["accounts"])
+            self._effective, self._accounts = self._apply(data)
         except (ConfigError, InvalidRequestError) as e:
             raise SettingsFileError(
                 f"{self.path}: {e} (move the file aside to start on the settings of the configuration file)"
             ) from None
         self._data = data
+
+    def _apply(self, data: Mapping[str, Any]) -> tuple[Settings, dict[str, tuple[frozenset[str], bool]]]:
+        """The settings and accounts ``data`` gives. With ``serve --local``, the roots are those
+        of the command line, whatever an earlier server saved."""
+        sections = dict(data["sections"])
+        if self.base.local_roots:
+            sections.pop("roots", None)
+        return effective_settings(self.base, sections), self._parse_accounts(data["accounts"])
+
+    def _stat(self) -> tuple[int, int] | None:
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def refresh(self) -> None:
+        """Take a change another process made to the file (two servers on one state
+        directory), at most every second. A file that no longer reads is not taken: the
+        settings in force stay, and the error is logged."""
+        now = time.monotonic()
+        if now - self._looked_at < _REFRESH_EVERY_S:
+            return
+        self._looked_at = now
+        if self._stat() == self._file:
+            return
+        with self._lock:
+            self._reload()
+
+    def _reload(self) -> None:
+        """Read the file again (the lock is held)."""
+        known = self._stat()
+        try:
+            data = self._read()
+            settings, accounts = self._apply(data)
+        except (ConfigError, InvalidRequestError) as e:
+            log.error("the settings file changed and cannot be used, the settings in force stay: %s", e)
+            self._file = known
+            return
+        self._data, self._effective, self._accounts, self._file = data, settings, accounts, known
+        for listener in self._listeners:
+            listener(settings)
 
     # ── reading ──────────────────────────────────────────────────────────────
     def _read(self) -> dict[str, Any]:
@@ -181,7 +268,7 @@ class SettingsStore:
             raise InvalidRequestError(f"no more than {_MAX_ACCOUNTS} accounts")
         out = {}
         for name, account in raw.items():
-            if not _USER_RE.fullmatch(name) or name != name.strip():
+            if not valid_user_name(name):
                 raise InvalidRequestError(f"invalid user name {name[:64]!r}")
             groups = account.get("groups", []) if isinstance(account, Mapping) else None
             admin = account.get("admin", False) if isinstance(account, Mapping) else None
@@ -231,19 +318,22 @@ class SettingsStore:
 
     def saw(self, name: str, proxy_groups: frozenset[str]) -> None:
         """Remember that ``name`` used the server (shown to administrators; not kept on disk)."""
-        self._seen[name] = (self._clock(), proxy_groups)
-        if len(self._seen) > _MAX_SEEN:
-            for old in sorted(self._seen, key=lambda n: self._seen[n][0])[: _MAX_SEEN // 10]:
-                self._seen.pop(old, None)
+        with self._seen_lock:
+            self._seen[name] = (self._clock(), proxy_groups)
+            if len(self._seen) > _MAX_SEEN:
+                for old in sorted(self._seen, key=lambda n: self._seen[n][0])[: _MAX_SEEN // 10]:
+                    self._seen.pop(old, None)
 
     def accounts(self, also: Iterable[str] = ()) -> list[dict[str, Any]]:
         """The users an administrator may give groups to: those with groups or the admin role,
         the administrators of the file, those seen since the server started, and ``also``."""
-        names = set(self._accounts) | set(self.base.admins) | set(self._seen) | set(also)
+        with self._seen_lock:
+            seen_now = dict(self._seen)
+        names = set(self._accounts) | set(self.base.admins) | set(seen_now) | set(also)
         rows = []
         for name in sorted(names, key=str.lower):
             groups, admin = self._accounts.get(name, (frozenset(), False))
-            seen = self._seen.get(name)
+            seen = seen_now.get(name)
             proxy_groups = seen[1] if seen is not None else frozenset()
             if name in self.base.admins:
                 role = "file"
@@ -271,9 +361,14 @@ class SettingsStore:
         eff, base = self._effective, self.base
 
         def source(name: str) -> str:
+            if name == "roots" and self.base.local_roots:
+                return "file"  # the command line, which the page does not replace
             return "interface" if name in own else "file"
 
+        check = self.serving_check()
+
         def root(r: Any) -> dict[str, Any]:
+            real = _real(r.path)
             return {
                 "name": r.name,
                 "path": str(r.path),
@@ -281,7 +376,8 @@ class SettingsStore:
                 "kv": r.kv,
                 "cs_mm": r.cs_mm,
                 "amplitude_contrast": r.amplitude_contrast,
-                "available": _real(r.path) is not None,
+                # as served: a root of the page whose path no longer passes its check is not
+                "available": real is not None and (check is None or check(r, real)),
             }
 
         def live(s: Settings) -> dict[str, Any]:
@@ -318,14 +414,40 @@ class SettingsStore:
         }
 
     def root_parents(self) -> list[str]:
-        """Where a data root added in the settings page may lie (real paths)."""
-        parents = self.base.root_parents or tuple(r.path.parent for r in self.base.roots)
+        """Where a data root of the settings page may lie (real paths): inside a root of the
+        file, or under ``server.root_parents``. Nothing wider by default: an administrator
+        appointed in the page must not open what the installer did not."""
         out: list[str] = []
-        for p in parents:
+        for p in [r.path for r in self.base.roots] + list(self.base.root_parents):
             real = _real(p)
             if real is not None and real not in out:
                 out.append(real)
         return out
+
+    def _forbidden(self) -> list[str]:
+        """What no root may show, nor lie in: the server's state (settings, index, reports)
+        and the working directory of the external programs (the sums of every session)."""
+        places = [self.directory]
+        if self.base.processing is not None and self.base.processing.work_dir is not None:
+            places.append(self.base.processing.work_dir)
+        return [os.path.realpath(p) for p in places]
+
+    def root_check(self, root: RootConfig, real: str) -> bool:
+        """Whether a root of the settings page may be served, its path resolved now. It was
+        saved as a real path: a link that appeared in it since (repointed by whoever writes
+        there), a parent narrowed in the file, a directory that now holds the state, and it is
+        not served."""
+        return (
+            real == str(root.path)
+            and any(_inside(real, p) for p in self.root_parents())
+            and not any(_inside(f, real) or _inside(real, f) for f in self._forbidden())
+        )
+
+    def serving_check(self) -> Callable[[RootConfig, str], bool] | None:
+        """The check the data roots in force are served with: those of the page are checked
+        each time they are set; those of the file are the installer's."""
+        own = "roots" in self._data["sections"] and not self.base.local_roots
+        return self.root_check if own else None
 
     def log(self, limit: int = _LOG_SHOWN) -> list[dict[str, Any]]:
         """The latest changes, newest first."""
@@ -340,44 +462,51 @@ class SettingsStore:
         return out
 
     # ── changes ──────────────────────────────────────────────────────────────
-    def _check_roots(self, value: Any) -> None:
-        """A root of the settings page is an existing directory, under one of the parents the
-        file allows (or one of the file's own roots), and does not hold the server's state."""
-        file_paths = {real for r in self.base.roots if (real := _real(r.path)) is not None}
-        parents = self.root_parents()
-        state = os.path.realpath(self.directory)
-        for root in parse_roots(value):
+    def _check_roots(self, value: Any) -> list[dict[str, Any]]:
+        """The roots of the settings page, each an existing directory inside a root of the file
+        or under ``server.root_parents``, holding neither the state nor the work of the
+        programs; returned with their real paths (what is saved, and checked again whenever
+        they are served)."""
+        parents, forbidden = self.root_parents(), self._forbidden()
+        out = []
+        for raw, root in zip(value, parse_roots(value), strict=True):
             real = _real(root.path)
-            # (no path in these messages: the page shows the allowed parents to administrators)
+            # (no path in these messages: the page shows the allowed places to administrators)
             if real is None:
                 raise InvalidRequestError(f"root {root.name!r}: not a directory the server can read")
-            if real not in file_paths and not any(_inside(real, p) for p in parents):
+            if not any(_inside(real, p) for p in parents):
                 raise InvalidRequestError(
-                    f"root {root.name!r}: must lie under one of the allowed parent directories"
-                    + ("" if parents else " (none: set server.root_parents in the configuration file)")
+                    f"root {root.name!r}: must lie inside a data root of the configuration file, "
+                    "or under one of its server.root_parents"
                 )
-            if _inside(state, real) or _inside(real, state):
-                raise InvalidRequestError(f"root {root.name!r}: would show the server's own state directory")
+            if any(_inside(f, real) or _inside(real, f) for f in forbidden):
+                raise InvalidRequestError(f"root {root.name!r}: would show the server's own state or work")
+            out.append({**raw, "path": real})
+        return out
 
     def _commit(self, version: int, by: str, change: Callable[[dict[str, Any]], str]) -> dict[str, Any]:
         with self._lock:
+            if self._stat() != self._file:  # another process wrote it: take theirs first
+                self._reload()
             if version != self.version:
                 raise ConflictError("the settings were changed meanwhile: reload them and try again")
             data = copy.deepcopy(self._data)
             what = change(data)
             try:
-                settings = effective_settings(self.base, data["sections"])
-                accounts = self._parse_accounts(data["accounts"])
+                settings, accounts = self._apply(data)
             except ConfigError as e:
                 raise InvalidRequestError(str(e)) from None
             data["version"] = self.version + 1
             data["updated_at"] = self._clock()
             data["updated_by"] = by
             self._write(data)
-            self._log({"at": data["updated_at"], "by": by, "version": data["version"], "what": what})
-            self._data, self._effective, self._accounts = data, settings, accounts
+            self._data, self._effective, self._accounts, self._file = data, settings, accounts, self._stat()
             for listener in self._listeners:
                 listener(settings)
+            try:
+                self._log({"at": data["updated_at"], "by": by, "version": data["version"], "what": what})
+            except OSError as e:  # the change is made and saved; only its line is missing
+                log.error("the change %s by %s could not be logged: %s", data["version"], by, e)
             return {"version": data["version"], "what": what}
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -408,11 +537,16 @@ class SettingsStore:
         channels; the microscope or Live keys to set, the others coming from the file)."""
         if section not in SECTIONS:
             raise InvalidRequestError(f"section must be one of {', '.join(SECTIONS)}")
-        if section == "roots":
-            try:
-                self._check_roots(value)
-            except ConfigError as e:
-                raise InvalidRequestError(str(e)) from None
+        if section == "roots" and self.base.local_roots:
+            raise InvalidRequestError(
+                "with serve --local, the data roots are the directories of the command line"
+            )
+        try:  # checked before anything is described or written
+            effective_settings(self.base, {section: value})
+            if section == "roots":
+                value = self._check_roots(value)
+        except ConfigError as e:
+            raise InvalidRequestError(str(e)) from None
 
         def change(data: dict[str, Any]) -> str:
             before = self.sections()[section]["value"]
@@ -437,8 +571,17 @@ class SettingsStore:
     ) -> dict[str, Any]:
         """Give ``name`` these groups and this role (in addition to those of the proxy and of
         the file). An administrator does not take the role away from themselves."""
-        if not isinstance(name, str) or not _USER_RE.fullmatch(name) or name != name.strip():
+        if not valid_user_name(name):
             raise InvalidRequestError("invalid user name")
+        if (
+            not isinstance(groups, list)
+            or len(groups) > _MAX_GROUPS
+            or not all(isinstance(g, str) and ROOT_NAME_RE.fullmatch(g) for g in groups)
+            or not isinstance(admin, bool)
+        ):
+            raise InvalidRequestError(
+                "groups are names of letters, digits, '_', '-', '.'; admin is true or false"
+            )
         if name == by and not admin and self._accounts.get(name, (frozenset(), False))[1]:
             raise InvalidRequestError("an administrator does not take the role away from themselves")
 

@@ -14,7 +14,7 @@ from imagebio import __version__
 from imagebio.api.security import PROXY_SECRET_VARIABLE
 from imagebio.core.config import AlertChannel, ConfigError, Settings
 from imagebio.core.errors import ImageBioError
-from imagebio.live.index import IndexVersionError
+from imagebio.live.index import IndexVersionError, hold_state_dir
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -70,6 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     restore.add_argument("source", type=Path, help="a directory written by 'imagebio backup'")
     restore.add_argument(
         "--config", metavar="FILE", help="configuration of the server (default: its defaults)"
+    )
+    restore.add_argument(
+        "--settings",
+        action="store_true",
+        help="also put back the settings of the settings page (accounts, roots...): without it, "
+        "groups and roles changed since the backup stay as they are",
     )
     restore.add_argument(
         "--force", action="store_true", help="replace the index that is there (it is kept aside)"
@@ -152,11 +158,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     removed = backups.prune(args.destination, args.keep)
                     print(f"{len(removed)} older backup(s) removed")
             else:
-                manifest = backups.restore(configured, args.source, force=args.force)
-                print(
-                    f"Live index of {manifest['created']} restored, "
-                    f"{manifest['index']['watches']} watch(es): start the server"
+                manifest = backups.restore(
+                    configured, args.source, force=args.force, with_settings=args.settings
                 )
+                restored = manifest["restored"]
+                done = []
+                if restored["index"]:
+                    done.append(f"the Live index ({manifest['index']['watches']} watch(es))")
+                if restored["settings"]:
+                    done.append("the settings of the settings page")
+                print(f"backup of {manifest['created']}: restored {' and '.join(done)}; start the server")
+                if manifest.get("settings") and not restored["settings"]:
+                    print("its settings page was not restored (add --settings to put it back too)")
             return 0
         if args.command == "info":
             from imagebio.io.registry import open_dataset
@@ -169,6 +182,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         app = create_app(settings)
         app.state.live.check()
+        # held as long as the server runs: a restore waits for it to stop, settings included
+        settings.live_state_dir.mkdir(parents=True, exist_ok=True)
+        state_lock = hold_state_dir(settings.live_state_dir)
     except (ConfigError, ImageBioError, IndexVersionError) as e:
         print(f"imagebio: {e}", file=sys.stderr)
         return 2
@@ -189,6 +205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         auth += " a shared secret"
     print(f"imageBio {__version__} on http://{settings.host}:{settings.port}  (auth: {auth}; roots: {roots})")
     uvicorn.run(app, host=settings.host, port=settings.port, log_level="info", server_header=False)
+    if state_lock is not None:
+        state_lock.close()
     return 0
 
 

@@ -76,7 +76,7 @@ def current_user(request: Request, settings: Settings) -> User:
     if settings.auth_mode == "none":
         return LOCAL_USER
     names = request.headers.getlist(settings.user_header)
-    if len(names) != 1 or not _NAME.fullmatch(names[0].strip()):
+    if len(names) != 1 or not _NAME.fullmatch(names[0].strip(" \t")):
         raise AuthenticationRequired("authentication required")
     group_headers = request.headers.getlist(settings.groups_header)
     if len(group_headers) > 1:
@@ -84,10 +84,14 @@ def current_user(request: Request, settings: Settings) -> User:
     groups = [g.strip() for g in (group_headers[0] if group_headers else "").split(",") if g.strip()]
     if len(groups) > _MAX_GROUPS:
         raise AuthenticationRequired("authentication required")
-    name, given = names[0].strip(), frozenset(groups)
+    # spaces and tabs only: "alice" followed by a no-break space is not "alice"
+    name, given = names[0].strip(" \t"), frozenset(groups)
+    if not name:
+        raise AuthenticationRequired("authentication required")
     store = getattr(request.app.state, "store", None)
     if store is None:  # an application without a settings page: the file alone
         return User(name, given, admin=name in settings.admins or bool(settings.admin_groups & given))
+    store.refresh()  # another server on the same state directory may have changed a role
     store.saw(name, given)
     return User(name, given | store.groups_of(name), admin=store.is_admin(name, given))
 

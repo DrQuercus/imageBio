@@ -370,9 +370,12 @@ class Settings:
     #: interface, never remove these. In standalone mode the one local user is administrator.
     admins: frozenset[str] = frozenset()
     admin_groups: frozenset[str] = frozenset()
-    #: Where data roots added in the settings page may lie; empty: in the parent directories
-    #: of the roots of the file.
+    #: Where data roots added in the settings page may lie, besides inside the roots of the
+    #: file (ADR 014).
     root_parents: tuple[Path, ...] = ()
+    #: The roots are the directories of the command line (``serve --local``): the settings
+    #: page does not replace them.
+    local_roots: bool = False
     plane_cache_bytes: int = 2 * 2**30
     max_open_datasets: int = 32
     #: Largest plane (in pixels, after binning/cropping) served by one request.
@@ -481,7 +484,7 @@ class Settings:
                 name, n = f"{base[:60]}-{n}", n + 1
             used.add(name)
             roots.append(RootConfig(name, p))
-        return cls(roots=tuple(roots), auth_mode="none", **overrides)
+        return cls(roots=tuple(roots), auth_mode="none", local_roots=True, **overrides)
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> Settings:

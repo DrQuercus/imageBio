@@ -31,6 +31,7 @@ def client(tree: Tree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         tree,
         auth_mode="proxy",
         state_dir=tmp_path / "state",
+        root_parents=(tree.base,),  # roots may be added next to those of the file
         admins=frozenset({"root"}),
         admin_groups=frozenset({"imagebio-admin"}),
         alert_channels=(AlertChannel("phone", "ntfy", TOPIC),),
@@ -195,6 +196,7 @@ def test_roots_and_the_rest_apply_at_once_and_survive_a_restart(client, tree: Tr
         tree,
         auth_mode="proxy",
         state_dir=tmp_path / "state",
+        root_parents=(tree.base,),
         admins=frozenset({"root"}),
         smtp=SmtpConfig("smtp.example.org"),
     ) as restarted:
