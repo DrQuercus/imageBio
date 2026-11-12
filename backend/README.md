@@ -134,6 +134,11 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 | `PUT /api/live/watches/{id}/alerts?channels=&no_image=&disk_free=&rate_drop=` | Remplacer les règles : canaux (noms séparés par des virgules), minutes sans image, pourcentage d'espace libre, pourcentage du débit horaire |
 | `POST /api/live/watches/{id}/alerts/test` | Envoyer un message d'essai aux canaux de la surveillance |
 | `PUT /api/live/watches/{id}/ice?i0=&mfp=` | Étalonner la glace : coups moyens d'un trou vide et libre parcours moyen en nm. Ce qui est omis est oublié |
+| `GET /api/live/watches/{id}/reports` | Les rapports de qualité de la surveillance, du plus récent au plus ancien, et si un rapport est écrit à sa fin (`auto`, `idle_min`) |
+| `POST /api/live/watches/{id}/reports` | Écrire le rapport maintenant (redemandé dans les dix secondes : celui qui vient d'être fait) |
+| `PUT /api/live/watches/{id}/reports?auto=` | Écrire ou non un rapport à la fin de la surveillance et après un silence de la collecte |
+| `GET /api/live/watches/{id}/reports/{rid}/{html,json,csv,zip}` | Un fichier du rapport, en téléchargement ; `?view=true` pour lire la page dans le navigateur, dans un bac à sable |
+| `PUT /api/live/watches/{id}/microscope?kv=&cs=&amp=` | Le microscope de la session (tension, Cs, contraste d'amplitude) ; ce qui est omis est oublié. Rend les valeurs en vigueur, leur origine, et combien d'images seront mesurées de nouveau |
 | `PUT /api/live/watches/{id}/processing?on=` | Demander, ou ne plus demander, les programmes déclarés sur le serveur pour ce qui arrive dans la session. `processing` du résumé dit s'il y en a (`available`, `steps`), si la session les demande (`on`) et où ils en sont (`done`, `waiting`) |
 | `PUT /api/live/watches/{id}/quality?fit=&ice=&ring=&drift=&defocus_min=&defocus_max=` | Seuils d'acceptation de la session, rendus dans `quality` du résumé. Ce qui est omis est oublié |
 
@@ -147,6 +152,8 @@ Le mode Live suit une session d'acquisition à mesure que ses fichiers arrivent 
 - **Sur NFS ou SMB**, le cache d'attributs du client retarde la détection ; monter le dossier surveillé avec `actimeo=1` le réduit. Non mesuré sur stockage réseau pour l'instant.
 - **Mesures.** Après chaque passage, quelques images sont mesurées : coups moyens et écart-type (pixels chauds écartés), rapport de l'anneau de glace (puissance entre 3,40 et 3,95 Å sur celle des bandes voisines ; donné si le champ fait au moins 512 pixels et le pixel au plus 1,5 Å). Elles apparaissent dans `metrics` de chaque exposition (`null` : pas encore mesurée ; `{}` : image illisible), avec un nouveau numéro de séquence. Le résumé donne dans `ice` le nombre d'images mesurées et la référence de la session (les coups des images les plus claires) : la glace relative d'une image est `ln(référence / mean)`. Toutes les images arrivées pendant la surveillance sont mesurées, et les 200 plus récentes d'une session trouvée déjà écrite.
 - **Glace et dérive.** `ice` du résumé donne la référence en vigueur (`reference` : l'I₀ de l'utilisateur, sinon le niveau de la session), si elle est étalonnée (`calibrated`) et le libre parcours moyen connu (`mfp_nm`). L'épaisseur d'une image est `mfp_nm × ln(reference / mean)`. Avec `[live] drift = true`, `metrics` contient aussi `drift` et `drift_unit` (« A » ou « px ») : le déplacement entre les quatre premières et les quatre dernières frames du film, absent quand rien ne se laisse suivre.
+- **Rapport de qualité** ([ADR 012](../docs/adr/012-rapport-de-collecte.md), [schéma](../docs/rapport-live.md)). `live/report.py` le calcule (fonction pure), `live/report_render.py` l'écrit (page HTML autonome sans script, JSON, CSV protégé contre les formules, zip). Écrit à la demande, à l'arrêt de la surveillance et après `[live] report_after_idle_min` minutes de silence ; vingt gardés par surveillance dans `<état>/reports/`. Le verdict de chaque image est celui de l'interface, calculé par `live/quality.py` (cas communs : `tests/fixtures/verdict_cases.json`).
+- **Microscope d'une session.** Tension, Cs et contraste d'amplitude du CTF : le fichier d'acquisition (tension seulement), puis la session, puis le dossier de données (`[[roots]] kv`, `cs_mm`, `amplitude_contrast`), puis `[microscope]`. Chaque mesure garde dans `metrics.microscope` ce qu'elle a utilisé ; un changement fait mesurer de nouveau les images concernées.
 - **CTF.** Chaque image mesurée reçoit aussi `ctf` : `defocus` (µm), `fit` (Å, jusqu'où les anneaux suivent le défocus trouvé) et `score`. Ajustement à une dimension du spectre moyenné (`proc/ctf.py`) : pas d'astigmatisme, pas de lame de phase ; absent quand le spectre ne montre pas d'anneaux ou que le champ fait moins de 512 pixels. La tension vient du XML d'EPU, sinon de `[microscope]`.
 - **Métadonnées tardives.** Une session trouvée déjà écrite est indexée sans ouvrir ses fichiers ; le XML d'EPU d'une image est alors lu quand elle est mesurée (dose, défocus visé, position de platine).
 - **Seuils d'acceptation.** Ils sont gardés avec la surveillance ; le verdict est rendu par l'interface, sur les mesures que chaque exposition porte déjà. Une mesure absente ne compte pas contre une image.
@@ -229,7 +236,9 @@ src/imagebio/
   live/thumbs.py     vignettes binnées par moyenne
   live/alerts.py     règles d'alerte, jugement, envoi (ntfy, webhook, e-mail)
   live/metrics.py    mesures sur une image : coups moyens, rapport de l'anneau de glace, CTF, dérive d'un film
-  live/quality.py    seuils d'acceptation d'une session
+  live/quality.py    seuils d'acceptation d'une session, et verdict sur une image (comme l'interface)
+  live/report.py     rapport de qualité d'une session (calcul pur)
+  live/report_render.py  le rapport en fichiers : page HTML autonome, JSON, CSV, zip
   live/backup.py     sauvegarde et restauration de l'index et de la configuration
   live/simulator.py  microscope simulé (tests et démonstration)
   fs/roots.py        chemins logiques et confinement dans les racines

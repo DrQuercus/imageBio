@@ -15,3 +15,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [009](009-perimetre-cryo-et-live.md) | Périmètre recentré sur le cryo et le suivi en direct : pas de cœur ImageJ | Acceptée |
 | [010](010-exploitation.md) | Exploitation : pile réduite, secret partagé avec le proxy, sauvegarde de l'index, `/metrics` | Acceptée |
 | [011](011-programmes-externes.md) | Programmes externes (MotionCor3, CTFFIND) : listes d'arguments déclarées, isolement, tour de rôle | Acceptée, jamais essayée avec les vrais programmes |
+| [012](012-rapport-de-collecte.md) | Rapport de qualité d'une collecte (HTML autonome, JSON, CSV) et microscope d'une session | Acceptée |

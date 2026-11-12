@@ -604,6 +604,18 @@ Limites, à connaître avant le pilote :
 - Rien n'a tourné sur un vrai montage NFS ou SMB, ni avec le vrai compte du labo.
 - Les comptes locaux de Caddy n'ont pas de groupes : toutes les racines sont visibles de tous les comptes. Les droits par groupe demandent l'authentification unique.
 
+### Lots demandés le 12 novembre 2026
+
+Demande : une page de paramètres (comptes, réglages), la taille de pixel et les filtres plus en évidence dans la visionneuse (curseurs, réactivité de cryoSPARC), les atlas, un rapport de qualité de la collecte, et de quoi brancher une IA locale. Découpage proposé : A (visionneuse), B (rapport), C (atlas), D (paramètres et comptes), E (IA). Les décisions encore ouvertes (gestion des comptes, réglages modifiables par l'interface, dépôt automatique dans la bibliothèque) sont listées au lot D et dans l'[ADR 012](adr/012-rapport-de-collecte.md).
+
+**Lot B, rapport de qualité de la collecte (12 novembre 2026) : fait.** Décisions : [ADR 012](adr/012-rapport-de-collecte.md) ; contenu et schéma : [`rapport-live.md`](rapport-live.md).
+- Un rapport par session : page HTML autonome (à lire, imprimer en PDF, ranger), JSON au schéma versionné, CSV d'une ligne par image, et un zip des trois. Écrit à la demande, à l'arrêt de la surveillance et après un silence de la collecte.
+- Contenu : chiffres clés, ce qu'ils ne disent pas, la collecte dans le temps et ses pauses, la qualité et les raisons des rejets, le CTF (défocus mesuré face au visé), la glace, le mouvement, les **paramètres d'acquisition et leurs changements** (tension, grandissement, taille de pixel, dose, défocus visés…), les carrés de grille, la carte de la platine, les meilleures et les pires images, les alertes.
+- **Paramètres variables du microscope** : tension, Cs et contraste d'amplitude par dossier de données et par session, utilisés pour le CTF (la tension du fichier d'acquisition passe avant) ; un changement fait remesurer les images concernées.
+- Panneau du Live : graphiques des images montrées (dans le temps, histogrammes, par carré), rapports, microscope.
+- Le verdict de chaque image est calculé de la même façon par l'interface et par le serveur, vérifié sur des cas communs.
+- Non fait : le dépôt automatique dans la bibliothèque (le serveur écrivant lui-même dans un dossier), à décider ; le PDF généré par le serveur (l'impression du navigateur suffit).
+
 ### Plus tard
 
 - Cartes d'atlas.
@@ -710,7 +722,7 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Où en est le projet (11 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés). Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
+**Où en est le projet (12 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés), ainsi que le lot B (rapport de collecte) des demandes du 12 novembre ; les lots A, C, D et E restent à faire. Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
 
 1. **Essai sur une vraie session** : dossier EPU sur le NAS (NFS ou SMB), un film du Falcon avec sa référence de gain, des fichiers de pointés, un canal d'alerte réel. C'est ce qui permet d'éteindre l'ancien serveur Node.
 2. **Installation sur le serveur du labo** avec la [fiche d'exploitation](exploitation.md), choix entre comptes locaux et authentification unique, puis le pilote de deux semaines.
