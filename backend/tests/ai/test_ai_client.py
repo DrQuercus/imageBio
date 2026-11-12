@@ -263,3 +263,13 @@ def test_another_key_sees_nothing_of_alice(lab: Lab) -> None:
         bob.session(lab.watch)
     with pytest.raises(ImageBioError, match="404"):
         bob.report(lab.watch, lab.report)
+
+
+def test_the_python_the_client_promises() -> None:
+    """The CI names a Python 3.9 (IMAGEBIO_OLDEST_PYTHON): the tests above ran the client with it."""
+    if "IMAGEBIO_OLDEST_PYTHON" not in os.environ:
+        pytest.skip("no Python 3.9 named here; the CI names one")
+    done = subprocess.run(
+        [OLDEST, "-c", "import sys; print(sys.version_info[:2])"], capture_output=True, text=True, timeout=30
+    )
+    assert done.stdout.strip() == "(3, 9)"

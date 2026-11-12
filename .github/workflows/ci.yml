@@ -17,24 +17,24 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      # the client for assistants (imagebio/ai/imagebio_ai.py) promises Python 3.9: its tests
-      # run it with that one
-      - uses: actions/setup-python@v5
-        id: oldest
-        with:
-          python-version: '3.9'
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: backend/pyproject.toml
       - run: pip install -e ".[dev]"
+      # the client for assistants (imagebio/ai/imagebio_ai.py) promises Python 3.9, which the
+      # runners no longer carry: uv brings one, and the tests of the client run it with that one
+      - name: Python 3.9 for the client of assistants
+        working-directory: ${{ runner.temp }}
+        run: |
+          pip install uv
+          uv python install 3.9
+          echo "IMAGEBIO_OLDEST_PYTHON=$(uv python find 3.9)" >> "$GITHUB_ENV"
       - run: ruff check src tests
       - run: ruff format --check src tests
       - run: python -m mypy
       - run: python -m pytest -q
-        env:
-          IMAGEBIO_OLDEST_PYTHON: ${{ steps.oldest.outputs.python-path }}
 
   frontend:
     name: Frontend (unit, build, end-to-end)
