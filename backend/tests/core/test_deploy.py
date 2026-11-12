@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from imagebio.admin.keys import PREFIX as KEY_PREFIX
 from imagebio.api.metrics import TOKEN_VARIABLE
 from imagebio.api.security import PROXY_SECRET_HEADER, PROXY_SECRET_VARIABLE
 from imagebio.core.config import Settings
@@ -78,3 +79,22 @@ def test_every_proxy_presents_the_secret_and_replaces_the_identity() -> None:
         text = (DEPLOY / "systemd" / unit).read_text()
         assert "ExecStart=/opt/imagebio/venv/bin/imagebio " in text and "User=imagebio" in text
         assert "--config /etc/imagebio/imagebio.toml" in text
+
+
+def test_every_proxy_lets_a_personal_key_through_without_an_identity() -> None:
+    """A key (ADR 015) skips the password but not the proxy secret, and whatever identity the
+    client sent beside it is removed: imageBio, which refuses a key with an identity, never
+    has to choose."""
+    for name in ("compose/caddy/Caddyfile", "compose/caddy/Caddyfile.sso", "systemd/Caddyfile"):
+        text = (DEPLOY / name).read_text()
+        found = re.search(
+            r'@key header Authorization "Bearer (\w+)\*"\n\thandle @key \{(.*?)\n\t\}', text, re.S
+        )
+        assert found, name
+        assert found.group(1) == KEY_PREFIX, name
+        block = found.group(2)
+        assert "basic_auth" not in block and "oauth2-proxy" not in block, name
+        assert "header_up -X-Forwarded-User" in block and "header_up -X-Forwarded-Groups" in block, name
+        assert f"header_up {PROXY_SECRET_HEADER} {{${PROXY_SECRET_VARIABLE}}}" in block, name
+        # before the catch-all, after /metrics
+        assert text.index("handle /metrics") < found.start() < text.rindex("\thandle {"), name

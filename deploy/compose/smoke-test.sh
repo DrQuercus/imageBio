@@ -141,6 +141,39 @@ done
 [ "$acquired" -ge 3 ] || { echo "FAILED  the Live mode found $acquired exposure(s) of 3" >&2; exit 1; }
 echo "ok      the Live mode indexed the $acquired exposures of the session"
 
+echo "── personal keys ──"
+made_key=$(as_alice --request POST -H "Content-Type: application/json" \
+    --data '{"name": "smoke", "days": 1}' "$base/api/me/keys")
+key=$(printf '%s' "$made_key" | field 'd["key"]')
+key_id=$(printf '%s' "$made_key" | field 'd["id"]')
+by_key() { through -H "Authorization: Bearer $key" "$@"; }
+expect 200 "a personal key reads without a password" -H "Authorization: Bearer $key" "$base/api/me"
+seen=$(by_key "$base/api/live/watches/$watch" | field 'd["acquired"]')
+[ "$seen" -ge 3 ] || { echo "FAILED  the key does not see alice's watch: $seen" >&2; exit 1; }
+echo "ok      with the rights of its owner: alice's watch, $seen exposures"
+who=$(by_key -H "X-Forwarded-User: mallory" -H "X-Forwarded-Groups: admin" "$base/api/me" |
+    field '(d["user"], d["groups"], d["admin"])')
+[ "$who" = "('alice', [], False)" ] || { echo "FAILED  a forged identity beside a key: $who" >&2; exit 1; }
+echo "ok      identity headers sent beside a key are removed: still $who"
+expect 401 "a wrong key is refused" -H "Authorization: Bearer ibk_${key:4:20}wrong" "$base/api/me"
+expect 403 "a key only reads" --request POST -H "Authorization: Bearer $key" \
+    "$base/api/live/watches?path=microscope/session"
+expect 404 "monitoring is not served to a key either" -H "Authorization: Bearer $key" "$base/metrics"
+by_key "$base/api/ai/imagebio_ai.py" >"$work/imagebio_ai.py"
+grep -q "^def serve_mcp" "$work/imagebio_ai.py" ||
+    { echo "FAILED  the client for assistants is not served" >&2; exit 1; }
+echo "ok      the client for assistants is served to users"
+for address in $(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$(dc ps --quiet imagebio)"); do
+    got=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+        -H "Authorization: Bearer $key" "http://$address:8000/api/me" || true)
+    case $got in
+    401 | 000) echo "ok      around the proxy, a key alone gets $got from $address: no proxy secret" ;;
+    *) echo "FAILED  around the proxy, $address accepted a key without the proxy secret ($got)" >&2 && exit 1 ;;
+    esac
+done
+expect 200 "its owner revokes it" --user "alice:$password" --request DELETE "$base/api/me/keys/$key_id"
+expect 401 "a revoked key is refused at once" -H "Authorization: Bearer $key" "$base/api/me"
+
 echo "── backup, loss, restore ──"
 made=$(dc exec -T imagebio imagebio backup /backups --config "$config" --keep 14 | sed -n 's/^backup written to //p')
 [ -f "$work/backups/$(basename "$made")/manifest.json" ] || { echo "FAILED  no backup written" >&2; exit 1; }

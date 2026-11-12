@@ -16,6 +16,17 @@
 		reverse_proxy imagebio:8000
 	}
 
+	# a personal key (ADR 015): no password asked here, imageBio checks the key, which only
+	# reads; the identity headers a client may have sent are removed
+	@key header Authorization "Bearer ibk_*"
+	handle @key {
+		reverse_proxy imagebio:8000 {
+			header_up -X-Forwarded-User
+			header_up -X-Forwarded-Groups
+			header_up X-Imagebio-Proxy-Secret {$IMAGEBIO_PROXY_SECRET}
+		}
+	}
+
 	handle {
 		basic_auth {
 			import users
