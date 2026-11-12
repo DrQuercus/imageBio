@@ -69,7 +69,10 @@ class AuthenticationRequired(ImageBioError):
 def current_user(request: Request, settings: Settings) -> User:
     """The user of a request. Raises :class:`AuthenticationRequired` in proxy mode when the
     identity header is missing, malformed or sent more than once (an ambiguous identity is no
-    identity)."""
+    identity).
+
+    The groups are those the proxy gives, and those an administrator gave the user in the
+    settings page (``admin/store.py``); so is the administrator role, besides the file's."""
     if settings.auth_mode == "none":
         return LOCAL_USER
     names = request.headers.getlist(settings.user_header)
@@ -81,7 +84,12 @@ def current_user(request: Request, settings: Settings) -> User:
     groups = [g.strip() for g in (group_headers[0] if group_headers else "").split(",") if g.strip()]
     if len(groups) > _MAX_GROUPS:
         raise AuthenticationRequired("authentication required")
-    return User(names[0].strip(), frozenset(groups))
+    name, given = names[0].strip(), frozenset(groups)
+    store = getattr(request.app.state, "store", None)
+    if store is None:  # an application without a settings page: the file alone
+        return User(name, given, admin=name in settings.admins or bool(settings.admin_groups & given))
+    store.saw(name, given)
+    return User(name, given | store.groups_of(name), admin=store.is_admin(name, given))
 
 
 def host_name(header: str) -> str:

@@ -256,6 +256,21 @@ class LiveService:
                     if not (os.path.isfile(argv[0]) and os.access(argv[0], os.X_OK)):
                         raise ConfigError(f"processing: {argv[0]} is not there, or cannot be run")
 
+    def watch_users(self) -> list[str]:
+        """The users who watch, or watched, a session (none when the Live mode was never used:
+        the index is not created for this)."""
+        if self._closed or not (self._settings.live_state_dir / "live.sqlite").is_file():
+            return []
+        rows = self.index.connection().execute("SELECT DISTINCT user FROM watches").fetchall()
+        return [str(r[0]) for r in rows]
+
+    def reconfigure(self, settings: Settings) -> None:
+        """Use these settings from now on (an administrator changed the data roots, the
+        microscope, the Live settings or the alert channels). What is under way finishes with
+        the settings it started with; nothing here holds a lock."""
+        self._channels = {c.name: c for c in settings.alert_channels}
+        self._settings = settings
+
     def start(self) -> None:
         """Resume the watches that were active when the server stopped, if any were ever made."""
         if (self._settings.live_state_dir / "live.sqlite").is_file():

@@ -43,6 +43,13 @@ class NotFoundError(ImageBioError):
     code = "not_found"
 
 
+class ConflictError(ImageBioError):
+    """What the request was based on changed meanwhile (another administrator saved first)."""
+
+    status = 409
+    code = "conflict"
+
+
 class UnsupportedFormatError(ImageBioError):
     """No reader can open this file."""
 

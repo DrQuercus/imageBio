@@ -297,6 +297,61 @@ class ProcessingConfig:
                 )
 
 
+def parse_roots(raw: object) -> tuple[RootConfig, ...]:
+    """The ``[[roots]]`` of a configuration (the file, or the settings page)."""
+    if not isinstance(raw, list):
+        raise ConfigError("[[roots]] must be an array of tables")
+    roots = []
+    for i, r in enumerate(raw):
+        if (
+            not isinstance(r, Mapping)
+            or set(r) - {"name", "path", "groups", "kv", "cs_mm", "amplitude_contrast"}
+            or not {"name", "path"} <= set(r)
+            or not isinstance(r["name"], str)
+            or not isinstance(r["path"], str)
+            or not isinstance(r.get("groups", []), list)
+            or not all(isinstance(g, str) for g in r.get("groups", []))
+        ):
+            raise ConfigError(
+                f"[[roots]] #{i + 1}: expected keys name, path and optional groups, kv, cs_mm, "
+                "amplitude_contrast"
+            )
+        groups = frozenset(g.strip() for g in r.get("groups", []) if g.strip())
+        if any(not ROOT_NAME_RE.fullmatch(g) for g in groups):
+            raise ConfigError(f"root {r['name']!r}: group names are letters, digits, '_', '-', '.'")
+        roots.append(
+            RootConfig(
+                r["name"],
+                Path(r["path"]),
+                groups,
+                kv=r.get("kv"),
+                cs_mm=r.get("cs_mm"),
+                amplitude_contrast=r.get("amplitude_contrast"),
+            )
+        )
+    return tuple(roots)
+
+
+def parse_channels(raw: object) -> tuple[AlertChannel, ...]:
+    """The ``[[alerts.channels]]`` of a configuration (the file, or the settings page)."""
+    if not isinstance(raw, list):
+        raise ConfigError("[[alerts.channels]] must be an array of tables")
+    channels = []
+    for i, c in enumerate(raw):
+        if (
+            not isinstance(c, Mapping)
+            or set(c) - {"name", "kind", "url", "to"}
+            or not {"name", "kind"} <= set(c)
+            or not all(isinstance(c.get(k, ""), str) for k in ("name", "kind", "url"))
+        ):
+            raise ConfigError(f"[[alerts.channels]] #{i + 1}: expected keys name, kind and url or to")
+        to = c.get("to", [])
+        if not isinstance(to, list) or not all(isinstance(a, str) for a in to):
+            raise ConfigError(f"[[alerts.channels]] #{i + 1}: 'to' must be a list of addresses")
+        channels.append(AlertChannel(c["name"], cast(AlertKind, c["kind"]), c.get("url", ""), tuple(to)))
+    return tuple(channels)
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     roots: tuple[RootConfig, ...] = ()
@@ -310,6 +365,14 @@ class Settings:
     auth_mode: AuthMode = "none"
     user_header: str = "X-Forwarded-User"
     groups_header: str = "X-Forwarded-Groups"
+    #: Who administers this server (the settings page): user names, and groups the proxy
+    #: gives. Set in the file only: an administrator can make others administrators in the
+    #: interface, never remove these. In standalone mode the one local user is administrator.
+    admins: frozenset[str] = frozenset()
+    admin_groups: frozenset[str] = frozenset()
+    #: Where data roots added in the settings page may lie; empty: in the parent directories
+    #: of the roots of the file.
+    root_parents: tuple[Path, ...] = ()
     plane_cache_bytes: int = 2 * 2**30
     max_open_datasets: int = 32
     #: Largest plane (in pixels, after binning/cropping) served by one request.
@@ -353,6 +416,11 @@ class Settings:
             self, "allowed_hosts", frozenset(h.strip().lower() for h in self.allowed_hosts if h.strip())
         )
         object.__setattr__(self, "alert_channels", tuple(self.alert_channels))
+        object.__setattr__(self, "admins", frozenset(self.admins))
+        object.__setattr__(self, "admin_groups", frozenset(self.admin_groups))
+        object.__setattr__(self, "root_parents", tuple(Path(p) for p in self.root_parents))
+        if any(not p.is_absolute() for p in self.root_parents):
+            raise ConfigError("server.root_parents must hold absolute paths")
         names = [r.name for r in self.roots]
         if len(set(names)) != len(names):
             raise ConfigError("root names must be unique")
@@ -440,8 +508,10 @@ class Settings:
         }
         if unknown_top:
             raise ConfigError(f"unknown section(s) {sorted(unknown_top)}")
-        server = section("server", {"host", "port", "allowed_hosts", "trust_network", "metrics"})
-        auth = section("auth", {"mode", "user_header", "groups_header"})
+        server = section(
+            "server", {"host", "port", "allowed_hosts", "trust_network", "metrics", "root_parents"}
+        )
+        auth = section("auth", {"mode", "user_header", "groups_header", "admins", "admin_groups"})
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
         live = section(
             "live",
@@ -459,28 +529,7 @@ class Settings:
         )
         microscope = section("microscope", {"kv", "cs_mm", "amplitude_contrast"})
         alerts = section("alerts", {"smtp", "channels"})
-        raw_channels = alerts.get("channels", [])
-        if not isinstance(raw_channels, list):
-            raise ConfigError("[[alerts.channels]] must be an array of tables")
-        channels = []
-        for i, c in enumerate(raw_channels):
-            if (
-                not isinstance(c, Mapping)
-                or set(c) - {"name", "kind", "url", "to"}
-                or not {"name", "kind"} <= set(c)
-            ):
-                raise ConfigError(f"[[alerts.channels]] #{i + 1}: expected keys name, kind and url or to")
-            to = c.get("to", [])
-            if not isinstance(to, list):
-                raise ConfigError(f"[[alerts.channels]] #{i + 1}: 'to' must be a list of addresses")
-            channels.append(
-                AlertChannel(
-                    str(c["name"]),
-                    cast(AlertKind, str(c["kind"])),
-                    str(c.get("url", "")),
-                    tuple(map(str, to)),
-                )
-            )
+        channels = parse_channels(alerts.get("channels", []))
         smtp = None
         if "smtp" in alerts:
             raw = alerts["smtp"]
@@ -542,36 +591,23 @@ class Settings:
                 slots=slots,
                 work_dir=Path(str(declared["work_dir"])) if "work_dir" in declared else None,
             )
-        raw_roots = data.get("roots", [])
-        if not isinstance(raw_roots, list):
-            raise ConfigError("[[roots]] must be an array of tables")
-        roots = []
-        for i, r in enumerate(raw_roots):
-            if (
-                not isinstance(r, Mapping)
-                or set(r) - {"name", "path", "groups", "kv", "cs_mm", "amplitude_contrast"}
-                or not {"name", "path"} <= set(r)
-            ):
-                raise ConfigError(
-                    f"[[roots]] #{i + 1}: expected keys name, path and optional groups, kv, cs_mm, "
-                    "amplitude_contrast"
-                )
-            roots.append(
-                RootConfig(
-                    str(r["name"]),
-                    Path(str(r["path"])),
-                    frozenset(map(str, r.get("groups", []))),
-                    kv=r.get("kv"),
-                    cs_mm=r.get("cs_mm"),
-                    amplitude_contrast=r.get("amplitude_contrast"),
-                )
-            )
+        roots = parse_roots(data.get("roots", []))
+        names = server.get("root_parents", [])
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ConfigError("server.root_parents must be a list of directories")
+        for key in ("admins", "admin_groups"):
+            listed = auth.get(key, [])
+            if not isinstance(listed, list) or not all(isinstance(n, str) for n in listed):
+                raise ConfigError(f"auth.{key} must be a list of names")
         defaults = cls()
         return cls(
             roots=tuple(roots),
             host=str(server.get("host", defaults.host)),
             port=int(server.get("port", defaults.port)),
             allowed_hosts=frozenset(map(str, server.get("allowed_hosts", []))),
+            root_parents=tuple(Path(n) for n in names),
+            admins=frozenset(n.strip() for n in auth.get("admins", []) if n.strip()),
+            admin_groups=frozenset(n.strip() for n in auth.get("admin_groups", []) if n.strip()),
             trust_network=bool(server.get("trust_network", False)),
             metrics=bool(server.get("metrics", False)),
             auth_mode=cast(AuthMode, str(auth.get("mode", defaults.auth_mode))),

@@ -43,6 +43,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from imagebio import __version__
+from imagebio.admin.store import SettingsStore
+from imagebio.api.admin import register_admin_routes
 from imagebio.api.live import register_live_routes
 from imagebio.api.metrics import CONTENT_TYPE, TOKEN_VARIABLE, render_metrics
 from imagebio.api.security import (
@@ -184,9 +186,14 @@ def create_app(
 ) -> FastAPI:
     """The application. ``static_dir`` holds the built web interface (``None``: API only)."""
     reg = registry or default_registry()
-    roots = RootSet(settings.roots)
+    # what an administrator changed in the settings page lies over the file (admin/store.py)
+    store = SettingsStore(settings)
+    effective = store.effective
+    roots = RootSet(effective.roots)
     service = PlaneService(settings, reg)
-    live = LiveService(settings, reg, service)
+    live = LiveService(effective, reg, service)
+    store.on_change(lambda new: roots.replace(new.roots))
+    store.on_change(live.reconfigure)
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -208,6 +215,7 @@ def create_app(
     app.state.service = service
     app.state.live = live
     app.state.roots = roots
+    app.state.store = store
     metrics_token = os.environ.get(TOKEN_VARIABLE) or None
     proxy_secret = os.environ.get(PROXY_SECRET_VARIABLE) or None
     if proxy_secret is not None and settings.auth_mode == "proxy" and len(proxy_secret) < MIN_PROXY_SECRET:
@@ -314,9 +322,19 @@ def create_app(
 
     @app.get("/api/me")
     def me(request: Request) -> dict[str, Any]:
+        """Who the user is, their groups (from the proxy, and given in the settings page),
+        whether they administer the server, and the data roots they read."""
         _check_query(request, frozenset())
         user = current_user(request, settings)
-        return {"user": user.name, "groups": sorted(user.groups), "auth_mode": settings.auth_mode}
+        given = store.groups_of(user.name) if settings.auth_mode == "proxy" else frozenset()
+        return {
+            "user": user.name,
+            "groups": sorted(user.groups),
+            "groups_given": sorted(given),
+            "admin": user.admin,
+            "auth_mode": settings.auth_mode,
+            "roots": [{"name": r.name, "available": roots.available(r)} for r in roots.visible_roots(user)],
+        }
 
     @app.get("/api/fs/roots")
     def fs_roots(request: Request) -> dict[str, Any]:
@@ -510,9 +528,9 @@ def create_app(
         options = _check_query(request, _SPECTRUM_PARAMS - {"tile"} | {"apix", "kv", "cs", "amp"})
         resolved = file_of(request, path)
         scope = {
-            "kv": settings.kv if kv is None else kv,
-            "cs_mm": settings.cs_mm if cs is None else cs,
-            "amplitude": settings.amplitude_contrast if amp is None else amp,
+            "kv": store.effective.kv if kv is None else kv,
+            "cs_mm": store.effective.cs_mm if cs is None else cs,
+            "amplitude": store.effective.amplitude_contrast if amp is None else amp,
         }
         proc = Processing(t_end=t_end, gain=gain, apix=apix)
         found, file_id = service.ctf(resolved.real, t, c, z, options=options, proc=proc, **scope)
@@ -664,6 +682,7 @@ def create_app(
         )
 
     register_live_routes(app, settings, roots, live)
+    register_admin_routes(app, settings, store, live)
 
     # ── web interface ────────────────────────────────────────────────────────
     index = static_dir / "index.html" if static_dir else None

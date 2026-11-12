@@ -182,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     import uvicorn
 
-    roots = ", ".join(r.name for r in settings.roots) or "none"
+    roots = ", ".join(r.name for r in app.state.store.effective.roots) or "none"
     auth: str = settings.auth_mode
     if auth == "proxy":  # whether anybody who reaches the port is believed, or only the proxy
         auth += " with" if os.environ.get(PROXY_SECRET_VARIABLE) else " without"

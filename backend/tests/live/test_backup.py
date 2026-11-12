@@ -239,3 +239,32 @@ def test_backup_and_restore_from_the_command_line(
     assert "restored, 1 watch(es): start the server" in capsys.readouterr().out
     assert cli.main(["restore", str(tmp_path / "data"), "--config", str(config)]) == 2
     assert "no manifest" in capsys.readouterr().err
+
+
+def test_the_settings_changed_in_the_settings_page_are_backed_up_and_restored(tmp_path: Path) -> None:
+    from imagebio.admin.store import FILE_NAME, LOG_NAME, SettingsStore
+
+    state = tmp_path / "state"
+    settings = Settings(state_dir=state, admins=frozenset({"alice"}))
+    store = SettingsStore(settings)
+    store.set_account("bob", ["cryoem"], False, by="alice", version=0)
+    made = backup(settings, tmp_path / "backups")
+    manifest = json.loads((made / MANIFEST_NAME).read_text())
+    assert manifest["settings"] is True and manifest["index"] is None  # the Live mode was never used
+    assert json.loads((made / FILE_NAME).read_text())["accounts"]["bob"]["groups"] == ["cryoem"]
+    assert (made / LOG_NAME).is_file()
+
+    # changed afterwards; restoring needs --force, keeps the current ones aside, and says so
+    SettingsStore(settings).set_account("bob", ["lm"], False, by="alice", version=1)
+    with pytest.raises(ConfigError, match="--force"):
+        restore(settings, made)
+    restore(settings, made, force=True)
+    assert SettingsStore(settings).groups_of("bob") == {"cryoem"}
+    assert [p.name for p in state.glob(f"{FILE_NAME}.before-restore-*")]
+    log = SettingsStore(settings).log()
+    assert log[0]["by"] == "restore" and len(log) == 3  # the log is not rewound
+
+    # a backup with neither an index nor settings has nothing to restore
+    empty = backup(Settings(state_dir=tmp_path / "nothing"), tmp_path / "backups2")
+    with pytest.raises(ConfigError, match="nothing to restore"):
+        restore(settings, empty, force=True)

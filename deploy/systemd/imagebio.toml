@@ -13,6 +13,11 @@ mode = "proxy"
 # settings belong to that name, and changing the header later orphans them.
 user_header = "X-Forwarded-User"
 groups_header = "X-Forwarded-Groups"
+# Who administers the server (the settings page: accounts and their groups, data roots,
+# microscope, Live settings, alert channels). Names given by the proxy; an administrator can
+# make others administrators in the page, never remove these. Groups work too (single sign-on).
+admins = ["alice"]
+# admin_groups = ["imagebio-admin"]
 
 [cache]
 plane_bytes = "4GiB"   # decoded planes kept in memory

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any, Final
 
 from imagebio import __version__
+from imagebio.admin.store import FILE_NAME as SETTINGS_NAME
+from imagebio.admin.store import LOG_NAME as SETTINGS_LOG_NAME
 from imagebio.core.config import ConfigError, Settings
 from imagebio.live.index import SCHEMA_VERSION, hold_state_dir
 
@@ -55,7 +58,8 @@ def _checked(path: Path) -> tuple[int, int]:
 def backup(settings: Settings, destination: Path, config: Path | None = None) -> Path:
     """Write a backup into a new, dated directory under ``destination`` and return it. Holds a
     consistent copy of the Live index (if the Live mode was ever used), the configuration file
-    ``config`` (if given) and a manifest."""
+    ``config`` (if given), the settings changed in the settings page and their log (if any),
+    and a manifest."""
     stamp = _now()
     target = destination / stamp
     try:
@@ -63,7 +67,13 @@ def backup(settings: Settings, destination: Path, config: Path | None = None) ->
         target.mkdir(mode=0o700)  # the configuration may hold the addresses of alert channels
     except FileExistsError:
         raise ConfigError(f"a backup named {stamp} already exists there: try again in a second") from None
-    manifest: dict[str, Any] = {"imagebio": __version__, "created": stamp, "index": None, "config": False}
+    manifest: dict[str, Any] = {
+        "imagebio": __version__,
+        "created": stamp,
+        "index": None,
+        "config": False,
+        "settings": False,
+    }
     source = settings.live_state_dir / INDEX_NAME
     if source.is_file():
         # opened as the server opens it: a write-ahead log left by a server that was killed
@@ -87,6 +97,11 @@ def backup(settings: Settings, destination: Path, config: Path | None = None) ->
     if config is not None:
         shutil.copyfile(config, target / _CONFIG_NAME)
         manifest["config"] = True
+    # the settings page writes whole files, renamed into place: a copy is never half of one
+    for name in (SETTINGS_NAME, SETTINGS_LOG_NAME):
+        if (settings.live_state_dir / name).is_file():
+            shutil.copyfile(settings.live_state_dir / name, target / name)
+            manifest["settings"] = manifest["settings"] or name == SETTINGS_NAME
     (target / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
     return target
 
@@ -121,9 +136,10 @@ def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[st
         manifest = json.loads((source / MANIFEST_NAME).read_text())
     except (OSError, ValueError):
         raise ConfigError("not a backup of imageBio: no manifest in this directory") from None
-    if not isinstance(manifest, dict) or manifest.get("index") is None:
-        raise ConfigError("this backup holds no Live index: there is nothing to restore")
-    version, _ = _checked(source / INDEX_NAME)
+    if not isinstance(manifest, dict) or (manifest.get("index") is None and not manifest.get("settings")):
+        raise ConfigError("this backup holds no Live index and no settings: there is nothing to restore")
+    has_index = manifest.get("index") is not None
+    version = _checked(source / INDEX_NAME)[0] if has_index else 0
     if version > SCHEMA_VERSION:
         raise ConfigError(
             f"this backup was made by a newer imageBio (index version {version}, this one reads "
@@ -136,8 +152,14 @@ def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[st
     except BlockingIOError:
         raise ConfigError("the Live index is in use: stop the server before restoring") from None
     try:
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        settings_file = state / SETTINGS_NAME
+        if manifest.get("settings") and settings_file.exists() and not force:
+            raise ConfigError(
+                "there are already settings here: use --force to replace them (they are kept aside)"
+            )
         current = state / INDEX_NAME
-        if current.exists():
+        if has_index and current.exists():
             if not force:
                 raise ConfigError(
                     "there is already a Live index here: use --force to replace it (it is kept aside)"
@@ -150,16 +172,30 @@ def restore(settings: Settings, source: Path, *, force: bool = False) -> dict[st
                 contextlib.closing(sqlite3.connect(current, timeout=5)) as old,
             ):
                 old.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            aside = f"{INDEX_NAME}.before-restore-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}"
+            aside = f"{INDEX_NAME}.before-restore-{stamp}"
             current.rename(state / aside)
             for tail in ("-wal", "-shm"):
                 with contextlib.suppress(FileNotFoundError):
                     (state / f"{INDEX_NAME}{tail}").rename(state / f"{aside}{tail}")
-        with (
-            contextlib.closing(sqlite3.connect(f"file:{source / INDEX_NAME}?mode=ro", uri=True)) as saved,
-            contextlib.closing(sqlite3.connect(current)) as fresh,
-        ):
-            saved.backup(fresh)
+        if has_index:
+            with (
+                contextlib.closing(sqlite3.connect(f"file:{source / INDEX_NAME}?mode=ro", uri=True)) as saved,
+                contextlib.closing(sqlite3.connect(current)) as fresh,
+            ):
+                saved.backup(fresh)
+        if manifest.get("settings"):
+            if settings_file.exists():
+                settings_file.rename(state / f"{SETTINGS_NAME}.before-restore-{stamp}")
+            staging = state / f".{SETTINGS_NAME}.part"
+            shutil.copyfile(source / SETTINGS_NAME, staging)
+            os.chmod(staging, 0o600)
+            os.replace(staging, settings_file)
+            # the log tells what happened; it is not rewound, it says this happened too
+            fd = os.open(state / SETTINGS_LOG_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as log:
+                what = f"réglages de la sauvegarde {manifest['created']}"
+                entry = {"at": time.time(), "by": "restore", "what": what}
+                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
     finally:
         if held is not None:
             held.close()

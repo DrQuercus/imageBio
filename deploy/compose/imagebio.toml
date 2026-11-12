@@ -16,6 +16,11 @@ mode = "proxy"
 #                                              X-Forwarded-User is the identifier of the account
 #                                              at the identity provider, often opaque
 user_header = "X-Forwarded-User"
+# Who administers the server (the settings page: accounts and their groups, data roots,
+# microscope, Live settings, alert channels). Names given by the proxy; an administrator can
+# make others administrators in the page, never remove these. Groups work too (single sign-on).
+admins = ["alice"]
+# admin_groups = ["imagebio-admin"]
 groups_header = "X-Forwarded-Groups"
 
 [cache]

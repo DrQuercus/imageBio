@@ -47,14 +47,16 @@ EntryKind = Literal["dir", "file", "broken", "other"]
 
 @dataclass(frozen=True, slots=True)
 class User:
-    """Who is asking. ``all_roots`` is the standalone mode: one local user who sees every root."""
+    """Who is asking. ``all_roots`` is the standalone mode: one local user who sees every root.
+    ``admin``: may open the settings of the server (``admin/``)."""
 
     name: str
     groups: frozenset[str] = frozenset()
     all_roots: bool = False
+    admin: bool = False
 
 
-LOCAL_USER: Final = User("local", frozenset(), all_roots=True)
+LOCAL_USER: Final = User("local", frozenset(), all_roots=True, admin=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,20 +130,31 @@ def _natural_key(entry: DirEntry) -> tuple[Any, ...]:
 
 
 class RootSet:
-    """The configured data roots. The real path of each root is resolved once, at start-up."""
+    """The configured data roots. The real path of each root is resolved when the roots are
+    set: at start-up, and when an administrator changes them (:meth:`replace`)."""
 
     def __init__(self, roots: Sequence[RootConfig]) -> None:
         self._roots: dict[str, RootConfig] = {}
         self._real: dict[str, str | None] = {}
+        self.replace(roots)
+
+    def replace(self, roots: Sequence[RootConfig]) -> None:
+        """Serve these roots from now on. A request under way may still see the previous ones,
+        never a mixture that grants what neither would: a root missing from either table is
+        unavailable."""
+        table: dict[str, RootConfig] = {}
+        real_paths: dict[str, str | None] = {}
         for root in roots:
-            if root.name in self._roots:
+            if root.name in table:
                 raise ValueError(f"duplicate root name {root.name!r}")
-            self._roots[root.name] = root
+            table[root.name] = root
             try:
                 real = os.path.realpath(root.path, strict=True)
-                self._real[root.name] = real if os.path.isdir(real) else None
+                real_paths[root.name] = real if os.path.isdir(real) else None
             except OSError:
-                self._real[root.name] = None  # missing or unreadable: kept, reported as unavailable
+                real_paths[root.name] = None  # missing or unreadable: kept, reported as unavailable
+        self._real = real_paths
+        self._roots = table
 
     # ── visibility ───────────────────────────────────────────────────────────
     def _visible(self, root: RootConfig, user: User) -> bool:
@@ -154,7 +167,7 @@ class RootSet:
         return self._real.get(root.name) is not None
 
     def _allowed(self, user: User) -> list[str]:
-        return [real for r in self.visible_roots(user) if (real := self._real[r.name]) is not None]
+        return [real for r in self.visible_roots(user) if (real := self._real.get(r.name)) is not None]
 
     # ── resolution ───────────────────────────────────────────────────────────
     def _parse(self, logical: object, user: User) -> tuple[RootConfig, list[str]]:
@@ -179,7 +192,7 @@ class RootSet:
         """Resolve a logical path. Raises :class:`AccessDeniedError` or :class:`NotFoundError`."""
         root, segments = self._parse(logical, user)
         normalised = "/".join([root.name, *segments])
-        root_real = self._real[root.name]
+        root_real = self._real.get(root.name)
         if root_real is None:
             raise NotFoundError(f"data root {root.name!r} is not available")
         # Non-strict realpath resolves every symlink of the existing part and appends the rest

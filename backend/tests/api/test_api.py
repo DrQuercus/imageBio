@@ -47,9 +47,24 @@ def proxied(tree: Tree):
 
 def test_health_and_identity(local, proxied):
     assert local.get("/healthz").json()["status"] == "ok"
-    assert local.get("/api/me").json() == {"user": "local", "groups": [], "auth_mode": "none"}
+    roots = [{"name": n, "available": True} for n in ("cryo", "light", "public")]
+    assert local.get("/api/me").json() == {
+        "user": "local",
+        "groups": [],
+        "groups_given": [],
+        "admin": True,  # the one user of the standalone mode administers it
+        "auth_mode": "none",
+        "roots": roots,
+    }
     me = proxied.get("/api/me", headers=ALICE).json()
-    assert me == {"user": "alice", "groups": ["cryoem", "staff"], "auth_mode": "proxy"}
+    assert me == {
+        "user": "alice",
+        "groups": ["cryoem", "staff"],
+        "groups_given": [],
+        "admin": False,
+        "auth_mode": "proxy",
+        "roots": [r for r in roots if r["name"] != "light"],  # light is for the group lm
+    }
 
 
 @pytest.mark.parametrize("encoding", ["identity", "gzip", "zstd", "gzip, zstd;q=0.5", "br"])
