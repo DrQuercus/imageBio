@@ -60,6 +60,19 @@ Sur chaque tuile : le défocus estimé, jusqu'où vont les anneaux, la glace, et
 
 « Arrêter » garde l'index de la session ; « Oublier » l'efface.
 
+## Paramètres
+
+Le bouton **Paramètres**, en haut, montre votre compte : votre nom, vos groupes et les dossiers de données que vous pouvez lire. Le mot de passe se change auprès du serveur d'accès du laboratoire, pas dans imageBio.
+
+Les administrateurs y trouvent aussi :
+- **Comptes** : donner à un compte des groupes (ils ouvrent les dossiers de ces groupes) et le rôle d'administrateur. Le nom est l'identifiant de connexion ; la personne n'a pas besoin d'être déjà venue.
+- **Dossiers de données** : ajouter, retirer ou restreindre un dossier, et y indiquer le microscope s'il n'est pas celui du serveur.
+- **Microscope et Live** : valeurs par défaut (tension, Cs, contraste d'amplitude), rapport après un silence, mesures faites sur chaque image.
+- **Alertes** : les canaux (ntfy, webhook, courriel) que les utilisateurs choisissent par leur nom.
+- **Configuration** (lecture seule) et **Journal** : qui a changé quoi, et quand.
+
+Tout changement s'applique tout de suite. « Revenir au fichier » oublie ce qui a été changé dans une section et reprend le fichier de configuration du serveur. Si un autre administrateur a enregistré entre-temps, votre changement est refusé et la page montre le sien : refaites-le si besoin.
+
 ## Limites à connaître
 
 - Les mesures du Live (défocus, glace, dérive) sont des indicateurs de suivi, calculés vite sur chaque image. Elles ne remplacent pas le traitement.

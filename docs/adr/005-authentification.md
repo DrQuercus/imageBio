@@ -11,6 +11,8 @@
 - L'en-tête `Host` est filtré : noms de bouclage, plus les noms publics déclarés dans `server.allowed_hosts`.
 - Les droits de lecture se règlent par racine de données, avec une liste de groupes (ADR 003).
 
+> **Complément (lot D) :** les mots de passe restent au proxy, mais un administrateur peut donner des groupes et le rôle d'administrateur à un nom de compte dans imageBio ([ADR 014](014-page-de-parametres.md)).
+
 > **Complément (M8) :** « le proxy est le seul client possible » ne tient pas face aux comptes locaux de la machine. L'[ADR 010](010-exploitation.md) ajoute un secret partagé entre le proxy et le serveur.
 
 ## Conséquences

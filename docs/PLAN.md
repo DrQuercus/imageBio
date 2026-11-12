@@ -607,8 +607,8 @@ Limites, à connaître avant le pilote :
 ### Lots demandés le 12 novembre 2026
 
 Demande : une page de paramètres (comptes, réglages), la taille de pixel et les filtres plus en évidence dans la visionneuse (curseurs, réactivité de cryoSPARC), les atlas, un rapport de qualité de la collecte, et de quoi brancher une IA locale. Découpage proposé : A (visionneuse : taille de pixel en évidence, curseurs passe-bas et passe-haut recalculés au vol sur la vue réduite, outils), B (rapport), C (atlas, qui attend un vrai dossier de session EPU), D (page de paramètres et comptes), E (IA locale : API documentée, clés personnelles en lecture seule, serveur MCP, commandes, skill). Décisions encore ouvertes :
-- comptes : gérés par imageBio (comptes locaux, rôle administrateur) ou laissés au proxy et à l'authentification unique ;
-- réglages du serveur modifiables par l'interface (recommandé : tout sauf les programmes externes et les secrets) ou en lecture seule ;
+- ~~comptes~~ : décidé le 12 novembre, groupes et rôle d'administrateur dans imageBio, mots de passe au proxy (lot D) ;
+- ~~réglages du serveur~~ : décidé le 12 novembre, modifiables par un administrateur sauf les programmes externes et les secrets (lot D) ;
 - dépôt automatique des rapports dans la bibliothèque des collectes (un dossier où le serveur écrit).
 
 **Lot B, rapport de qualité de la collecte (12 novembre 2026) : fait.** Décisions : [ADR 012](adr/012-rapport-de-collecte.md) ; contenu et schéma : [`rapport-live.md`](rapport-live.md).
@@ -625,6 +625,13 @@ Demande : une page de paramètres (comptes, réglages), la taille de pixel et le
 - **Filtres réactifs.** Un filtre déplacé coûtait une transformée du plan entier : 1,1 s sur une image 4k, 1,5 s sur un K3. La vue d'ensemble est maintenant réduite dans Fourier (une fois par plan), puis filtrée : 35 ms au bin 4. Les deux ordres donnent la même image hors des bords (écart sous 1,5 % du contraste, mesuré et vérifié par un test contre une référence en numpy) ; la moyenne par blocs, elle, replierait le bruit sous la coupure et n'est jamais filtrée. Le curseur tenu ne demande que la vue d'ensemble ; le détail en pleine résolution vient au relâchement.
 - **Curseurs** passe-bas et passe-haut sur une échelle logarithmique (de Nyquist à 200 Å, de 50 à 5000 Å), préréglages, valeur libre ; profil **Doux** (gaussien) ou **Net** (Butterworth d'ordre 4 : plat jusqu'à la coupure puis raide) ; `L` coupe et rallume les filtres. La comparaison avec cryoSPARC n'a pas été faite : son profil de filtre n'est pas connu ici, le profil net est une proposition à juger sur de vraies images.
 - **Outils** : image suivante et précédente du dossier (`N`, `B`, réglages et vue gardés) ; cercle d'un diamètre en Å autour du curseur (`C`) ; longueur de la règle en grand et profil d'intensité le long d'elle, copiable pour un tableur.
+
+**Lot D, page de paramètres et comptes (12 novembre 2026) : fait.** Décision : [ADR 014](adr/014-page-de-parametres.md).
+- Un troisième mode, « Paramètres ». Chacun y voit son compte : nom, rôle, groupes, dossiers lisibles.
+- Les administrateurs (nommés dans le fichier : `[auth] admins`, `admin_groups`) donnent aux comptes des groupes, qui s'ajoutent à ceux du proxy (les comptes locaux de Caddy peuvent enfin être restreints à des dossiers), et le rôle d'administrateur.
+- Ils changent les dossiers de données, le microscope, une partie du Live et les canaux d'alerte. Ces changements vont dans `<état>/settings.json`, qui remplace le fichier de configuration section par section, et s'appliquent sans redémarrer. Ils sont vérifiés comme le fichier, versionnés (deux administrateurs ne s'écrasent pas), gardés dans un historique, notés dans un journal, et sauvegardés avec l'index.
+- Jamais par la page : les secrets, les programmes externes, ce qui décide à qui le serveur fait confiance, les caches. La page les montre en lecture seule.
+- Pas essayé : un vrai proxy avec de vrais comptes et un vrai fournisseur d'identité.
 
 ### Plus tard
 
@@ -732,7 +739,7 @@ imageBio/
 3. Une branche et une PR par jalon, avec revue (ultracode) avant fusion.
 4. Mettre à jour ce plan à la fin de chaque jalon : ce qui est fait, ce qui a changé, les décisions prises (dans `docs/adr/`).
 
-**Où en est le projet (12 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés), ainsi que les lots B (rapport de collecte) et A (visionneuse : taille de pixel, filtres réactifs, outils) des demandes du 12 novembre ; les lots C, D et E restent à faire. Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
+**Où en est le projet (12 novembre 2026).** Tous les jalons du périmètre retenu sont écrits et testés sur des données générées : M0 à M4, M7 et M8 (M5 et M6 sont retirés), ainsi que les lots B (rapport de collecte, avec l'atlas et les carrés), A (visionneuse : taille de pixel, filtres réactifs, outils) et D (page de paramètres et comptes) des demandes du 12 novembre ; les lots C (placer les carrés sur l'atlas, qui attend une vraie session EPU) et E (IA locale) restent à faire. Rien n'a encore tourné sur de vraies données ni sur le serveur du labo. La suite ne s'écrit plus, elle s'essaie :
 
 1. **Essai sur une vraie session** : dossier EPU sur le NAS (NFS ou SMB), un film du Falcon avec sa référence de gain, des fichiers de pointés, un canal d'alerte réel. C'est ce qui permet d'éteindre l'ancien serveur Node.
 2. **Installation sur le serveur du labo** avec la [fiche d'exploitation](exploitation.md), choix entre comptes locaux et authentification unique, puis le pilote de deux semaines.

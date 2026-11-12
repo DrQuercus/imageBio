@@ -17,3 +17,4 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [011](011-programmes-externes.md) | Programmes externes (MotionCor3, CTFFIND) : listes d'arguments déclarées, isolement, tour de rôle | Acceptée, jamais essayée avec les vrais programmes |
 | [012](012-rapport-de-collecte.md) | Rapport de qualité d'une collecte (HTML autonome, JSON, CSV) et microscope d'une session | Acceptée |
 | [013](013-filtrer-la-vue-reduite.md) | Une vue réduite filtrée est réduite dans Fourier, puis filtrée ; profil de filtre net | Acceptée |
+| [014](014-page-de-parametres.md) | Page de paramètres : groupes et rôle d'administrateur gérés par imageBio, réglages modifiables par un administrateur | Acceptée |

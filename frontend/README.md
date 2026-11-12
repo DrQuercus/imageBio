@@ -61,6 +61,10 @@ Le bouton **Live** de la barre du haut ouvre le suivi d'une session d'acquisitio
 
 La page demande toutes les trois secondes ce qui a changé depuis le dernier changement qu'elle connaît.
 
+## Paramètres
+
+Le bouton « Paramètres » (adresse `#settings`) montre son compte à chacun : nom, rôle, groupes (du serveur d'accès et donnés par un administrateur), dossiers lisibles. Un administrateur y trouve aussi les onglets Comptes, Dossiers de données, Microscope et Live, Alertes, Configuration (lecture seule) et Journal ([ADR 014](../docs/adr/014-page-de-parametres.md)). Les formulaires sont vérifiés par `settings/forms.ts` avant l'envoi ; le serveur vérifie de nouveau. Chaque section dit si elle vient du fichier de configuration ou a été changée ici ; « Revenir au fichier » l'oublie. Un enregistrement refusé parce qu'un autre administrateur a enregistré entre-temps recharge la page avec ses réglages.
+
 ## Mode Cryo
 
 Le panneau **Cryo** apparaît pour toute image qui n'est pas en couleurs. Les calculs sont faits par le serveur, à pleine résolution, avant la découpe et le binning (sauf une vue réduite filtrée, réduite dans Fourier puis filtrée : [ADR 013](../docs/adr/013-filtrer-la-vue-reduite.md)) ; les réglages se conservent d'un fichier au suivant.
@@ -114,7 +118,10 @@ src/
   live/stats.ts, Charts.tsx    statistiques d'une session (fonctions pures), graphiques en SVG
   live/ReportPanel.tsx, MicroscopePanel.tsx  rapports de qualité, microscope de la session
   live/ProcessingPanel.tsx    programmes du serveur : la case de la session, le décompte
-  Root.tsx                    choix du mode d'après l'adresse (visionneuse ou Live)
+  Root.tsx                    choix du mode d'après l'adresse (visionneuse, Live ou paramètres)
+  settings/forms.ts           formulaires de la page de paramètres (fonctions pures)
+  settings/SettingsView.tsx   page de paramètres : mon compte ; pour les administrateurs, comptes,
+                              dossiers, microscope et Live, alertes, configuration, journal
   components/                 navigateur de fichiers, contraste, pile, panneau Cryo, informations,
                               taille de pixel (ScalePanel), règle, profil et cercle (MeasurePanel)
   state/url.ts                état de la vue dans l'adresse
@@ -141,6 +148,7 @@ Les tests de bout en bout lancent le vrai backend sur des fichiers générés pa
 
 - `e2e/viewer.spec.ts` vérifie les critères du jalon M2 : valeur exacte sous le curseur, aucun plan redemandé quand on règle le contraste, une seule requête de plan en vol pendant la lecture, affichage des images avec NaN et pixel chaud, lien qui reproduit la vue, nom de fichier hostile affiché comme du texte ; l'export vers Fiji relu comme un TIFF calibré ; un lien qui arrive pendant que la page s'apprête à réécrire son adresse, et qui ne doit pas être perdu ; et la galerie d'une pile de moyennes de classes, triée par population d'après le fichier de RELION ; l'image suivante et précédente d'un dossier avec les réglages gardés, le cercle du curseur dessiné à son diamètre, et le profil le long de la règle copié pour un tableur.
 - `e2e/live.spec.ts` vérifie le mode Live sur une session de 120 expositions écrite par le microscope simulé : affichage immédiat, tuiles limitées à ce qui est visible, image écrite en deux moitiés qui reste « en cours » entre les deux, aller-retour avec la visionneuse, démarrage, arrêt et oubli d'une surveillance, image de glace cristalline déposée dans la session et marquée comme telle, réglage d'une alerte et message d'essai reçu par un récepteur local ; étalonnage de la glace en nanomètres, marques, tri, filtre et vue des carrés ; seuils d'acceptation (tuile rejetée, décompte, filtre) et carte des acquisitions ; graphiques, rapport de qualité (écrit, lu, téléchargé, réglage gardé ; l'atlas trouvé dans la session et la vue de chaque carré dans la page, un autre atlas choisi dans l'explorateur puis retiré) et microscope de la session ; programmes du serveur (un remplaçant de CTFFIND déclaré par le serveur de test : la case, le résultat sur la tuile d'une image qui arrive, le choix gardé par le serveur).
+- `e2e/settings.spec.ts` vérifie la page de paramètres (serveur de test en mode autonome : son utilisateur est administrateur) : son compte, atteint depuis la visionneuse et le Live ; un dossier hors des parents permis refusé sans chemin dans le message, un dossier voisin ajouté, servi aussitôt, gardé, puis le retour au fichier ; microscope, Live, canal d'alerte (dont les utilisateurs ne voient que le nom), compte ajouté puis retiré, journal sans adresse ; et un changement refusé parce qu'un autre administrateur a enregistré entre-temps.
 - `e2e/cryo.spec.ts` vérifie le mode Cryo sur des fichiers dont la réponse est connue : un réseau de période 10 Å (passe-bas, pic du spectre sur l'anneau de 10 Å), une pile en escalier (moyenne des frames 3 à 7), un film EER (regroupement des fractions) et un détecteur synthétique dont le gain est enregistré tête en bas (détection et correction) ; des pointés dessinés au pixel près (fichier de boîtes, fichier d'un jeu entier, retournement, diamètre, seuil de score) ; et la réduction dans Fourier demandée pour la vue d'ensemble comme pour le détail ; le profil net et la touche `L` ; un curseur de filtre tenu qui ne demande que la vue d'ensemble, puis le détail au relâchement ; la taille de pixel saisie qui remplace celle de l'en-tête (filtre, lien, export) puis la rétablit ; le défocus lu sur une image synthétique de CTF connu, et aucune valeur annoncée sur une image sans anneaux.
 
 La page interdit `eval` et les scripts en ligne (Content-Security-Policy). Dans un test Playwright, passez une fonction à `page.waitForFunction`, pas une chaîne.

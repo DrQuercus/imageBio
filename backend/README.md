@@ -94,7 +94,11 @@ Les routes sont en `GET`, sauf le démarrage et l'arrêt d'une surveillance. Les
 | Route | Réponse |
 |---|---|
 | `/healthz` | État du service (sans authentification) |
-| `/api/me` | Utilisateur, groupes, mode d'authentification |
+| `/api/me` | Utilisateur, groupes (du proxy, et donnés dans la page de paramètres : `groups_given`), rôle d'administrateur (`admin`), dossiers lisibles, mode d'authentification |
+| `/api/admin/settings` | Pour les administrateurs : réglages en vigueur et leur provenance (fichier ou page), dossiers parents permis, comptes, configuration en lecture seule (secrets : seulement s'ils sont réglés), version |
+| `PUT /api/admin/settings/{roots,microscope,live,alerts}` | Remplacer une section : corps JSON `{"version": n, "value": …}` ; 409 si la version est dépassée. `DELETE …?version=` : revenir au fichier |
+| `PUT /api/admin/accounts` | Groupes et rôle d'un compte : `{"version", "name", "groups", "admin"}` ; `DELETE /api/admin/accounts?name=&version=` les retire |
+| `GET /api/admin/log` | Les 200 derniers changements : quand, qui, quoi (sans adresse ni chemin) |
 | `/api/fs/roots` | Racines visibles par l'utilisateur |
 | `/api/fs/list?path=` | Contenu d'un dossier (`offset`, `limit`, `hidden`) |
 | `/api/datasets/info?path=` | Description du fichier : dimensions, type, calibration et sa provenance, métadonnées, avertissements |
@@ -179,7 +183,8 @@ imagebio restore /var/backups/imagebio/DATE --config imagebio.toml       # serve
 
 - **Sauvegarde** : un dossier daté avec l'index du Live (copie cohérente, sans les vignettes), la configuration et un manifeste. **Restauration** : refusée tant qu'un serveur tient le dossier d'état ; l'index remplacé est mis de côté, pas détruit. Les migrations de l'index ne vont que vers l'avant : revenir à une version précédente, c'est restaurer la sauvegarde prise avant la mise à jour.
 - **`/metrics`** (format Prometheus, `[server] metrics = true`) : caches, suivis par état, et par dossier suivi l'âge et la durée du dernier passage, son échec, les fichiers incomplets, le nombre d'expositions ; taille de l'index. Ni chemin ni nom d'utilisateur. Servi aux clients de la machine elle-même, ou au porteur du jeton `IMAGEBIO_METRICS_TOKEN` (`Authorization: Bearer …`).
-- Au démarrage, un index écrit par une version plus récente, ou illisible, arrête le serveur avec un message d'une ligne.
+- Au démarrage, un index écrit par une version plus récente, ou illisible, arrête le serveur avec un message d'une ligne ; un `settings.json` illisible ou invalide aussi.
+- **Page de paramètres** ([ADR 014](../docs/adr/014-page-de-parametres.md)). Les administrateurs sont nommés dans le fichier (`[auth] admins = [...]`, `admin_groups = [...]`) ; en mode autonome, l'utilisateur local l'est. Ils donnent aux comptes des groupes (en plus de ceux du proxy) et le rôle, et changent les dossiers de données, le microscope, une partie du Live et les canaux d'alerte. Écrit dans `<état>/settings.json` (droits 0600, historique dans `settings-history/`, journal `settings-log.jsonl`), appliqué sans redémarrer. Un dossier ajouté ainsi doit se trouver sous `[server] root_parents` (par défaut : les dossiers parents des racines du fichier) et ne pas contenir le dossier d'état. La sauvegarde contient ces réglages ; la restauration les remet avec `--force`.
 
 ## Traitements du mode Cryo
 
@@ -249,8 +254,11 @@ src/imagebio/
   tools/             programmes externes : runner.py (lancement sans shell, échéance, groupe de processus),
                      templates.py (jokers), parsers.py (résultats de CTFFIND et d'un alignement),
                      pipeline.py (alignement puis CTF sur une exposition)
-  api/               app.py (FastAPI), live.py (routes du Live), security.py (identité, Host, secret
-                     du proxy, requêtes venues d'un autre site), metrics.py (/metrics), cli.py
+  admin/store.py     page de paramètres : <état>/settings.json (sections qui remplacent celles du
+                     fichier, comptes : groupes et rôle), vérifié, versionné, historique, journal
+  api/               app.py (FastAPI), live.py (routes du Live), admin.py (page de paramètres),
+                     security.py (identité, groupes, rôle, Host, secret du proxy, requêtes venues d'un
+                     autre site), metrics.py (/metrics), cli.py
 tests/               un dossier par module ; fixtures/ génère les fichiers de test
 ```
 
