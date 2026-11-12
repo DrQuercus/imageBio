@@ -37,6 +37,18 @@ Le rapport commence par ce que ses chiffres ne disent pas, avec les nombres d'im
 
 La tension, le Cs et le contraste d'amplitude se règlent pour un dossier de données (`[[roots]]`) et pour une session (le dossier surveillé). L'ordre : le fichier d'acquisition, la session, le dossier de données, le serveur. Les valeurs appartiennent au dossier surveillé, pas à la surveillance : les mesures sont partagées par tous ceux qui le suivent. Chaque mesure garde les valeurs avec lesquelles son CTF a été estimé ; les changer fait mesurer de nouveau ce qui en avait utilisé d'autres.
 
+## Relecture indépendante
+
+Le chemin des rapports a été relu par un agent chargé d'y trouver des défauts réels, chacun reproduit. Cinq, tous corrigés avec un test de régression qui échoue sur l'ancien code :
+
+| Gravité | Défaut | Correction |
+|---|---|---|
+| haute | Au-delà de 96 h de session (ou avec une seule date fausse), division par zéro : aucun rapport, ni demandé ni automatique, et un nouvel essai chaque minute ; une date en l'an 1 fabriquait 740 000 tranches | heure la plus chargée comptée sur les dates elles-mêmes ; tranches en jours au-delà ; dates hors de 2000…maintenant mises hors de l'axe du temps et signalées |
+| moyenne | Des nombres finis mais démesurés lus dans un XML ou un mdoc (1e308) débordaient une fois multipliés ou sommés | au-delà de 10¹², une valeur est tenue pour inconnue |
+| moyenne | Une surveillance oubliée pendant qu'on fabriquait son rapport : le rapport pouvait s'attacher à la nouvelle surveillance d'un autre utilisateur, qui reprenait le même numéro | le rapport n'est enregistré que pour la surveillance même (numéro, utilisateur, date de création), dans la transaction qui l'enregistre |
+| basse | CSV : une cellule entre guillemets coupée par un tableur réglé sur « ; » donnait une formule ; des espaces devant le signe aussi | textes entre guillemets, et signe de formule neutralisé après tout séparateur et après des espaces |
+| basse | Une écriture ratée (disque plein) laissait un dossier partiel à chaque essai, et une erreur interne | rien de partiel ne reste ; erreur 503 au nom public ; nouvel essai automatique une heure plus tard |
+
 ## Conséquences
 
 - Index au schéma 8 (rapports, historique des alertes, microscope de la session).

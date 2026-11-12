@@ -107,7 +107,7 @@ def test_a_report_is_made_when_asked_and_holds_the_session(world: World) -> None
 
     table = get(world, watch, made["id"], "csv")
     assert table.headers["content-disposition"].startswith('attachment; filename="images_shared_')
-    assert table.text.splitlines()[0].startswith("name,path,time") and len(table.text.splitlines()) == 4
+    assert table.text.splitlines()[0].startswith('"name","path","time"') and len(table.text.splitlines()) == 4
     archive = zipfile.ZipFile(io.BytesIO(get(world, watch, made["id"], "zip").content))
     assert sorted(archive.namelist()) == ["exposures.csv", "report.html", "report.json"]
     assert json.loads(archive.read("report.json")) == report
@@ -217,3 +217,85 @@ def test_the_silence_before_a_report_is_configured(tmp_path: Path) -> None:
         cfg.write_text(f"[live]\n{bad}\n")
         with pytest.raises((ConfigError, ValueError)):
             Settings.load(cfg)
+
+
+# ── regressions: what an independent review of the reports found ─────────────
+
+
+def test_a_watch_forgotten_while_its_report_is_made_gets_nothing_and_neither_does_its_successor(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression. A report took a moment to make; the watch was forgotten meanwhile and its
+    number went to Bob's new watch (SQLite reuses the largest one). The report of Alice's
+    session, with her file names, was then listed among Bob's."""
+    from imagebio.live import service as service_module
+
+    secret = world.tree.base / "public/shared/alice_secret_sample.mrc"
+    secret.write_bytes(mrc_bytes(np.full((64, 64), 4.0, np.float32), 1.0))
+    alice = follow(world, "public/shared", ALICE)
+    (world.tree.base / "public/bob").mkdir()
+    real = service_module.build_report
+    meanwhile: list[int] = []
+
+    def slow(exposures, ctx):  # type: ignore[no-untyped-def]
+        if not meanwhile:  # while it is being made: Alice forgets her watch, Bob starts one
+            world.live.stop_watch("alice", alice, forget=True)
+            meanwhile.append(world.live.start_watch("bob", "public/bob", world.tree.base / "public/bob").id)
+        return real(exposures, ctx)
+
+    monkeypatch.setattr(service_module, "build_report", slow)
+    r = world.client.post(f"{WATCHES}/{alice}/reports", headers=ALICE)
+    assert r.status_code == 404 and meanwhile == [alice]  # the same number, for Bob
+    assert reports(world, meanwhile[0], BOB)["reports"] == []
+    assert not (world.state / "reports").exists() or list((world.state / "reports").iterdir()) == []
+
+
+def test_a_report_that_cannot_be_written_leaves_nothing_behind(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression. A failed write (a full disk) left a half-written directory each time, and
+    the client got an internal error."""
+    import errno
+
+    watch = follow(world, "public/shared", ALICE)
+    real_write = Path.write_bytes
+
+    def full(self: Path, data: bytes) -> int:
+        if self.name == "report.zip":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", full)
+    for _ in range(3):
+        r = world.client.post(f"{WATCHES}/{watch}/reports", headers=ALICE)
+        assert r.status_code == 503 and r.json()["error"]["code"] == "report_not_written"
+        assert str(world.state) not in r.text
+        world.run([], 15)
+    assert list((world.state / "reports").iterdir()) == [] and reports(world, watch)["reports"] == []
+    monkeypatch.undo()
+    assert make(world, watch)["trigger"] == "manual"
+
+
+def test_a_report_that_fails_is_not_tried_again_every_minute(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression. When the report of a silent session could not be made, it was tried again at
+    every check, once a minute, each time reading the whole session."""
+    from imagebio.live import service as service_module
+
+    tries: list[float] = []
+
+    def failing(exposures, ctx):  # type: ignore[no-untyped-def]
+        tries.append(world.now)
+        raise RuntimeError("cannot")
+
+    watch = follow(world, "public/shared", ALICE)
+    arrive(world, "public/shared", {"a": np.full((64, 64), 3.0)})
+    monkeypatch.setattr(service_module, "build_report", failing)
+    world.run([], 690 + 1800)  # the silence, then half an hour
+    assert len(tries) == 1
+    world.run([], 1800)  # an hour after the failure: once more
+    assert len(tries) == 2
+    monkeypatch.undo()
+    world.run([], 3700)
+    assert [r["trigger"] for r in reports(world, watch)["reports"]] == ["idle"]

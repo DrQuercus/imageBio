@@ -11,6 +11,7 @@ says what its user saw. What could not be measured is said, not guessed.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import math
 import re
@@ -57,6 +58,12 @@ _MAX_PAUSES: Final = 50
 _PAUSE_MIN_S: Final = 600.0  # a gap is a pause from ten minutes, or ten typical intervals
 _SHOWN: Final = 6  # best and worst images
 _SQUARE: Final = re.compile(r"GridSquare_(\d+)")
+#: Beyond this, a number read from a file is no measurement (and sums of such would overflow).
+_LIMIT: Final = 1e12
+#: An acquisition time before this (2000-01-01) or after the report is a wrong clock or a wrong
+#: file: such an image counts in the figures, not on the time axis.
+_TIME_MIN: Final = 946_684_800.0
+_TIME_AHEAD_S: Final = 86_400.0
 
 #: Acquisition parameters the report follows over the session: key, unit, kind. "discrete":
 #: values that should not change (or only at chosen moments); "continuous": a spread;
@@ -115,8 +122,13 @@ class ReportContext:
 
 
 def _number(value: Any) -> float | None:
+    """A number that can be measured: finite, and not out of all proportion."""
     ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
-    return float(value) if ok else None
+    return float(value) if ok and abs(value) <= _LIMIT else None
+
+
+def _sane(value: float | None) -> float | None:
+    return value if value is not None and math.isfinite(value) and abs(value) <= _LIMIT else None
 
 
 def _round(value: float | None, digits: int = 4) -> float | None:
@@ -190,7 +202,19 @@ def _thin(points: list[Any], limit: int = _MAX_POINTS) -> list[Any]:
 
 def _bucket(start: float, end: float) -> int:
     span = max(end - start, 1.0)
-    return next((b for b in _TIMELINE_BUCKETS if span / b <= _MAX_BINS), _TIMELINE_BUCKETS[-1])
+    fits = next((b for b in _TIMELINE_BUCKETS if span / b <= _MAX_BINS), None)
+    # beyond a few months: whole days, as many as it takes to stay within the bins
+    return fits if fits is not None else 86400 * math.ceil(span / (86400 * _MAX_BINS))
+
+
+def _busiest_hour(times: Sequence[float]) -> int:
+    """The most images acquired within one hour (``times`` in order)."""
+    best, first = 0, 0
+    for last, t in enumerate(times):
+        while t - times[first] >= 3600:
+            first += 1
+        best = max(best, last - first + 1)
+    return best
 
 
 def _parameter(exposure: Exposure, key: str) -> Any:
@@ -300,9 +324,18 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
     calibrated = bool(ctx.ice.get("calibrated"))
     mfp = _number(ctx.ice.get("mfp_nm"))
     acquired = [e for e in exposures if e.category in ACQUIRED and e.state != "deleted"]
+
+    def dated(e: Exposure) -> Exposure:
+        if e.time is None or (_TIME_MIN <= e.time <= ctx.generated_at + _TIME_AHEAD_S):
+            return e
+        return dataclasses.replace(e, time=None)
+
     complete = sorted(
-        (e for e in acquired if e.state == "complete"),
+        (dated(e) for e in acquired if e.state == "complete"),
         key=lambda e: (e.time if e.time is not None else math.inf, e.id),
+    )
+    undated = sum(1 for e in acquired if e.state == "complete" and e.time is not None) - sum(
+        1 for e in complete if e.time is not None
     )
     incoming = sum(1 for e in acquired if e.state == "incoming")
     times = [e.time for e in complete if e.time is not None]
@@ -314,7 +347,7 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
         judged[e.id] = (v, rejections(e.metrics, e.processing, rules, reference) if v == "rejected" else [])
 
     def values(get: Callable[[Exposure], float | None]) -> list[float]:
-        return [v for e in complete if (v := get(e)) is not None]
+        return [v for e in complete if (v := _sane(get(e))) is not None]
 
     def fit(e: Exposure) -> float | None:
         c = ctf_of(e.metrics, e.processing)
@@ -402,26 +435,14 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
             "bins": [bins.get(k, [0, 0, 0]) for k in range(last_slot + 1)],
         }
     hours = (end - start) / 3600 if start is not None and end is not None and end > start else None
-    peak = None
-    if timeline["bins"] and timeline["bucket"] and start is not None and end is not None:
-        # the busiest hour: buckets summed over an hour; a shorter session is its own hour
-        counts = [row[0] for row in timeline["bins"]]
-        window = round(3600 / timeline["bucket"])
-        if window >= len(counts):
-            peak = len(times) * 3600 / max(end - start, 3600.0) if hours else None
-        else:
-            peak = (
-                max(sum(counts[k : k + window]) for k in range(len(counts) - window + 1))
-                * 3600
-                / (window * timeline["bucket"])
-            )
+    peak = float(_busiest_hour(times)) if hours else None
 
     def series(get: Callable[[Exposure], float | None]) -> list[list[Any]]:
         return _thin(
             [
                 [e.time, _round(v), (judged[e.id][0] or "")[:1]]
                 for e in complete
-                if e.time is not None and (v := get(e)) is not None
+                if e.time is not None and (v := _sane(get(e))) is not None
             ]
         )
 
@@ -444,9 +465,9 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
                 "accepted": member_verdicts.get("accepted", 0),
                 "rejected": member_verdicts.get("rejected", 0),
                 "first": min((e.time for e in members if e.time is not None), default=None),
-                "median_fit": _median([x for e in members if (x := fit(e)) is not None]),
-                "median_defocus": _median([x for e in members if (x := defocus(e)) is not None]),
-                "median_ice": _median([x for e in members if (x := ice(e)) is not None]),
+                "median_fit": _median([x for e in members if (x := _sane(fit(e))) is not None]),
+                "median_defocus": _median([x for e in members if (x := _sane(defocus(e))) is not None]),
+                "median_ice": _median([x for e in members if (x := _sane(ice(e))) is not None]),
                 "stage": [
                     _round(statistics.fmean(s[0] for s in stages), 2),
                     _round(statistics.fmean(s[1] for s in stages), 2),
@@ -476,13 +497,13 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
             "time": e.time,
             "verdict": v,
             "why": [text for _, text in why],
-            "fit": _round(c["fit"]) if c else None,
-            "defocus": _round(c["defocus"]) if c else None,
-            "ice": _round(ice(e)),
+            "fit": _round(_sane(c["fit"])) if c else None,
+            "defocus": _round(_sane(c["defocus"])) if c else None,
+            "ice": _round(_sane(ice(e))),
             "flags": image_flags(e.metrics, reference, calibrated),
         }
 
-    with_fit = [e for e in complete if fit(e) is not None]
+    with_fit = [e for e in complete if _sane(fit(e)) is not None]
     pool = [e for e in with_fit if judged[e.id][0] != "rejected"]
     best = sorted(pool, key=lambda e: (fit(e) or math.inf, -(e.time or 0.0)))[:_SHOWN]
     if rules.any:
@@ -509,6 +530,13 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
 
     if not complete:
         limit("empty", "Aucune image acquise n'est encore complète : il n'y a rien à mesurer.")
+    if undated:
+        limit(
+            "bad_time",
+            f"{undated} image(s) ont une date invraisemblable (avant 2000, ou après ce rapport) : "
+            "elles comptent dans les chiffres, pas dans le temps.",
+            undated,
+        )
     unmeasured = len(complete) - measured - unreadable
     if unmeasured:
         limit(

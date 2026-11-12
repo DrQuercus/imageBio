@@ -6,7 +6,7 @@ Le mode Live écrit, pour une session suivie, un rapport de qualité : une page 
 
 - **À la demande** : bouton « Rapport maintenant » du panneau « Rapport de qualité », ou `POST /api/live/watches/{id}/reports`.
 - **À l'arrêt de la surveillance**, sauf si la case « à la fin de la surveillance » est décochée pour cette session.
-- **Quand la collecte se tait** : une session qui a reçu des images et n'en reçoit plus depuis `[live] report_after_idle_min` minutes (120 par défaut, 0 pour jamais). Une fois par silence, vérifié chaque minute.
+- **Quand la collecte se tait** : une session qui a reçu des images et n'en reçoit plus depuis `[live] report_after_idle_min` minutes (120 par défaut, 0 pour jamais). Une fois par silence, vérifié chaque minute ; un rapport qui n'a pas pu être écrit est retenté une heure plus tard.
 
 Les vingt derniers rapports d'une surveillance sont gardés dans `<dossier d'état>/reports/`. Oublier la surveillance les efface. Ils ne sont **pas** dans les sauvegardes (`imagebio backup` ne copie que l'index) : téléchargez ce que vous voulez garder.
 
@@ -16,13 +16,13 @@ Les vingt derniers rapports d'une surveillance sont gardés dans `<dossier d'ét
 |---|---|
 | `report.html` | La page, en français : à lire, à imprimer (A4, ou « Imprimer → PDF » du navigateur), à glisser dans la bibliothèque. Un seul fichier : vignettes et graphiques sont dedans. Aucun script, rien n'est chargé d'ailleurs. |
 | `report.json` | Tous les chiffres de la page, pour un programme ou une IA. Schéma ci-dessous. |
-| `exposures.csv` | Une ligne par image acquise : ses mesures, son verdict, ses raisons. Une cellule qu'un tableur prendrait pour une formule (`=`, `+`, `-`, `@` en tête) est écrite comme du texte, précédée d'une apostrophe. |
+| `exposures.csv` | Une ligne par image acquise : ses mesures, son verdict, ses raisons. Séparateur « , », textes entre guillemets. Rien de ce qu'un tableur prendrait pour une formule n'y reste : un texte qui commence par `=`, `+`, `-` ou `@` (même après des espaces) est précédé d'une apostrophe, et de même ce signe après un « ; », une « , » ou une tabulation à l'intérieur d'un nom (un tableur réglé sur « ; » couperait là). Le nom exact est dans `report.json`. |
 | `report.zip` | Les trois. |
 
 ## Ce que dit la page
 
 1. Les chiffres clés : images, débit moyen, part acceptée, médianes du CTF, du défocus, de la glace et du mouvement, part de glace cristalline.
-2. **Ce que ces chiffres ne disent pas**, en premier : images non mesurées, illisibles, encore en cours d'écriture, non vérifiées ; CTF estimé rapidement (sans astigmatisme) ; glace relative ; tension qui ne vient pas des fichiers.
+2. **Ce que ces chiffres ne disent pas**, en premier : images non mesurées, illisibles, encore en cours d'écriture, non vérifiées ; CTF estimé rapidement (sans astigmatisme) ; glace relative ; tension qui ne vient pas des fichiers ; dates invraisemblables (avant 2000 ou après le rapport : l'image compte dans les chiffres, pas sur l'axe du temps). Une valeur démesurée lue dans un fichier (au-delà de 10¹²) est tenue pour inconnue.
 3. La collecte dans le temps : images et verdicts par tranche, pauses de plus de dix minutes, débit moyen et heure la plus chargée.
 4. La qualité : seuils de la session, acceptées et rejetées, raisons des rejets.
 5. Le CTF : défocus mesuré face au défocus visé, résolution de l'ajustement dans le temps, histogrammes, et le microscope avec lequel il a été estimé (tension, Cs, contraste d'amplitude, et d'où vient chaque valeur).

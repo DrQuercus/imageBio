@@ -221,9 +221,11 @@ def create_app(
     # ── errors: JSON, no internals ───────────────────────────────────────────
     @app.exception_handler(ImageBioError)
     async def _imagebio_error(request: Request, exc: ImageBioError) -> JSONResponse:
-        if exc.status >= 500:
+        if exc.code == ImageBioError.code:  # not an error written to be told: nothing of it is
             log.error("internal error on %s: %s", request.url.path, exc)
             return _error(500, "internal_error", "internal error")
+        if exc.status >= 500:  # a failure of the server that has a public name and message
+            log.warning("%s on %s: %s", exc.code, request.url.path, exc)
         return _error(exc.status, exc.code, exc.public_message)
 
     @app.exception_handler(RequestValidationError)

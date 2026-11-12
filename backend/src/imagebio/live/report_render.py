@@ -16,6 +16,7 @@ import html
 import io
 import json
 import math
+import re
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
@@ -142,6 +143,8 @@ def _num(value: Any, digits: int = 2) -> str:
         return _e(value)
     if not math.isfinite(value):
         return "—"
+    if abs(value) >= 1e12:
+        return f"{value:.3g}".replace(".", ",")
     if isinstance(value, int) or (float(value).is_integer() and abs(value) >= 1000):
         text = f"{round(value):,}".replace(",", " ")
     else:
@@ -153,15 +156,24 @@ def _share(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.0f} %".replace(".", ",")
 
 
+def _moment(t: float) -> datetime | None:
+    """A time as a local date; None for one no calendar holds (a wrong clock, a wrong file)."""
+    try:
+        return datetime.fromtimestamp(t).astimezone()
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
 def _when(t: float | None, *, date: bool = True) -> str:
-    if t is None:
+    moment = _moment(t) if t is not None else None
+    if moment is None:
         return "—"
-    moment = datetime.fromtimestamp(t).astimezone()
     return moment.strftime("%d/%m/%Y %H:%M" if date else "%H:%M")
 
 
 def _zone(t: float) -> str:
-    offset = datetime.fromtimestamp(t).astimezone().strftime("%z")
+    moment = _moment(t)
+    offset = moment.strftime("%z") if moment is not None else ""
     return f"UTC{offset[:3]}:{offset[3:]}" if offset else ""
 
 
@@ -184,7 +196,7 @@ def _unit(unit: str) -> str:
 
 
 def _nice_ticks(low: float, high: float, count: int = 5) -> list[float]:
-    if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
+    if not (math.isfinite(low) and math.isfinite(high) and math.isfinite(high - low)) or high <= low:
         return [low]
     raw = (high - low) / count
     magnitude = 10 ** math.floor(math.log10(raw))
@@ -204,12 +216,16 @@ def _time_ticks(low: float, high: float) -> list[tuple[float, str]]:
         (s for s in (300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400) if span / s <= 7), 86400
     )
     first = math.ceil(low / step) * step
-    several_days = datetime.fromtimestamp(low).date() != datetime.fromtimestamp(high).date()
+    start, end = _moment(low), _moment(high)
+    if start is None or end is None:
+        return []
+    several_days = start.date() != end.date()
     out: list[tuple[float, str]] = []
     t = float(first)
     while t <= high and len(out) < 10:
-        label = datetime.fromtimestamp(t).astimezone().strftime("%d/%m %H:%M" if several_days else "%H:%M")
-        out.append((t, label))
+        moment = _moment(t)
+        if moment is not None:
+            out.append((t, moment.strftime("%d/%m %H:%M" if several_days else "%H:%M")))
         t += step
     return out
 
@@ -786,13 +802,19 @@ def render_json(report: Mapping[str, Any]) -> str:
 
 
 _FORMULA: Final = ("=", "+", "-", "@", "\t", "\r")
+#: A sign that starts a formula, after a character some spreadsheet splits a line on.
+_SPLIT_FORMULA: Final = re.compile(r"([;,\t\r\n])(\s*)([=+\-@])")
 
 
 def _cell(value: Any) -> Any:
     """A text cell a spreadsheet would read as a formula is made plain text: a file name is
-    whatever its author called it."""
-    if isinstance(value, str) and value.startswith(_FORMULA):
-        return "'" + value
+    whatever its author called it. Spaces before the sign do not save it (a spreadsheet may trim
+    them on import), nor does a separator before it (one may split where this file does not)."""
+    if isinstance(value, str):
+        # a spreadsheet set to split on ";" (French settings) cuts inside a quoted cell: what
+        # follows a ";" must not start a formula either. The exact name is in report.json.
+        value = _SPLIT_FORMULA.sub(r"\1\2'\3", value)
+        return "'" + value if value.lstrip(" ").startswith(_FORMULA) else value
     if isinstance(value, bool):
         return "yes" if value else "no"
     return "" if value is None else value
@@ -800,7 +822,9 @@ def _cell(value: Any) -> Any:
 
 def render_csv(rows: Sequence[Mapping[str, Any]]) -> str:
     out = io.StringIO()
-    writer = csv.writer(out, lineterminator="\n")
+    # every text cell in quotes: a spreadsheet that splits on ";" (as French settings do) does not
+    # cut "x;=2+6" into a cell of its own
+    writer = csv.writer(out, lineterminator="\n", quoting=csv.QUOTE_NONNUMERIC)
     writer.writerow(CSV_COLUMNS)
     for row in rows:
         writer.writerow([_cell(row.get(column)) for column in CSV_COLUMNS])

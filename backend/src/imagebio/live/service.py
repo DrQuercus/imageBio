@@ -97,6 +97,16 @@ _REPORTS_KEPT: Final = 20  # reports kept per watch: older ones are removed
 _REPORT_AGAIN_S: Final = 10.0  # a report asked for again this soon is the one just made
 _REPORT_THUMB_PX: Final = 256
 _IDLE_CHECK_S: Final = 60.0  # how often a directory is checked for a collection that went silent
+_REPORT_RETRY_S: Final = 3600.0  # a report that could not be made is tried again after this
+
+
+class ReportWriteError(ImageBioError):
+    """The files of a report could not be written (a full disk, a directory not writable)."""
+
+    status = 503
+    code = "report_not_written"
+
+
 #: The files of a report: what each is called, and what it is.
 REPORT_FILES: Final = {
     "html": ("report.html", "text/html; charset=utf-8"),
@@ -217,6 +227,7 @@ class LiveService:
         self._stop_processing = threading.Event()
         self._reporting = threading.Lock()  # one report at a time: each reads the whole session
         self._idle_checked: dict[int, float] = {}  # root -> last time it was looked at for silence
+        self._report_failed: dict[int, float] = {}  # watch -> when its report last could not be made
 
     # ── index and scanners ───────────────────────────────────────────────────
     @property
@@ -1172,37 +1183,56 @@ class LiveService:
                 if not (self.reports_dir / name).exists():
                     break
                 name = f"w{watch.id}-{stamp}-{trigger}-{n}"
-            staging = self.reports_dir / f".{name}.part"
-            shutil.rmtree(staging, ignore_errors=True)
-            staging.mkdir(mode=0o750)
-            size = 0
-            for file_name, content in contents.items():
-                data = content.encode("utf-8") if isinstance(content, str) else content
-                (staging / file_name).write_bytes(data)
-                size += len(data)
-            staging.rename(self.reports_dir / name)  # whole, or not at all
-            with self.index.write() as tx:
-                cursor = tx.execute(
-                    "INSERT INTO reports (watch_id, created_at, trigger, name, bytes, exposures, newest) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        watch.id,
-                        now,
-                        trigger,
-                        name,
-                        size,
-                        report["counts"]["exposures"],
-                        report["session"]["last"],
-                    ),
-                )
-                row = tx.execute("SELECT * FROM reports WHERE id = ?", (cursor.lastrowid,)).fetchone()
-                old = tx.execute(
-                    "SELECT id, name FROM reports WHERE watch_id = ? ORDER BY created_at DESC, id DESC "
-                    "LIMIT -1 OFFSET ?",
-                    (watch.id, _REPORTS_KEPT),
-                ).fetchall()
-                for r in old:
-                    tx.execute("DELETE FROM reports WHERE id = ?", (r["id"],))
+            staging, final = self.reports_dir / f".{name}.part", self.reports_dir / name
+            kept = False
+            try:
+                shutil.rmtree(staging, ignore_errors=True)
+                staging.mkdir(mode=0o750)
+                size = 0
+                for file_name, content in contents.items():
+                    data = content.encode("utf-8") if isinstance(content, str) else content
+                    (staging / file_name).write_bytes(data)
+                    size += len(data)
+                staging.rename(final)  # whole, or not at all
+                with self.index.write() as tx:
+                    # The watch may have been forgotten while the report was made, and its
+                    # number given to somebody else's new watch: the report goes to the watch
+                    # it was made for, or nowhere.
+                    same = tx.execute(
+                        "SELECT 1 FROM watches WHERE id = ? AND user = ? AND created_at = ?",
+                        (watch.id, watch.user, watch.created_at),
+                    ).fetchone()
+                    if same is None:
+                        raise NotFoundError("no such watch")
+                    cursor = tx.execute(
+                        "INSERT INTO reports (watch_id, created_at, trigger, name, bytes, exposures, newest) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            watch.id,
+                            now,
+                            trigger,
+                            name,
+                            size,
+                            report["counts"]["exposures"],
+                            report["session"]["last"],
+                        ),
+                    )
+                    row = tx.execute("SELECT * FROM reports WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                    old = tx.execute(
+                        "SELECT id, name FROM reports WHERE watch_id = ? ORDER BY created_at DESC, id DESC "
+                        "LIMIT -1 OFFSET ?",
+                        (watch.id, _REPORTS_KEPT),
+                    ).fetchall()
+                    for r in old:
+                        tx.execute("DELETE FROM reports WHERE id = ?", (r["id"],))
+                kept = True
+            except OSError as e:
+                log.error("the report of watch %s could not be written: %s", watch.id, e)
+                raise ReportWriteError("the report could not be written on the server") from None
+            finally:
+                if not kept:  # nothing half-written is left behind
+                    shutil.rmtree(staging, ignore_errors=True)
+                    shutil.rmtree(final, ignore_errors=True)
             for r in old:
                 self._remove_report_files(r["name"])
             return self._report_row(row)
@@ -1229,9 +1259,13 @@ class LiveService:
             (root_id, last),
         ).fetchall()
         for row in due:
+            if now - self._report_failed.get(row["id"], -math.inf) < _REPORT_RETRY_S:
+                continue  # it failed a moment ago: not again every minute, each time reading it all
             try:
                 self.make_report(_watch_of(row), "idle")
+                self._report_failed.pop(row["id"], None)
             except Exception:
+                self._report_failed[row["id"]] = now
                 log.exception("the report of watch %s could not be made", row["id"])
 
     def seen(self, watch: WatchInfo) -> None:
