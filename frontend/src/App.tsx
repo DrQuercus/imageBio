@@ -29,7 +29,7 @@ interface Loaded {
   response: DatasetInfoResponse;
 }
 
-export function App({ onLive }: { onLive: () => void }) {
+export function App({ onLive, onSettings }: { onLive: () => void; onSettings: () => void }) {
   const initial = useMemo<LinkState>(() => parseLink(window.location.hash), []);
   // the address as the page last read or wrote it, and the write that is waiting to be made
   const addressSeen = useRef(window.location.hash);
@@ -410,6 +410,7 @@ export function App({ onLive }: { onLive: () => void }) {
         <div className="group">
           <button className="on" data-testid="mode-viewer">Visionneuse</button>
           <button onClick={onLive} title="Suivre une session d'acquisition" data-testid="mode-live">Live</button>
+          <button onClick={onSettings} title="Votre compte ; pour les administrateurs, les réglages du serveur" data-testid="mode-settings">Paramètres</button>
         </div>
         <div className="group">
           <button className={tool === "pan" ? "on" : ""} onClick={() => setTool("pan")} title="Déplacer (Échap)" data-testid="tool-pan">Déplacer</button>

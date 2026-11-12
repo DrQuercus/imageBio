@@ -69,9 +69,87 @@ export interface DirListing {
 
 export interface Me {
   user: string;
+  /** Every group of the user: those of the proxy and those given in the settings page. */
   groups: string[];
+  /** The groups given in the settings page. */
+  groups_given: string[];
+  /** May open the administration of the settings page. */
+  admin: boolean;
   auth_mode: "none" | "proxy";
+  roots: { name: string; available: boolean }[];
 }
+
+/** A data root as the settings page edits it (paths are the server's: administrators only). */
+export interface RootSetting {
+  name: string;
+  path: string;
+  groups: string[];
+  kv?: number | null;
+  cs_mm?: number | null;
+  amplitude_contrast?: number | null;
+  /** Read only: whether the server can read the directory. */
+  available?: boolean;
+}
+
+export interface ChannelSetting {
+  name: string;
+  kind: "ntfy" | "webhook" | "email";
+  url?: string;
+  to?: string[];
+}
+
+export interface MicroscopeSetting {
+  kv: number;
+  cs_mm: number;
+  amplitude_contrast: number;
+}
+
+export interface LiveSetting {
+  report_after_idle_min: number;
+  mean_free_path_nm: number | null;
+  metrics: boolean;
+  ctf: boolean;
+  drift: boolean;
+}
+
+export type SettingSource = "file" | "interface";
+
+export interface AccountRow {
+  name: string;
+  /** Groups given in the settings page. */
+  groups: string[];
+  /** Groups the proxy gave the last time the user came (since the server started). */
+  proxy_groups: string[];
+  /** Why the user is an administrator: named in the file, by a group of the file, given in the
+   *  settings page; null: not one. */
+  admin: "file" | "group" | "interface" | null;
+  seen: number | null;
+}
+
+export interface LogEntry {
+  at: number;
+  by: string;
+  version?: number;
+  what: string;
+}
+
+export interface AdminState {
+  version: number;
+  updated_at: number | null;
+  updated_by: string | null;
+  sections: {
+    roots: { source: SettingSource; value: RootSetting[] };
+    microscope: { source: SettingSource; value: MicroscopeSetting; file: MicroscopeSetting; own: Partial<MicroscopeSetting> };
+    live: { source: SettingSource; value: LiveSetting; file: LiveSetting; own: Partial<LiveSetting> };
+    alerts: { source: SettingSource; value: ChannelSetting[]; email: boolean };
+  };
+  root_parents: string[];
+  accounts: AccountRow[];
+  groups: string[];
+  configuration: Record<string, Record<string, unknown> | string | null>;
+}
+
+export type SettingSection = keyof AdminState["sections"];
 
 export type Dtype = "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "float32" | "float64";
 

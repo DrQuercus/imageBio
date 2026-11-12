@@ -2,7 +2,10 @@
  *  "latest wins", a newer one cancels the previous. */
 
 import type {
+  AdminState,
   DatasetInfoResponse,
+  LogEntry,
+  SettingSection,
   DirListing,
   Dtype,
   AlertRules,
@@ -63,8 +66,10 @@ export function buildQuery(params: Params, options?: ReaderOptions): string {
 
 type Method = "GET" | "POST" | "PUT" | "DELETE";
 
-async function request(url: string, signal?: AbortSignal, method: Method = "GET"): Promise<Response> {
-  const response = await fetch(url, { method, signal, headers: { Accept: "application/json, application/octet-stream" } });
+async function request(url: string, signal?: AbortSignal, method: Method = "GET", body?: unknown): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "application/json, application/octet-stream" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(url, { method, signal, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   if (response.ok) return response;
   let code = "http_error";
   let message = `HTTP ${response.status}`;
@@ -81,8 +86,8 @@ async function request(url: string, signal?: AbortSignal, method: Method = "GET"
   throw new ApiError(response.status, code, message);
 }
 
-async function getJson<T>(url: string, signal?: AbortSignal, method: Method = "GET"): Promise<T> {
-  return (await (await request(url, signal, method)).json()) as T;
+async function getJson<T>(url: string, signal?: AbortSignal, method: Method = "GET", body?: unknown): Promise<T> {
+  return (await (await request(url, signal, method, body)).json()) as T;
 }
 
 const ARRAYS: Record<Dtype, { new (buffer: ArrayBuffer): PlaneArray; BYTES_PER_ELEMENT: number }> = {
@@ -143,6 +148,21 @@ export interface SpectrumRequest extends PlaneIndex, Pick<Processing, "t_end" | 
 
 export const api = {
   me: (signal?: AbortSignal) => getJson<Me>("/api/me", signal),
+
+  /** The settings page, for administrators (ADR 014). Every change names the version of the
+   *  settings it was made on: one made on an older version is refused (409). */
+  admin: {
+    settings: (signal?: AbortSignal) => getJson<AdminState>("/api/admin/settings", signal),
+    setSection: (section: SettingSection, version: number, value: unknown) =>
+      getJson<AdminState>(`/api/admin/settings/${section}`, undefined, "PUT", { version, value }),
+    resetSection: (section: SettingSection, version: number) =>
+      getJson<AdminState>(`/api/admin/settings/${section}?${buildQuery({ version })}`, undefined, "DELETE"),
+    setAccount: (version: number, name: string, groups: string[], admin: boolean) =>
+      getJson<AdminState>("/api/admin/accounts", undefined, "PUT", { version, name, groups, admin }),
+    removeAccount: (version: number, name: string) =>
+      getJson<AdminState>(`/api/admin/accounts?${buildQuery({ name, version })}`, undefined, "DELETE"),
+    log: (signal?: AbortSignal) => getJson<{ entries: LogEntry[] }>("/api/admin/log", signal),
+  },
 
   roots: (signal?: AbortSignal) =>
     getJson<{ roots: { name: string; available: boolean }[] }>("/api/fs/roots", signal).then((r) => r.roots),

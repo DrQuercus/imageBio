@@ -46,9 +46,10 @@ interface Props {
   dir: string | null;
   /** Leave for the viewer, on a file or on what it was showing before. */
   onViewer: (path?: string) => void;
+  onSettings: () => void;
 }
 
-export function LiveView({ dir, onViewer }: Props) {
+export function LiveView({ dir, onViewer, onSettings }: Props) {
   const [me, setMe] = useState<Me | null>(null);
   const [watches, setWatches] = useState<LiveWatch[]>([]);
   const [watch, setWatch] = useState<LiveWatch | null>(null);
@@ -176,6 +177,7 @@ export function LiveView({ dir, onViewer }: Props) {
         <div className="group">
           <button onClick={() => onViewer()} data-testid="mode-viewer">Visionneuse</button>
           <button className="on" data-testid="mode-live">Live</button>
+          <button onClick={onSettings} data-testid="mode-settings">Paramètres</button>
         </div>
         <span className="session" data-testid="live-session" title={watch?.path}>{watch ? watch.path : "aucune session"}</span>
         <span className="spacer" />
