@@ -606,7 +606,10 @@ Limites, à connaître avant le pilote :
 
 ### Lots demandés le 12 novembre 2026
 
-Demande : une page de paramètres (comptes, réglages), la taille de pixel et les filtres plus en évidence dans la visionneuse (curseurs, réactivité de cryoSPARC), les atlas, un rapport de qualité de la collecte, et de quoi brancher une IA locale. Découpage proposé : A (visionneuse), B (rapport), C (atlas), D (paramètres et comptes), E (IA). Les décisions encore ouvertes (gestion des comptes, réglages modifiables par l'interface, dépôt automatique dans la bibliothèque) sont listées au lot D et dans l'[ADR 012](adr/012-rapport-de-collecte.md).
+Demande : une page de paramètres (comptes, réglages), la taille de pixel et les filtres plus en évidence dans la visionneuse (curseurs, réactivité de cryoSPARC), les atlas, un rapport de qualité de la collecte, et de quoi brancher une IA locale. Découpage proposé : A (visionneuse : taille de pixel en évidence, curseurs passe-bas et passe-haut recalculés au vol sur la vue réduite, outils), B (rapport), C (atlas, qui attend un vrai dossier de session EPU), D (page de paramètres et comptes), E (IA locale : API documentée, clés personnelles en lecture seule, serveur MCP, commandes, skill). Décisions encore ouvertes :
+- comptes : gérés par imageBio (comptes locaux, rôle administrateur) ou laissés au proxy et à l'authentification unique ;
+- réglages du serveur modifiables par l'interface (recommandé : tout sauf les programmes externes et les secrets) ou en lecture seule ;
+- dépôt automatique des rapports dans la bibliothèque des collectes (un dossier où le serveur écrit).
 
 **Lot B, rapport de qualité de la collecte (12 novembre 2026) : fait.** Décisions : [ADR 012](adr/012-rapport-de-collecte.md) ; contenu et schéma : [`rapport-live.md`](rapport-live.md).
 - Un rapport par session : page HTML autonome (à lire, imprimer en PDF, ranger), JSON au schéma versionné, CSV d'une ligne par image, et un zip des trois. Écrit à la demande, à l'arrêt de la surveillance et après un silence de la collecte.
