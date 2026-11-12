@@ -311,3 +311,91 @@ test("the image on screen is handed to Fiji as a calibrated TIFF", async ({ page
   await expect(page.getByTestId("error")).toHaveCount(0);
 });
 
+
+test("the next and previous images of the folder keep the settings", async ({ page }) => {
+  const refused = trackRefused(page);
+  await openFile(page, "demo/picks/mic_001.mrc"); // 256 x 256 at 1.2 Å per pixel, two in the folder
+  await expect(page.getByTestId("file-position")).toHaveText("1 / 2");
+  await expect(page.getByTestId("file-prev")).toBeDisabled();
+  await page.getByTestId("lp-20").click();
+  await page.getByTestId("user-apix").fill("2");
+  await page.getByTestId("user-apix").press("Enter");
+  await page.getByTestId("one-to-one").click();
+  await expect(page.getByTestId("zoom")).toHaveText("100 %");
+
+  await page.getByTestId("viewer").hover();
+  await page.keyboard.press("n");
+  await ready(page, "demo/picks/mic_002.mrc");
+  await expect(page.getByTestId("file-position")).toHaveText("2 / 2");
+  // filter, typed pixel size and view: as they were (the two images have the same size)
+  await expect(page.getByTestId("lp-20")).toHaveClass(/on/);
+  await expect(page.getByTestId("user-apix")).toHaveValue("2");
+  await expect(page.getByTestId("zoom")).toHaveText("100 %");
+  await expect.poll(() => page.url()).toContain("apix=2");
+  // the last image: N goes nowhere
+  await page.keyboard.press("n");
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => (window as unknown as { __imagebio: { path(): string } }).__imagebio.path())).toBe("demo/picks/mic_002.mrc");
+  await page.keyboard.press("PageUp");
+  await ready(page, "demo/picks/mic_001.mrc");
+  await expect(page.getByTestId("file-position")).toHaveText("1 / 2");
+  await page.getByTestId("file-next").click();
+  await ready(page, "demo/picks/mic_002.mrc");
+  // a file opened from the list starts afresh: its own pixel size, fitted to the window
+  await page.getByTestId("browser").getByRole("button", { name: "mic_001.mrc" }).click();
+  await ready(page, "demo/picks/mic_001.mrc");
+  await expect(page.getByTestId("user-apix")).toHaveValue("1.2");
+  await expect(page.getByTestId("error")).toHaveCount(0);
+  expect(refused).toEqual([]);
+});
+
+test("a circle of a diameter in Å follows the cursor", async ({ page }) => {
+  await openFile(page, "demo/lattice.mrc"); // 1.25 Å per pixel
+  await page.getByTestId("one-to-one").click();
+  await hoverPixel(page, 512, 512);
+  await page.keyboard.press("c");
+  await expect(page.getByTestId("circle-toggle")).toHaveClass(/on/);
+  await expect(page.getByTestId("viewer")).toHaveAttribute("data-circle", "120"); // 150 Å
+  const [sx, sy] = await screenOf(page, 512, 512);
+  const box = (await page.getByTestId("viewer").boundingBox())!;
+  /** Opacity of the overlay at a point of the page. */
+  const overlayAlpha = (x: number, y: number) =>
+    page.getByTestId("viewer-overlay").evaluate((canvas, [px, py]) => {
+      const c = canvas as HTMLCanvasElement;
+      const dpr = c.width / c.getBoundingClientRect().width;
+      return c.getContext("2d")!.getImageData(Math.round(px! * dpr), Math.round(py! * dpr), 1, 1).data[3]!;
+    }, [x - box.x, y - box.y]);
+  // at 1:1, the circle passes 60 screen pixels from the centre of the cursor
+  await expect.poll(() => overlayAlpha(sx - 0.5 + 60, sy - 0.5)).toBeGreaterThan(100);
+  expect(await overlayAlpha(sx - 0.5 + 30, sy - 0.5)).toBe(0);
+  await page.getByTestId("circle-diameter").fill("250");
+  await page.getByTestId("circle-diameter").press("Enter");
+  await expect(page.getByTestId("viewer")).toHaveAttribute("data-circle", "200");
+  await page.getByTestId("circle-toggle").click();
+  await expect(page.getByTestId("viewer")).not.toHaveAttribute("data-circle", /.*/);
+});
+
+test("the intensity along the ruler, and its values for a spreadsheet", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await openFile(page, "demo/gradient.mrc"); // value = 100 y + x, 1.5 Å per pixel
+  await page.getByTestId("tool-ruler").click();
+  const [x0, y0] = await screenOf(page, 4, 10);
+  const [x1, y1] = await screenOf(page, 34, 10);
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x1, y1, { steps: 4 });
+  await page.mouse.up();
+  await expect(page.getByTestId("measure-value")).toHaveText("45.0 Å");
+  const chart = page.getByTestId("profile-chart");
+  await expect(chart).toHaveAttribute("data-samples", "31");
+  await expect(chart).toHaveAttribute("data-min", "1004");
+  await expect(chart).toHaveAttribute("data-max", "1034");
+  await page.getByTestId("profile-copy").click();
+  await expect(page.getByTestId("profile-copy")).toHaveText("Copié");
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  const lines = text.trim().split("\n");
+  expect(lines[0]).toBe("distance_A\tvalue");
+  expect(lines[1]).toBe("0\t1004");
+  expect(lines.at(-1)).toBe("45\t1034");
+  expect(lines).toHaveLength(32);
+});

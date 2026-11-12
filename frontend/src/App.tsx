@@ -5,12 +5,15 @@ import { ContrastPanel } from "./components/ContrastPanel";
 import { CryoPanel } from "./components/CryoPanel";
 import { FileBrowser } from "./components/FileBrowser";
 import { InfoPanel, StackControls, StatusBar } from "./components/Panels";
+import { MeasurePanel } from "./components/MeasurePanel";
 import { ScalePanel } from "./components/ScalePanel";
 import { type DisplaySettings, formatLink, type LinkState, parseLink } from "./state/url";
-import { averageEnd, type CryoSettings, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
+import { averageEnd, type CryoSettings, dirname, filterProblem, keepsGain, NO_CRYO, pickOverlay, processingKey, processingOf } from "./viewer/cryo";
 import { Gallery } from "./viewer/Gallery";
 import { galleryAxis, type GallerySort, isClassAverages, MAX_EXPORT_BYTES, stackBytes } from "./viewer/gallery";
 import { type Lut, LUTS, parseLutFile } from "./viewer/luts";
+import type { Profile } from "./viewer/profile";
+import { neighbour, siblingImages } from "./viewer/siblings";
 import { SpectrumView } from "./viewer/SpectrumView";
 import { type HoverInfo, type Ruler, rulerLabel, type Tool, ViewerCanvas } from "./viewer/ViewerCanvas";
 import { baseBin, clamp, clampIndex, MAX_ZOOM, MIN_ZOOM, type View } from "./viewer/view";
@@ -60,6 +63,13 @@ export function App({ onLive }: { onLive: () => void }) {
   /** A filter slider is held: the view shows its overview and waits for the release to
    *  load the detail (a filter at full resolution takes more than a second on a 4k image). */
   const [adjusting, setAdjusting] = useState(false);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  /** Diameter in Å of the circle that follows the cursor (key C), and whether it is shown. */
+  const [circle, setCircle] = useState(150);
+  const [circleOn, setCircleOn] = useState(false);
+  /** The images of the folder of the file on screen, for the keys N and B. */
+  const [siblings, setSiblings] = useState<{ dir: string; files: string[] } | null>(null);
+  const [siblingsAsked, setSiblingsAsked] = useState(0);
 
   // What is on screen. Every request for pixels is built from these values only: the file as
   // the server described it, the options it was opened with and a plane that exists in it.
@@ -104,13 +114,20 @@ export function App({ onLive }: { onLive: () => void }) {
   // ── opening a file ─────────────────────────────────────────────────────────
   // Set when the next file to arrive must be fitted to the window. The view cannot simply be
   // cleared here: the previous file is still on screen and would be refitted in its place.
-  const fitOnLoad = useRef(false);
+  // "same-size": keep the view if the next file has the size of the one on screen (the next
+  // image of a session: the same region of the next micrograph).
+  const fitOnLoad = useRef<boolean | "same-size">(false);
+  // (the file last loaded: while the next one loads, `info` is already null)
+  const shownShape = useRef(loaded?.response.info.shape);
+  shownShape.current = loaded?.response.info.shape;
   /** Whether the coordinate file in use names micrographs (it then applies to other images). */
   const picksMany = useRef(false);
   const pathRef = useRef(path);
   pathRef.current = path;
-  const openFile = useCallback((next: string) => {
-    fitOnLoad.current = true;
+  /** Open `next`. `keep`: the next or previous image of the folder, with everything kept that
+   *  can be (view, contrast, typed pixel size); otherwise those start afresh. */
+  const openFile = useCallback((next: string, keep = false) => {
+    fitOnLoad.current = keep ? "same-size" : true;
     // filters and frame average follow the user from file to file; a gain only to a file of
     // the same kind in the same directory (an already corrected image must not get it again)
     if (!keepsGain(pathRef.current, next)) setCryo((c) => ({ ...c, gain: null, gainOrient: 0, gainInvert: false }));
@@ -119,10 +136,10 @@ export function App({ onLive }: { onLive: () => void }) {
     setPath(next);
     setOptions({});
     setIndex({ t: 0, c: 0, z: 0 });
-    setDisplay((d) => ({ ...d, auto: true }));
+    if (!keep) setDisplay((d) => ({ ...d, auto: true }));
     setRuler(null);
     setPlaying(false);
-    setUserApix(null);
+    if (!keep) setUserApix(null);
     setError(null);
   }, []);
 
@@ -133,9 +150,11 @@ export function App({ onLive }: { onLive: () => void }) {
       .info(path, options, controller.signal)
       .then((r) => {
         // one update: the file, its options and a plane that exists in it change together
+        const before = shownShape.current;
+        const sameSize = before !== undefined && before.x === r.info.shape.x && before.y === r.info.shape.y;
         setLoaded({ requested: path, options, response: r });
         setStats(null);
-        if (fitOnLoad.current) setView(null);
+        if (fitOnLoad.current === true || (fitOnLoad.current === "same-size" && !sameSize)) setView(null);
         fitOnLoad.current = false;
         setIndex((i) => clampIndex(i, r.info.shape));
       })
@@ -167,6 +186,35 @@ export function App({ onLive }: { onLive: () => void }) {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  // ── the images of the folder: next and previous (N and B) ─────────────────
+  const folder = path ? dirname(path) : null;
+  useEffect(() => {
+    if (folder === null) return;
+    const controller = new AbortController();
+    (async () => {
+      const files: string[] = [];
+      // a session folder can hold tens of thousands of files (images, metadata, thumbnails)
+      for (let offset = 0, total = 1; offset < total && offset < 50_000; offset += 10_000) {
+        const page = await api.list(folder, offset, 10_000, controller.signal);
+        files.push(...siblingImages(page.entries));
+        total = page.total;
+      }
+      if (!controller.signal.aborted) setSiblings({ dir: folder, files });
+    })().catch(() => !controller.signal.aborted && setSiblings({ dir: folder, files: [] }));
+    return () => controller.abort();
+  }, [folder, siblingsAsked]);
+  const folderFiles = siblings && siblings.dir === folder ? siblings.files : null;
+  const position = path && folderFiles ? folderFiles.indexOf(path) : -1;
+  const go = useCallback(
+    (delta: number) => {
+      if (!path || !folderFiles) return;
+      const next = neighbour(folderFiles, path, delta);
+      if (next) openFile(next, true);
+      else setSiblingsAsked((n) => n + 1); // at an end: the session may have grown since
+    },
+    [path, folderFiles, openFile],
+  );
 
   // ── statistics of the plane on screen: histogram and automatic window ──────
   // Of a filtered plane, those of the overview: they follow a moving filter at once, where
@@ -327,6 +375,9 @@ export function App({ onLive }: { onLive: () => void }) {
         case "r": case "R": setTool((t) => (t === "ruler" ? "pan" : "ruler")); break;
         case "p": case "P": setCryo((c) => ({ ...c, spectrum: !c.spectrum })); break;
         case "l": case "L": setCryo((c) => (c.lowpass !== null || c.highpass !== null ? { ...c, filtersOff: !c.filtersOff } : c)); break;
+        case "c": case "C": if (apix) setCircleOn((on) => !on); break;
+        case "n": case "N": case "PageDown": e.preventDefault(); go(1); break;
+        case "b": case "B": case "PageUp": e.preventDefault(); go(-1); break;
         case "g": case "G": setGallery((g) => !g); break;
         case "Escape": setTool("pan"); setRuler(null); break;
         case "f": case "F": case "0": setView(null); break;
@@ -338,7 +389,7 @@ export function App({ onLive }: { onLive: () => void }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [step, changeDisplay, display.invert, zoomBy]);
+  }, [step, changeDisplay, display.invert, zoomBy, go, apix]);
 
   const rulerText = ruler ? rulerLabel(Math.hypot(ruler.x1 - ruler.x0, ruler.y1 - ruler.y0), apix) : null;
   const onShown = useCallback((i: PlaneIndex) => setShown(`${shownPath}|${i.t},${i.c},${i.z}`), [shownPath]);
@@ -355,6 +406,15 @@ export function App({ onLive }: { onLive: () => void }) {
           <button className={tool === "pan" ? "on" : ""} onClick={() => setTool("pan")} title="Déplacer (Échap)" data-testid="tool-pan">Déplacer</button>
           <button className={tool === "ruler" ? "on" : ""} onClick={() => setTool("ruler")} title="Règle (R)" data-testid="tool-ruler">Règle</button>
         </div>
+        {path && folderFiles && position >= 0 && (
+          <div className="group">
+            <button onClick={() => go(-1)} disabled={position === 0} title="Image précédente du dossier, réglages conservés (B, Page ↑)"
+              aria-label="Image précédente" data-testid="file-prev">◀</button>
+            <span className="position" data-testid="file-position">{position + 1} / {folderFiles.length}</span>
+            <button onClick={() => go(1)} title="Image suivante du dossier, réglages conservés (N, Page ↓)"
+              aria-label="Image suivante" data-testid="file-next">▶</button>
+          </div>
+        )}
         <div className="group">
           <button onClick={() => setView(null)} title="Ajuster à la fenêtre (F)" data-testid="fit">Ajuster</button>
           <button onClick={() => setView((v) => v && { ...v, zoom: 1 })} title="1 pixel image = 1 pixel écran (1)" data-testid="one-to-one">1:1</button>
@@ -435,6 +495,8 @@ export function App({ onLive }: { onLive: () => void }) {
               onError={onError}
               onLevel={setLevel}
               holdDetail={adjusting}
+              circle={circleOn && apix ? circle / apix : null}
+              onProfile={setProfile}
             />
           ) : (
             <div className="empty" data-testid="empty">
@@ -450,7 +512,10 @@ export function App({ onLive }: { onLive: () => void }) {
       <aside className="right">
         {response && info && (
           <>
-            <ScalePanel info={info} fileApix={fileApix} userApix={userApix} onUserApix={setUserApix} level={level} />
+            <ScalePanel info={info} fileApix={fileApix} userApix={userApix} onUserApix={setUserApix} level={level}>
+              <MeasurePanel ruler={ruler} profile={profile} apix={apix} circle={circle} circleOn={circleOn && apix !== null}
+                onCircle={setCircle} onCircleOn={setCircleOn} />
+            </ScalePanel>
             <ContrastPanel reducedBy={statsBin} stats={stats} display={display} rgb={info.rgb} customLut={customLut !== null} onChange={changeDisplay} onLutFile={loadLutFile} />
             <StackControls info={info} index={index} onChange={setIndex} playing={playing} onPlay={setPlaying} fps={fps} onFps={setFps}
               averageEnd={tEnd} />

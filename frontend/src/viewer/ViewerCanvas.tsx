@@ -8,6 +8,7 @@ import type { PickOverlay } from "./cryo";
 import { type GpuLayer, Renderer } from "./gl";
 import type { Lut } from "./luts";
 import { loadPlanes, type PlaneSet, planeKeyOf, toFloat32, valuesAt } from "./planes";
+import { lineProfile, type Profile, setCovers } from "./profile";
 import {
   baseBin,
   detailRequest,
@@ -66,6 +67,10 @@ interface Props {
   onLevel: (bin: number) => void;
   /** Do not load a detail for now (a filter slider is held): the overview follows it. */
   holdDetail?: boolean;
+  /** Diameter, in image pixels, of a circle drawn around the cursor; null: none. */
+  circle?: number | null;
+  /** Told the intensity along the ruler, read from the finest pixels on screen. */
+  onProfile?: (profile: Profile | null) => void;
 }
 
 interface Loaded {
@@ -76,7 +81,7 @@ interface Loaded {
 const DETAIL_DELAY_MS = 120;
 
 export function ViewerCanvas(props: Props) {
-  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix, picks, holdDetail = false } = props;
+  const { path, etag, info, index, options, proc, display, lut, view, tool, ruler, apix, picks, holdDetail = false, circle = null } = props;
   const wrapRef = useRef<HTMLDivElement>(null);
   const glRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -86,6 +91,7 @@ export function ViewerCanvas(props: Props) {
   const frameRef = useRef(0);
   const [viewport, setViewport] = useState<Size | null>(null);
   const [baseVersion, setBaseVersion] = useState(0);
+  const [detailVersion, setDetailVersion] = useState(0);
   const callbacks = useRef(props);
   callbacks.current = props;
 
@@ -94,8 +100,8 @@ export function ViewerCanvas(props: Props) {
   const planeKey = planeKeyOf(etag, options, index, channels, proc);
 
   // ── drawing ────────────────────────────────────────────────────────────────
-  const state = useRef({ view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image });
-  state.current = { view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image };
+  const state = useRef({ view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image, circle });
+  state.current = { view, viewport, display, ruler, apix, picks, planeKey, rgb: info.rgb, image, circle };
   const [drawnPicks, setDrawnPicks] = useState(0);
 
   // ── value under the cursor ─────────────────────────────────────────────────
@@ -151,7 +157,8 @@ export function ViewerCanvas(props: Props) {
         invert: s.display.invert,
         rgb: s.rgb,
       });
-      const drawn = drawOverlay(overlayRef.current, s.view, s.viewport, dpr, s.ruler, s.apix, s.picks);
+      const cursor = s.circle !== null ? pointer.current : null;
+      const drawn = drawOverlay(overlayRef.current, s.view, s.viewport, dpr, s.ruler, s.apix, s.picks, cursor, s.circle);
       setDrawnPicks(drawn);
     });
   }, []);
@@ -205,7 +212,22 @@ export function ViewerCanvas(props: Props) {
     draw();
   }, [lut, draw]);
 
-  useEffect(draw, [draw, view, viewport, display, ruler, apix, picks]);
+  useEffect(draw, [draw, view, viewport, display, ruler, apix, picks, circle]);
+
+  // ── intensity along the ruler, from the finest pixels that hold both of its ends ──
+  useEffect(() => {
+    const report = callbacks.current.onProfile;
+    if (!report) return;
+    if (!ruler) {
+      report(null);
+      return;
+    }
+    const sets = [detailRef.current?.set, baseRef.current?.set].filter(
+      (set): set is PlaneSet => !!set && set.planeKey === planeKey,
+    );
+    const set = sets.find((candidate) => setCovers(candidate, ruler)) ?? sets.at(-1);
+    report(set ? lineProfile(set, ruler) : null);
+  }, [ruler, baseVersion, detailVersion, planeKey]);
 
   // ── overview: the whole plane, binned ──────────────────────────────────────
   useEffect(() => {
@@ -267,6 +289,7 @@ export function ViewerCanvas(props: Props) {
           const layer = renderer.createLayer(set.planes.map(toFloat32), set.width, set.height, set.region, set.bin);
           renderer.deleteLayer(detailRef.current?.layer);
           detailRef.current = { set, layer };
+          setDetailVersion((v) => v + 1);
           draw();
           refreshHover();
         })
@@ -328,6 +351,7 @@ export function ViewerCanvas(props: Props) {
     }
     pointer.current = [sx, sy];
     hover(sx, sy);
+    if (state.current.circle !== null) draw();
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
@@ -342,12 +366,14 @@ export function ViewerCanvas(props: Props) {
       data-testid="viewer"
       data-picks={picks ? picks.points.length / 2 : undefined}
       data-picks-drawn={picks ? drawnPicks : undefined}
+      data-circle={circle ?? undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerLeave={() => {
         pointer.current = null;
         props.onHover(null);
+        if (circle !== null) draw();
       }}
       onDoubleClick={() => viewport && props.onViewChange(fitView(image, viewport))}
     >
@@ -357,8 +383,9 @@ export function ViewerCanvas(props: Props) {
   );
 }
 
-/** Particles, ruler and scale bar, drawn in screen space: constant line width and text size
- *  at any zoom. Returns the number of particles that fell in the window. */
+/** Particles, ruler, scale bar and the circle around the cursor, drawn in screen space:
+ *  constant line width and text size at any zoom. Returns the number of particles that fell
+ *  in the window. */
 function drawOverlay(
   canvas: HTMLCanvasElement | null,
   view: View,
@@ -367,6 +394,8 @@ function drawOverlay(
   ruler: Ruler | null,
   apix: number | null,
   picks: PickOverlay | null,
+  cursor: [number, number] | null,
+  circle: number | null,
 ): number {
   if (!canvas) return 0;
   const w = Math.round(viewport.width * dpr);
@@ -454,6 +483,23 @@ function drawOverlay(
       ctx.textBaseline = "bottom";
       ctx.fillText(label, tx, ty + 2);
     }
+  }
+  if (cursor && circle !== null && circle > 0) {
+    // the size of a particle, of a hole, of a box, at the cursor
+    const r = (circle / 2) * view.zoom;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(5, 8, 12, 0.7)";
+    ctx.beginPath();
+    ctx.arc(cursor[0], cursor[1], r + 1.5, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.strokeStyle = "#19c8ff";
+    ctx.beginPath();
+    ctx.arc(cursor[0], cursor[1], r, 0, 2 * Math.PI);
+    ctx.moveTo(cursor[0] - 4, cursor[1]);
+    ctx.lineTo(cursor[0] + 4, cursor[1]);
+    ctx.moveTo(cursor[0], cursor[1] - 4);
+    ctx.lineTo(cursor[0], cursor[1] + 4);
+    ctx.stroke();
   }
   return drawn;
 }
