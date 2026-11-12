@@ -76,6 +76,10 @@ class SimSettings:
     per_square: int = 30
     pixel_size: float = 0.83
     seed: int = 0
+    #: Write an atlas in the session before the first exposure: ``Atlas/Atlas_1.mrc``, the whole
+    #: grid at low magnification (a pale disc of squares on a dark ring), and one of its tiles.
+    #: EPU usually keeps it in a session of its own; some copy it into the collection's folder.
+    atlas: bool = False
 
 
 def _key_value(key: str, value: str, kind: str) -> str:
@@ -251,6 +255,8 @@ class MicroscopeSim:
         """Do everything the microscope does up to time ``now``."""
         if self._next_start is None:
             self._next_start = now
+            if self.settings.atlas:
+                self._write_atlas(now)
         interval = 3600.0 / self.settings.rate_per_hour
         while True:
             start = self._next_start if self._running else None
@@ -263,6 +269,15 @@ class MicroscopeSim:
                 action(when)
             else:
                 return
+
+    def _write_atlas(self, now: float) -> None:
+        side = 256
+        y, x = np.mgrid[0:side, 0:side] - side / 2
+        grid = np.where((np.abs(x) % 16 < 12) & (np.abs(y) % 16 < 12), 60.0, 20.0)  # squares, bars
+        atlas = np.where(np.hypot(x, y) < side * 0.45, grid, 5.0).astype(np.float32)  # the disc
+        self._mkdir("Atlas", now)
+        self._write("Atlas/Tile_1_1.mrc", mrc_bytes(atlas[:128, :128].copy(), 1500.0), now, last=True)
+        self._write("Atlas/Atlas_1.mrc", mrc_bytes(atlas, 1500.0), now, last=True)
 
     def stop(self) -> None:
         """Start no new exposure; those in progress finish as :meth:`step` is called."""

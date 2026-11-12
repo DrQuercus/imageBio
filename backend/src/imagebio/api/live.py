@@ -17,7 +17,7 @@ from fastapi.responses import Response
 
 from imagebio.api.security import current_user
 from imagebio.core.config import Settings
-from imagebio.core.errors import InvalidRequestError, NotFoundError
+from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import json_safe
 from imagebio.fs.roots import MAX_PATH_LENGTH, RootSet
 from imagebio.live.alerts import AlertRules
@@ -158,11 +158,41 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         _only(request, frozenset())
         return _json(live.reports(own_watch(request, watch_id)))
 
+    def atlas_allowed(request: Request, watch: WatchInfo) -> bool:
+        """Whether the user may still read the atlas chosen for the reports of ``watch``. That
+        the file is still the one chosen (not a link put in its place) the service checks."""
+        chosen = live.chosen_atlas(watch)
+        if chosen is None:
+            return True
+        try:
+            roots.resolve(chosen["logical"], current_user(request, settings))
+        except ImageBioError:
+            return False
+        return True
+
     @app.post("/api/live/watches/{watch_id}/reports")
     def live_watch_report_make(request: Request, watch_id: int = _WATCH_ID) -> Response:
         """Make the quality report of the session now."""
         _only(request, frozenset())
-        return _json(live.make_report(own_watch(request, watch_id), "manual"))
+        watch = own_watch(request, watch_id)
+        return _json(live.make_report(watch, "manual", atlas_allowed(request, watch)))
+
+    @app.put("/api/live/watches/{watch_id}/atlas")
+    def live_watch_atlas_set(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        path: str | None = Query(None, min_length=1, max_length=MAX_PATH_LENGTH),
+    ) -> Response:
+        """Choose the atlas shown in the reports of a watch (a file the user may read), or,
+        without ``path``, go back to the one found in the session, if any."""
+        _only(request, frozenset({"path"}))
+        watch = own_watch(request, watch_id)
+        if path is None:
+            return _json(live.set_atlas(watch, None, None))
+        resolved = roots.resolve(path, current_user(request, settings))
+        if not resolved.is_file:
+            raise InvalidRequestError(f"not a file: {resolved.logical}")
+        return _json(live.set_atlas(watch, resolved.logical, resolved.real))
 
     @app.put("/api/live/watches/{watch_id}/reports")
     def live_watch_report_auto(

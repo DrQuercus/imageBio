@@ -353,3 +353,39 @@ def test_a_cell_cut_on_semicolons_or_trimmed_is_no_formula() -> None:
     rows = list(csv.DictReader(io.StringIO(text)))
     assert [r["name"] for r in rows] == ["x;'=2+6;", "' =2+4", "'  @SUM(A1)", "plain"]
     assert rows[0]["path"] == "cryo/session/x;'=2+6;.mrc"
+
+
+def test_each_square_gets_its_latest_overview_and_the_atlas_is_passed_on() -> None:
+    images = session(6)  # squares GridSquare_100, 101 and 102
+
+    def view(n: int, square: int, **kw: object) -> Exposure:
+        name = f"GridSquare_2025010{n % 10}_000000"
+        rel = f"Images-Disc1/GridSquare_{square}"
+        return exposure(
+            n, name=name, rel=rel, path=f"cryo/session/{rel}/{name}.jpg", category="gridsquare", **kw
+        )
+
+    views = [
+        view(100, 100, time=T0 - 50),
+        view(101, 100, time=T0 - 10),  # taken again: the latest is shown
+        view(102, 101, state="incoming"),  # not finished: none for this square
+        view(103, 999),  # a square looked at, where no image was taken
+        exposure(104, name="Atlas_1", rel="Atlas", path="cryo/session/Atlas/Atlas_1.mrc", category="atlas"),
+    ]
+    atlas = {
+        "name": "Atlas_1.mrc",
+        "path": "cryo/session/Atlas/Atlas_1.mrc",
+        "source": "found",
+        "problem": None,
+    }
+    report = build_report(images + views, context(atlas=atlas))
+    squares = {s["name"]: s for s in report["squares"]}
+    assert set(squares) == {"GridSquare_100", "GridSquare_101", "GridSquare_102"}  # 999 has no image
+    assert squares["GridSquare_100"]["overview"] == {
+        "id": 101,
+        "path": "cryo/session/Images-Disc1/GridSquare_100/GridSquare_20250101_000000.jpg",
+    }
+    assert squares["GridSquare_101"]["overview"] is None and squares["GridSquare_102"]["overview"] is None
+    assert report["counts"]["exposures"] == 6  # views of the grid are not acquisitions
+    assert report["atlas"] == atlas
+    assert build_report(images, context())["atlas"] is None

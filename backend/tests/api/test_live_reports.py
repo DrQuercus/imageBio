@@ -299,3 +299,108 @@ def test_a_report_that_fails_is_not_tried_again_every_minute(
     monkeypatch.undo()
     world.run([], 3700)
     assert [r["trigger"] for r in reports(world, watch)["reports"]] == ["idle"]
+
+
+ATLAS = f"{WATCHES}/{{}}/atlas"
+ALICE_ELSEWHERE = {"X-Forwarded-User": "alice", "X-Forwarded-Groups": "staff"}  # no longer in cryoem
+
+
+def picture(page: str, alt: str):
+    """The JPEG of the page that has this alt text, decoded."""
+    import base64
+    import re
+
+    from PIL import Image
+
+    found = re.search(f'<img alt="{re.escape(alt)}" src="data:image/jpeg;base64,([^"]+)"', page)
+    assert found, alt
+    return np.asarray(Image.open(io.BytesIO(base64.b64decode(found.group(1)))).convert("L"), dtype=np.float64)
+
+
+def test_the_report_shows_the_atlas_and_the_squares_of_the_session(world: World) -> None:
+    import mrcfile
+
+    watch = follow(world, "public/shared", ALICE)
+    sim = sim_in(world, "public/shared", seed=4, atlas=True, per_square=4)
+    world.run([sim], 120)
+    sim.stop()
+    world.run([sim], 120)
+    listing = reports(world, watch)
+    # EPU's stitched atlas, not one of its tiles
+    assert listing["atlas"] == {
+        "chosen": None,
+        "found": {"name": "Atlas_1.mrc", "path": "public/shared/Atlas/Atlas_1.mrc"},
+    }
+    made = make(world, watch)
+    page = get(world, watch, made["id"], "html").text
+    numbers = json.loads(get(world, watch, made["id"], "json").text)
+    assert numbers["atlas"] == {
+        "name": "Atlas_1.mrc",
+        "path": "public/shared/Atlas/Atlas_1.mrc",
+        "source": "found",
+        "problem": None,
+    }
+    assert "trouvé dans la session" in page
+    # the picture is the atlas: bright squares inside the disc, dark outside, as in the file
+    with mrcfile.open(world.tree.base / "public/shared/Atlas/Atlas_1.mrc") as m:
+        atlas = m.data.astype(np.float64)
+    shown = picture(page, "Atlas de la grille")
+    assert shown.shape == atlas.shape  # 256 pixels: shown as it is, under the width of the page
+    inside, outside = atlas > 10, atlas < 10
+    assert shown[inside].mean() > shown[outside].mean() + 100
+    # one card per square where images were taken, with the overview EPU took of it
+    squares = numbers["squares"]
+    assert len(squares) >= 3
+    for square in squares:
+        assert square["overview"]["path"].startswith(
+            f"public/shared/Images-Disc1/{square['name']}/GridSquare_"
+        )
+        assert picture(page, f"Vue du {square['name']}").size > 0
+
+
+def test_an_atlas_can_be_chosen_and_must_stay_readable(world: World) -> None:
+    import shutil
+
+    watch = follow(world, "public/shared", ALICE)
+    arrive(world, "public/shared", {"a": np.random.default_rng(1).normal(5, 1, (64, 64))})
+    url = ATLAS.format(watch)
+    # an image the user may read, of another root (EPU keeps the atlas in a session of its own)
+    shutil.copy(world.tree.base / "cryo/movie.mrc", world.tree.base / "cryo/atlas.mrc")
+    r = world.client.put(url, params={"path": "cryo/atlas.mrc"}, headers=ALICE)
+    assert r.status_code == 200, r.text
+    assert r.json()["atlas"]["chosen"] == {"name": "atlas.mrc", "path": "cryo/atlas.mrc"}
+    page = get(world, watch, make(world, watch)["id"], "html").text
+    assert "choisi pour ce rapport" in page and picture(page, "Atlas de la grille").size > 0
+
+    # what is not an image, not a file, or not the user's to read is refused, and changes nothing
+    assert world.client.put(url, params={"path": "cryo/session/notes.txt"}, headers=ALICE).status_code == 415
+    assert world.client.put(url, params={"path": "cryo/session"}, headers=ALICE).status_code == 400
+    assert world.client.put(url, params={"path": "/etc/passwd"}, headers=ALICE).status_code in (400, 403, 404)
+    assert (
+        world.client.put(url, params={"path": "cryo/atlas.mrc"}, headers=BOB).status_code == 404
+    )  # not his watch
+    bobs = follow(world, "public/shared", BOB)
+    assert (
+        world.client.put(ATLAS.format(bobs), params={"path": "cryo/atlas.mrc"}, headers=BOB).status_code
+        == 403
+    )
+    assert reports(world, bobs, BOB)["atlas"]["chosen"] is None
+    assert reports(world, watch)["atlas"]["chosen"]["path"] == "cryo/atlas.mrc"
+
+    # a user who may no longer read it does not get it in the reports they ask for
+    world.now += 20
+    page = get(world, watch, make(world, watch, ALICE_ELSEWHERE)["id"], "html", ALICE_ELSEWHERE).text
+    assert "n'est plus accessible" in page and 'alt="Atlas de la grille"' not in page
+    # a file replaced by a link is not followed, a file gone is said
+    os.remove(world.tree.base / "cryo/atlas.mrc")
+    os.symlink(world.tree.base / "cryo/movie.mrc", world.tree.base / "cryo/atlas.mrc")
+    world.now += 20
+    page = get(world, watch, make(world, watch)["id"], "html").text
+    assert "n'a pas pu être lu" in page and 'alt="Atlas de la grille"' not in page
+
+    # forgotten: back to the one of the session (there is none here)
+    r = world.client.put(url, headers=ALICE)
+    assert r.status_code == 200 and r.json()["atlas"] == {"chosen": None, "found": None}
+    world.now += 20
+    page = get(world, watch, make(world, watch)["id"], "html").text
+    assert "Atlas" not in page

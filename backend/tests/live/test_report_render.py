@@ -140,3 +140,73 @@ def test_the_files_of_a_report_go_together() -> None:
     assert json.loads(archive.read("report.json"))["session"]["first"] == T0
     assert archive.read("report.html").decode().startswith("<!doctype html>")
     assert exposure(0).name in archive.read("exposures.csv").decode()
+
+
+def squares_and_atlas(fit_max: float, atlas: dict | None) -> tuple[dict, dict[int, bytes]]:
+    """Nine images in three squares (n, n + 3, n + 6 in square 100 + n), the overviews of the
+    first two squares, and an atlas."""
+    images = session(9)
+    views = [
+        exposure(
+            200 + k,
+            name=f"GridSquare_2025010{k}_000000",
+            rel=f"Images-Disc1/GridSquare_{100 + k}",
+            path=f"cryo/session/Images-Disc1/GridSquare_{100 + k}/GridSquare_2025010{k}_000000.jpg",
+            category="gridsquare",
+        )
+        for k in range(3)
+    ]
+    report = build_report(images + views, context(rules=QualityRules(fit_max=fit_max), atlas=atlas))
+    return report, {200: b"square 100", 201: b"square 101"}  # no picture of the third
+
+
+def grades(page: str) -> dict[str, str]:
+    """The class of the card of each square, by the alt text of its picture or its name."""
+    tags = Tags()
+    tags.feed(page)
+    out = {}
+    for tag, attrs in tags.tags:
+        if tag == "div" and "square" in (attrs.get("class") or "").split():
+            out[str(len(out))] = attrs["class"] or ""
+    return out
+
+
+def test_the_atlas_and_the_squares_are_shown_with_their_pictures() -> None:
+    atlas = {"name": HOSTILE[1] + ".mrc", "path": "cryo/x.mrc", "source": "chosen", "problem": None}
+    # the fit of image n is 3 + n / 10 Å: under 3.65, images 0 to 6 are accepted
+    report, thumbs = squares_and_atlas(3.65, atlas)
+    page = render_html(report, thumbs, atlas_image=b"the atlas")
+    tags = Tags()
+    tags.feed(page)
+    alts = [a.get("alt") for t, a in tags.tags if t == "img"]
+    assert alts.count("Atlas de la grille") == 1
+    assert "Vue du GridSquare_100" in alts and "Vue du GridSquare_101" in alts
+    assert "Vue du GridSquare_102" not in alts and "pas de vue du carré" in page
+    for tag, attrs in tags.tags:
+        if tag == "img":
+            assert (attrs.get("src") or "").startswith("data:image/jpeg;base64,")
+    assert "&quot;&gt;&lt;img src=x onerror=alert(1)&gt;.mrc" in page and "choisi pour ce rapport" in page
+    # the frame says how many images of the square were accepted: 3/3, 2/3 and 2/3
+    assert list(grades(page).values()) == ["square good", "square fair", "square fair"]
+    # under 3.45, images 0 to 4: 2/3, 2/3 and 1/3
+    report, thumbs = squares_and_atlas(3.45, None)
+    page = render_html(report, thumbs)
+    assert list(grades(page).values()) == ["square fair", "square fair", "square poor"]
+    assert "Atlas de la grille" not in page
+
+
+def test_an_atlas_that_cannot_be_shown_says_why() -> None:
+    for problem, said in (("unreadable", "n'a pas pu être lu"), ("not_allowed", "n'est plus accessible")):
+        atlas = {"name": "Atlas_1.mrc", "path": "cryo/Atlas_1.mrc", "source": "chosen", "problem": problem}
+        report, thumbs = squares_and_atlas(3.65, atlas)
+        page = render_html(report, thumbs, atlas_image=b"would not be used")
+        assert said in page and 'alt="Atlas de la grille"' not in page
+
+
+def test_many_squares_show_the_most_fed_with_images() -> None:
+    from imagebio.live.report_render import squares_shown
+
+    report = {"squares": [{"name": f"GridSquare_{k}", "exposures": k % 70} for k in range(60)]}
+    shown = squares_shown(report)
+    assert len(shown) == 48 and min(s["exposures"] for s in shown) == 12  # the 12 smallest are left out
+    assert squares_shown({"squares": report["squares"][:10]}) == report["squares"][:10]

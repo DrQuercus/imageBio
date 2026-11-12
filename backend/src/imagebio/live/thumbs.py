@@ -50,15 +50,16 @@ def render_thumbnail(
     t: int | None = None,
     z: int | None = None,
     options: Mapping[str, Any] | None = None,
+    limit: int = MAX_PX,
 ) -> bytes:
-    """A JPEG of ``path`` whose longer side is at most ``px`` pixels.
+    """A JPEG of ``path`` whose longer side is at most ``px`` pixels (``MIN_PX`` to ``limit``).
 
     A movie is shown as the mean of its first frames, a volume as its middle section, a colour
     picture in colour. With ``t`` or ``z`` it is that one plane instead (an image of a stack,
     a section of a volume), stretched on its own values. Raises the errors of the plane service
     (corrupt file, unknown format, no such plane…).
     """
-    px = max(MIN_PX, min(MAX_PX, int(px)))
+    px = max(MIN_PX, min(limit, int(px)))
     info, _ = planes.info(path, options)
     factor = min(MAX_BIN, max(1, math.ceil(max(info.size_x, info.size_y) / px)))
     one = t is not None or z is not None

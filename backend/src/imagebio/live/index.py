@@ -50,7 +50,7 @@ def hold_state_dir(directory: Path, *, alone: bool = False) -> IO[str] | None:
     return handle
 
 
-SCHEMA_VERSION: Final = 8
+SCHEMA_VERSION: Final = 9
 #: How long a writer waits for another one (seconds) before giving up with "database is locked".
 _BUSY_TIMEOUT_S = 30.0
 
@@ -73,6 +73,7 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
         "ALTER TABLE roots ADD COLUMN microscope_at REAL",
         "ALTER TABLE watches ADD COLUMN report_auto INTEGER NOT NULL DEFAULT 1",
     ),
+    8: ("ALTER TABLE watches ADD COLUMN atlas TEXT",),
 }
 
 _SCHEMA: Final = """
@@ -107,6 +108,8 @@ CREATE TABLE IF NOT EXISTS watches (
     quality    TEXT,                     -- JSON acceptance thresholds (live/quality.py), NULL: none
     processing INTEGER NOT NULL DEFAULT 0,  -- 1: its user asked for the external programs
     report_auto INTEGER NOT NULL DEFAULT 1, -- 1: a quality report is made when the watch ends
+    atlas      TEXT,                     -- JSON {logical, real} of the atlas its user chose for the
+                                         -- report; NULL: the one found in the session, if any
     UNIQUE (user, logical)
 );
 

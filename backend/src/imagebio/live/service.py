@@ -51,7 +51,7 @@ from imagebio.live.index import Index, hold_state_dir
 from imagebio.live.metrics import Microscope, measure, measure_drift
 from imagebio.live.quality import QualityRules
 from imagebio.live.report import Exposure, ReportContext, build_report, exposure_rows
-from imagebio.live.report_render import bundle, render_csv, render_html, render_json
+from imagebio.live.report_render import bundle, render_csv, render_html, render_json, squares_shown
 from imagebio.live.scanner import CycleReport, FileVersion, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -96,6 +96,9 @@ _ALERT_EVENTS_KEPT: Final = 200  # alerts remembered per watch, for its report
 _REPORTS_KEPT: Final = 20  # reports kept per watch: older ones are removed
 _REPORT_AGAIN_S: Final = 10.0  # a report asked for again this soon is the one just made
 _REPORT_THUMB_PX: Final = 256
+_REPORT_ATLAS_PX: Final = 1024  # the atlas, at the width of the page
+#: The atlas EPU stitches (``Atlas/Atlas_1.mrc``), not one of its tiles (``Tile_…``).
+_ATLAS_NAME: Final = re.compile(r"atlas(_\d+)?", re.IGNORECASE)
 _IDLE_CHECK_S: Final = 60.0  # how often a directory is checked for a collection that went silent
 _REPORT_RETRY_S: Final = 3600.0  # a report that could not be made is tried again after this
 
@@ -1057,7 +1060,107 @@ class LiveService:
             "auto": auto,
             "idle_min": round(self._settings.live_report_idle_s / 60),
             "reports": [self._report_row(r) for r in rows if (self.reports_dir / r["name"]).is_dir()],
+            "atlas": self.atlas(watch),
         }
+
+    # ── the atlas of the report ──────────────────────────────────────────────
+    def _atlas_found(self, db: sqlite3.Connection, watch: WatchInfo) -> dict[str, Any] | None:
+        """The atlas of the session, if EPU's stitched one is in the watched directory (under
+        an ``Atlas`` directory): the newest."""
+        found = None
+        for row in db.execute(
+            "SELECT e.id, e.name, e.primary_name, e.time, d.rel FROM exposures e "
+            "JOIN dirs d ON d.id = e.dir_id "
+            "WHERE e.root_id = ? AND e.category = 'atlas' AND e.state = 'complete' "
+            "AND e.primary_name IS NOT NULL",
+            (watch.root_id,),
+        ):
+            if _ATLAS_NAME.fullmatch(row["name"]) and (
+                found is None or (row["time"] or 0.0, row["id"]) > (found["time"] or 0.0, found["id"])
+            ):
+                found = row
+        if found is None:
+            return None
+        rel, name = found["rel"], found["primary_name"]
+        return {
+            "name": name,
+            "path": "/".join(p for p in (watch.logical, rel, name) if p),
+            "rel": rel,
+            "file": name,
+        }
+
+    def chosen_atlas(self, watch: WatchInfo) -> dict[str, str] | None:
+        """The atlas the user of ``watch`` chose for its reports: {logical, real}."""
+        db = self.index.connection()
+        row = db.execute("SELECT atlas FROM watches WHERE id = ?", (watch.id,)).fetchone()
+        if row is None or not row["atlas"]:
+            return None
+        chosen = json.loads(row["atlas"])
+        return {"logical": str(chosen["logical"]), "real": str(chosen["real"])}
+
+    def atlas(self, watch: WatchInfo) -> dict[str, Any]:
+        """The atlas a report of ``watch`` would show: the one chosen, else the one found."""
+        found = self._atlas_found(self.index.connection(), watch)
+        chosen = self.chosen_atlas(watch)
+        return {
+            "chosen": {"name": chosen["logical"].rsplit("/", 1)[-1], "path": chosen["logical"]}
+            if chosen
+            else None,
+            "found": {"name": found["name"], "path": found["path"]} if found else None,
+        }
+
+    def set_atlas(self, watch: WatchInfo, logical: str | None, real: Path | None) -> dict[str, Any]:
+        """Choose the atlas of the reports of ``watch`` (a file its user may read, already
+        resolved by the caller), or forget it (None). It belongs to the watch, not to the
+        session: another user of the same directory may not be allowed to read it."""
+        if logical is not None and real is not None:
+            info, _ = self._planes.info(real)  # an image imageBio can read, or a clear refusal
+            if info.size_x < 2 or info.size_y < 2:
+                raise InvalidRequestError("an atlas is an image")
+            value: str | None = json.dumps({"logical": logical, "real": str(real)})
+        else:
+            value = None
+        with self.index.write() as db:
+            db.execute("UPDATE watches SET atlas = ? WHERE id = ?", (value, watch.id))
+        return self.reports(watch)
+
+    def _report_atlas(
+        self, db: sqlite3.Connection, watch: WatchInfo, allowed: bool
+    ) -> tuple[dict[str, Any] | None, bytes | None]:
+        """The atlas of a report and its picture. A chosen atlas was allowed when it was chosen
+        and is checked again (``allowed``) when a user asks for a report; one made by itself
+        (the watch ended, the collection fell silent) reads the file chosen, if it is still
+        a regular file reached through no link, as the watch itself goes on being read."""
+        chosen = self.chosen_atlas(watch)
+        if chosen is not None:
+            out: dict[str, Any] = {
+                "name": chosen["logical"].rsplit("/", 1)[-1],
+                "path": chosen["logical"],
+                "source": "chosen",
+                "problem": None,
+            }
+            if not allowed:
+                out["problem"] = "not_allowed"
+                return out, None
+            real = Path(chosen["real"])
+            try:
+                plain = stat.S_ISREG(os.lstat(real).st_mode) and os.path.realpath(real) == str(real)
+            except OSError:
+                plain = False
+            path: Path | None = real if plain else None
+        else:
+            found = self._atlas_found(db, watch)
+            if found is None:
+                return None, None
+            out = {"name": found["name"], "path": found["path"], "source": "found", "problem": None}
+            path = self._plain_file(watch.root_path, found["rel"], found["file"])
+        image = None
+        if path is not None:
+            with contextlib.suppress(ImageBioError, OSError, ValueError):
+                image = render_thumbnail(self._planes, path, _REPORT_ATLAS_PX, limit=_REPORT_ATLAS_PX)
+        if image is None:
+            out["problem"] = "unreadable"
+        return out, image
 
     def set_report_auto(self, watch: WatchInfo, on: bool) -> dict[str, Any]:
         with self.index.write() as db:
@@ -1091,9 +1194,12 @@ class LiveService:
         )
         return data, media, download, float(row["created_at"])
 
-    def make_report(self, watch: WatchInfo, trigger: str = "manual") -> dict[str, Any]:
+    def make_report(
+        self, watch: WatchInfo, trigger: str = "manual", atlas_allowed: bool = True
+    ) -> dict[str, Any]:
         """Write the quality report of the session ``watch`` looks at, as it is now, and return
-        its listing. Asked for again within a few seconds, the report just made is returned."""
+        its listing. Asked for again within a few seconds, the report just made is returned.
+        ``atlas_allowed``: whether the user still may read the atlas chosen, if any."""
         with self._reporting:
             db = self.index.connection()
             now = self.clock()
@@ -1137,6 +1243,7 @@ class LiveService:
                 for r in rows
             ]
             files = {r["id"]: (r["rel"], r["primary_name"]) for r in rows}
+            atlas, atlas_image = self._report_atlas(db, watch, atlas_allowed)
             ctx = ReportContext(
                 session=watch.logical,
                 watch_id=watch.id,
@@ -1157,17 +1264,21 @@ class LiveService:
                         (watch.id,),
                     )
                 ],
+                atlas=atlas,
             )
             report = build_report(exposures, ctx)
             thumbs: dict[int, bytes] = {}
-            for card in report["best"] + report["worst"]:
-                rel, name = files[card["id"]]
+            shown = [card["id"] for card in report["best"] + report["worst"]] + [
+                s["overview"]["id"] for s in squares_shown(report) if s.get("overview")
+            ]
+            for exposure_id in shown:
+                rel, name = files[exposure_id]
                 path = self._plain_file(watch.root_path, rel, name)
                 if path is None:
                     continue
                 with contextlib.suppress(ImageBioError, OSError, ValueError):
-                    thumbs[card["id"]] = self.thumbnail(path, _REPORT_THUMB_PX)[0]
-            page, numbers = render_html(report, thumbs), render_json(report)
+                    thumbs[exposure_id] = self.thumbnail(path, _REPORT_THUMB_PX)[0]
+            page, numbers = render_html(report, thumbs, atlas_image), render_json(report)
             table = render_csv(exposure_rows(exposures, ctx))
             contents: dict[str, str | bytes] = {
                 "report.html": page,

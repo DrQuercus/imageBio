@@ -33,6 +33,7 @@ _TARGET: Final = "#9e9e9e"
 _COLOURS: Final = {"a": _ACCEPTED, "r": _REJECTED, "": _UNJUDGED}
 _WIDTH: Final = 680
 _MAX_SQUARE_ROWS: Final = 60
+_MAX_SQUARE_CARDS: Final = 48  # squares shown with their overview (some 10 kB each)
 
 PARAMETER_LABELS: Final = {
     "voltage": "Tension",
@@ -120,6 +121,13 @@ th { font-weight: 600; color: #333; background: #fafafa; } td.n, th.n { text-ali
 .thumb .name { word-break: break-all; color: #333; margin: 4px 0 2px; }
 .cap { font-size: 11px; color: #444; margin: 8px 0 2px; }
 .rej { color: #c62828; } .acc { color: #2e7d32; }
+.atlas { margin: 6px 0 12px; } .atlas img { width: 100%; height: auto; display: block; background: #111; border-radius: 4px; }
+.atlas figcaption { font-size: 11px; color: #555; margin-top: 3px; }
+.squares { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.square { border: 2px solid #ddd; border-radius: 6px; padding: 5px; font-size: 11px; break-inside: avoid; }
+.square img { width: 100%; height: auto; display: block; background: #222; border-radius: 3px; }
+.square.good { border-color: #66bb6a; } .square.fair { border-color: #ffb74d; } .square.poor { border-color: #e57373; }
+.square .name { word-break: break-all; color: #333; margin: 3px 0 1px; }
 svg { display: block; max-width: 100%; height: auto; } svg text { font: 10px system-ui, sans-serif; fill: #444; }
 section { break-inside: avoid-page; }
 footer { margin-top: 32px; color: #777; font-size: 11px; border-top: 1px solid #ddd; padding-top: 8px; }
@@ -480,9 +488,56 @@ def _card(card: Mapping[str, Any], thumbs: Mapping[int, bytes]) -> str:
     )
 
 
-def render_html(report: Mapping[str, Any], thumbs: Mapping[int, bytes] | None = None) -> str:
-    """The report as one self-contained page, in French. ``thumbs``: JPEG of the images shown,
-    by exposure id."""
+def _jpeg(data: bytes, alt: str) -> str:
+    return f'<img alt="{_e(alt)}" src="data:image/jpeg;base64,{base64.b64encode(data).decode("ascii")}">'
+
+
+ATLAS_PROBLEMS: Final = {
+    "unreadable": "n'a pas pu être lu (fichier déplacé, effacé ou illisible)",
+    "not_allowed": "n'est plus accessible à l'utilisateur de la surveillance",
+}
+
+
+def _atlas(atlas: Mapping[str, Any], image: bytes | None) -> str:
+    source = "choisi pour ce rapport" if atlas.get("source") == "chosen" else "trouvé dans la session"
+    name = f'<span class="mono">{_e(atlas.get("name", ""))}</span>'
+    problem = ATLAS_PROBLEMS.get(str(atlas.get("problem")))
+    if problem or image is None:
+        return f'<p class="note">L\'atlas {name} ({source}) {problem or "ne peut pas être montré"}.</p>'
+    return f'<figure class="atlas">{_jpeg(image, "Atlas de la grille")}<figcaption>Atlas de la grille : {name}, {source}.</figcaption></figure>'
+
+
+def squares_shown(report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The squares the page shows with their overview: the most fed with images, when there
+    are many (their thumbnails are made for the page, one image read each)."""
+    squares: list[Mapping[str, Any]] = report["squares"]
+    if len(squares) <= _MAX_SQUARE_CARDS:
+        return squares
+    return sorted(squares, key=lambda s: -s["exposures"])[:_MAX_SQUARE_CARDS]
+
+
+def _square_card(square: Mapping[str, Any], thumbs: Mapping[int, bytes], judged: bool) -> str:
+    overview = square.get("overview") or {}
+    data = thumbs.get(int(overview["id"])) if overview.get("id") is not None else None
+    image = _jpeg(data, f"Vue du {square['name']}") if data else '<p class="note">pas de vue du carré</p>'
+    total = square["accepted"] + square["rejected"]
+    grade = ""
+    if judged and total:
+        share = square["accepted"] / total
+        grade = " good" if share >= 0.7 else " fair" if share >= 0.4 else " poor"
+    accepted = f" · {square['accepted']}/{total} acceptées" if judged and total else ""
+    return (
+        f'<div class="square{grade}">{image}<div class="name mono">{_e(square["name"])}</div>'
+        f"<div>{square['exposures']} image(s){accepted}</div>"
+        f"<div>CTF {_num(square.get('median_fit'), 1)} Å · glace {_num(square.get('median_ice'))}</div></div>"
+    )
+
+
+def render_html(
+    report: Mapping[str, Any], thumbs: Mapping[int, bytes] | None = None, atlas_image: bytes | None = None
+) -> str:
+    """The report as one self-contained page, in French. ``thumbs``: JPEG of the images shown
+    and of the overviews of the grid squares, by exposure id; ``atlas_image``: JPEG of the atlas."""
     thumbs = thumbs or {}
     session, head, counts = report["session"], report["headline"], report["counts"]
     quality, dist = report.get("quality"), report["distributions"]
@@ -675,9 +730,30 @@ def render_html(report: Mapping[str, Any], thumbs: Mapping[int, bytes] | None = 
     add("</section>")
 
     # ── grid ──
-    if report["squares"] or report["stage"]:
+    atlas = report.get("atlas")
+    if report["squares"] or report["stage"] or atlas:
         add("<section><h2>La grille</h2>")
+        if atlas:
+            add(_atlas(atlas, atlas_image))
         squares = report["squares"]
+        if any(s.get("overview") for s in squares):
+            square_cards = squares_shown(report)
+            add(
+                "<h3>Les carrés où des images ont été prises</h3>"
+                + (
+                    f'<p class="note">Les {_MAX_SQUARE_CARDS} plus fournis en images, sur {len(squares)}.</p>'
+                    if len(squares) > _MAX_SQUARE_CARDS
+                    else ""
+                )
+                + '<div class="squares">'
+                + "".join(_square_card(s, thumbs, judged) for s in square_cards)
+                + "</div>"
+                + (
+                    '<p class="note">Cadre vert : au moins 70 % des images acceptées ; orange : 40 à 70 % ; rouge : moins.</p>'
+                    if judged
+                    else ""
+                )
+            )
         if squares:
             add(
                 f"<p>{report['square_count']} carré(s) de grille. "

@@ -119,6 +119,9 @@ class ReportContext:
     microscope: dict[str, Any] = field(default_factory=dict)  # LiveService._microscope
     programs: dict[str, Any] = field(default_factory=dict)  # LiveService._processing_of
     alerts: Sequence[dict[str, Any]] = ()  # {condition, started, ended}
+    #: The atlas shown with the report: {name, path (logical), source: found | chosen,
+    #: problem: None | unreadable | not_allowed}; None: none found, none chosen.
+    atlas: dict[str, Any] | None = None
 
 
 def _number(value: Any) -> float | None:
@@ -449,6 +452,13 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
     target = series(lambda e: _number(_parameter(e, "target_defocus")))
 
     # ── by grid square, and on the stage ──
+    # the overview of a square EPU took (…/GridSquare_<id>/GridSquare_<time>): the latest one
+    overviews: dict[str, Exposure] = {}
+    for e in exposures:
+        if e.category == "gridsquare" and e.state == "complete" and (square := _square_of(e)) is not None:
+            known = overviews.get(square)
+            if known is None or (e.time or 0.0, e.id) >= (known.time or 0.0, known.id):
+                overviews[square] = e
     squares: dict[str, list[Exposure]] = {}
     for e in complete:
         square = _square_of(e)
@@ -473,6 +483,9 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
                     _round(statistics.fmean(s[1] for s in stages), 2),
                 ]
                 if stages
+                else None,
+                "overview": {"id": overviews[name].id, "path": overviews[name].path}
+                if name in overviews
                 else None,
             }
         )
@@ -675,6 +688,7 @@ def build_report(exposures: Sequence[Exposure], ctx: ReportContext) -> dict[str,
             "ice": series(ice),
             "motion": series(motion),
         },
+        "atlas": dict(ctx.atlas) if ctx.atlas is not None else None,
         "squares": square_rows[:_MAX_SQUARES],
         "square_count": len(square_rows),
         "stage": stage,

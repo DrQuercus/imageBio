@@ -465,7 +465,7 @@ _V2_ALERT_STATES = (
 )
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, version: int) -> None:
     path = tmp_path / "live.sqlite"
     index = Index(path)
@@ -483,10 +483,12 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
         db.execute('UPDATE watches SET alerts = \'{"channels": ["phone"]}\', alerts_at = 3.0')
     index.close()
     old = sqlite3.connect(path)  # what the earlier versions looked like
-    old.executescript(  # 7 and before: no microscope per session, no reports, no alert history
-        "ALTER TABLE roots DROP COLUMN microscope; ALTER TABLE roots DROP COLUMN microscope_at; "
-        "ALTER TABLE watches DROP COLUMN report_auto; DROP TABLE reports; DROP TABLE alert_events;"
-    )
+    old.executescript("ALTER TABLE watches DROP COLUMN atlas;")  # 8 and before: no atlas chosen
+    if version <= 7:  # no microscope per session, no reports, no alert history
+        old.executescript(
+            "ALTER TABLE roots DROP COLUMN microscope; ALTER TABLE roots DROP COLUMN microscope_at; "
+            "ALTER TABLE watches DROP COLUMN report_auto; DROP TABLE reports; DROP TABLE alert_events;"
+        )
     if version <= 6:  # no external programs
         old.executescript(
             "DROP INDEX exposures_unprocessed; ALTER TABLE watches DROP COLUMN processing; "
@@ -521,8 +523,9 @@ def test_an_index_of_an_earlier_version_is_brought_up_to_date(tmp_path: Path, ve
     assert (
         db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
         == str(SCHEMA_VERSION)
-        == "8"
+        == "9"
     )
+    assert db.execute("SELECT atlas FROM watches").fetchone()[0] is None  # the one of the session
     assert db.execute("SELECT report_auto FROM watches").fetchone()[0] == 1  # a report when it ends
     assert db.execute("SELECT microscope, microscope_at FROM roots").fetchone()[:] == (None, None)
     assert db.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == 0
