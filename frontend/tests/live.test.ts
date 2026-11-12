@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { LiveItem } from "../src/api/types";
 import {
@@ -28,6 +29,7 @@ import {
   parseThreshold,
   programLines,
   qualitySummary,
+  rejectionReasons,
   rejections,
   relativeIce,
   sortValue,
@@ -467,5 +469,26 @@ describe("alert thresholds as typed", () => {
 
   it("names every condition", () => {
     expect(Object.keys(ALERT_LABELS).sort()).toEqual(["disk", "no_image", "rate_drop", "scanner"]);
+  });
+});
+
+
+describe("the judgement of an image, as the server makes it for its reports", () => {
+  // shared with backend/tests/live/test_judgement.py: both sides must say the same
+  const cases = JSON.parse(readFileSync(new URL("../../backend/tests/fixtures/verdict_cases.json", import.meta.url), "utf8")) as {
+    name: string;
+    item: Pick<LiveItem, "state" | "metrics" | "processing">;
+    rules: Parameters<typeof verdict>[1];
+    reference: number | null;
+    calibrated: boolean;
+    verdict: "accepted" | "rejected" | null;
+    reasons: string[];
+    flags: string[];
+  }[];
+  it.each(cases.map((c) => [c.name, c] as const))("%s", (_, c) => {
+    const it = item(1, c.item);
+    expect(verdict(it, c.rules, c.reference)).toBe(c.verdict);
+    if (c.verdict !== null) expect(rejectionReasons(it, c.rules, c.reference).map((r) => r.code)).toEqual(c.reasons);
+    expect(imageFlags(it, c.reference, c.calibrated)).toEqual(c.flags);
   });
 });

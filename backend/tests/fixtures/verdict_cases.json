@@ -1,0 +1,618 @@
+[
+ {
+  "name": "nothing set: nothing is judged",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": null,
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "not measured yet",
+  "item": {
+   "state": "complete",
+   "metrics": null,
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 5,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": null,
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "could not be read",
+  "item": {
+   "state": "complete",
+   "metrics": {},
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 5,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": null,
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "still being written",
+  "item": {
+   "state": "incoming",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 5,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": null,
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "within every threshold",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 5,
+   "ice_max": 1,
+   "ring_max": 1.2,
+   "drift_max": 20,
+   "defocus_min": 0.5,
+   "defocus_max": 3
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "rings not far enough",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 3.5,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "fit"
+  ],
+  "flags": []
+ },
+ {
+  "name": "thick ice",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": 0.1,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "ice"
+  ],
+  "flags": []
+ },
+ {
+  "name": "crystalline ice",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.6,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": 1.1,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "ring"
+  ],
+  "flags": [
+   "ice_ring"
+  ]
+ },
+ {
+  "name": "defocus out of range",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": 2.0,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "defocus"
+  ],
+  "flags": []
+ },
+ {
+  "name": "defocus above",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": 1.5
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "defocus"
+  ],
+  "flags": []
+ },
+ {
+  "name": "drift in pixels is not judged in ångströms",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    },
+    "drift": 30.0,
+    "drift_unit": "px"
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": 1,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "drift in ångströms",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    },
+    "drift": 30.0,
+    "drift_unit": "A"
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": 10,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "drift"
+  ],
+  "flags": []
+ },
+ {
+  "name": "the fit of a program comes before the estimate",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.7,
+     "fit": 4.6,
+     "score": 9.0
+    }
+   },
+   "processing": {
+    "ctf": {
+     "defocus": 1.85,
+     "defocus_u": 1.87,
+     "defocus_v": 1.83,
+     "astigmatism": 0.04,
+     "fit": 3.4
+    }
+   }
+  },
+  "rules": {
+   "fit_max": 4,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "a program that failed leaves the estimate",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.7,
+     "fit": 4.6,
+     "score": 9.0
+    }
+   },
+   "processing": {
+    "ctf": {
+     "error": "the program ended with status 1"
+    }
+   }
+  },
+  "rules": {
+   "fit_max": 4,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "fit"
+  ],
+  "flags": []
+ },
+ {
+  "name": "the path of the alignment stands for the drift",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    },
+    "drift": 3.0,
+    "drift_unit": "A"
+   },
+   "processing": {
+    "motion": {
+     "total": 12.3,
+     "early": 4.0,
+     "max_step": 2.0,
+     "frames": 40,
+     "unit": "A"
+    }
+   }
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": null,
+   "ring_max": null,
+   "drift_max": 10,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "drift"
+  ],
+  "flags": []
+ },
+ {
+  "name": "several reasons, in order",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.3,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": 3,
+   "ice_max": 0.1,
+   "ring_max": 1.1,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": 1
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "rejected",
+  "reasons": [
+   "fit",
+   "ice",
+   "ring",
+   "defocus"
+  ],
+  "flags": [
+   "ice_ring"
+  ]
+ },
+ {
+  "name": "no ice without a reference",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 80.0,
+    "std": 5.0,
+    "ice_ring": 1.0,
+    "ctf": {
+     "defocus": 1.8,
+     "fit": 3.6,
+     "score": 12.0
+    }
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": 0.1,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": null,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": []
+ },
+ {
+  "name": "a very dark image",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 5.0
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": 5,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": [
+   "dark"
+  ]
+ },
+ {
+  "name": "an empty hole, against an empty hole",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 99.0
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": 1,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": true,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": [
+   "empty"
+  ]
+ },
+ {
+  "name": "not an empty hole against the brightest images",
+  "item": {
+   "state": "complete",
+   "metrics": {
+    "mean": 99.0
+   },
+   "processing": null
+  },
+  "rules": {
+   "fit_max": null,
+   "ice_max": 1,
+   "ring_max": null,
+   "drift_max": null,
+   "defocus_min": null,
+   "defocus_max": null
+  },
+  "reference": 100.0,
+  "calibrated": false,
+  "verdict": "accepted",
+  "reasons": [],
+  "flags": []
+ }
+]

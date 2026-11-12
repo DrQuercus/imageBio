@@ -309,31 +309,40 @@ export function hasRules(rules: QualityRules): boolean {
   return Object.values(rules).some((v) => v !== null);
 }
 
-/** Why an image is rejected: one sentence per threshold it is beyond. A measurement the image
- *  does not have is not held against it. */
-export function rejections(item: LiveItem, rules: QualityRules, reference: number | null): string[] {
+/** What a rejection is about: the threshold an image is beyond. */
+export type RejectionCode = "fit" | "ice" | "ring" | "drift" | "defocus";
+
+/** Why an image is rejected: one reason per threshold it is beyond. A measurement the image
+ *  does not have is not held against it. The server judges the same way for its reports
+ *  (live/quality.py); both are tested on the cases of backend/tests/fixtures/verdict_cases.json. */
+export function rejectionReasons(item: LiveItem, rules: QualityRules, reference: number | null): { code: RejectionCode; text: string }[] {
   const m = item.metrics;
   if (!m) return [];
-  const why: string[] = [];
+  const why: { code: RejectionCode; text: string }[] = [];
   const ctf = ctfOf(item);
   if (rules.fit_max !== null && ctf && ctf.fit !== null && ctf.fit > rules.fit_max) {
-    why.push(`anneaux de Thon jusqu'à ${ctf.fit.toFixed(1)} Å seulement (seuil ${rules.fit_max})`);
+    why.push({ code: "fit", text: `anneaux de Thon jusqu'à ${ctf.fit.toFixed(1)} Å seulement (seuil ${rules.fit_max})` });
   }
   const ice = relativeIce(item, reference);
   if (rules.ice_max !== null && ice !== null && ice > rules.ice_max) {
-    why.push(`glace ${ice.toFixed(2)} (seuil ${rules.ice_max})`);
+    why.push({ code: "ice", text: `glace ${ice.toFixed(2)} (seuil ${rules.ice_max})` });
   }
   if (rules.ring_max !== null && typeof m.ice_ring === "number" && m.ice_ring > rules.ring_max) {
-    why.push(`anneau de glace ${m.ice_ring.toFixed(2)} (seuil ${rules.ring_max})`);
+    why.push({ code: "ring", text: `anneau de glace ${m.ice_ring.toFixed(2)} (seuil ${rules.ring_max})` });
   }
   const drift = driftOf(item);
   if (rules.drift_max !== null && drift && drift.unit === "A" && drift.value > rules.drift_max) {
-    why.push(`${drift.path ? "mouvement" : "dérive"} ${drift.value.toFixed(1)} Å (seuil ${rules.drift_max})`);
+    why.push({ code: "drift", text: `${drift.path ? "mouvement" : "dérive"} ${drift.value.toFixed(1)} Å (seuil ${rules.drift_max})` });
   }
   if (ctf && ((rules.defocus_min !== null && ctf.defocus < rules.defocus_min) || (rules.defocus_max !== null && ctf.defocus > rules.defocus_max))) {
-    why.push(`défocus ${ctf.defocus.toFixed(2)} µm hors de ${rules.defocus_min ?? "…"} à ${rules.defocus_max ?? "…"}`);
+    why.push({ code: "defocus", text: `défocus ${ctf.defocus.toFixed(2)} µm hors de ${rules.defocus_min ?? "…"} à ${rules.defocus_max ?? "…"}` });
   }
   return why;
+}
+
+/** Why an image is rejected, one sentence per threshold it is beyond. */
+export function rejections(item: LiveItem, rules: QualityRules, reference: number | null): string[] {
+  return rejectionReasons(item, rules, reference).map((r) => r.text);
 }
 
 export type Verdict = "accepted" | "rejected";
