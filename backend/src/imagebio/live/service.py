@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -28,6 +29,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Final
 
+from imagebio import __version__
 from imagebio.core.config import MICROSCOPE_BOUNDS, ConfigError, RootConfig, Settings
 from imagebio.core.errors import ImageBioError, InvalidRequestError, NotFoundError
 from imagebio.core.model import FileId
@@ -48,6 +50,8 @@ from imagebio.live.alerts import (
 from imagebio.live.index import Index, hold_state_dir
 from imagebio.live.metrics import Microscope, measure, measure_drift
 from imagebio.live.quality import QualityRules
+from imagebio.live.report import Exposure, ReportContext, build_report, exposure_rows
+from imagebio.live.report_render import bundle, render_csv, render_html, render_json
 from imagebio.live.scanner import CycleReport, FileVersion, Scanner, ScanSettings
 from imagebio.live.thumbs import MAX_PX, MIN_PX, render_thumbnail
 from imagebio.service.planes import PlaneService
@@ -89,6 +93,18 @@ _UNAVAILABLE_PAUSE_S: Final = 60.0  # after a program could not be started at al
 #: The microscope of a session: its keys here, and the settings they default to.
 _MICROSCOPE_KEYS: Final = (("kv", "kv"), ("cs_mm", "cs_mm"), ("amplitude", "amplitude_contrast"))
 _ALERT_EVENTS_KEPT: Final = 200  # alerts remembered per watch, for its report
+_REPORTS_KEPT: Final = 20  # reports kept per watch: older ones are removed
+_REPORT_AGAIN_S: Final = 10.0  # a report asked for again this soon is the one just made
+_REPORT_THUMB_PX: Final = 256
+_IDLE_CHECK_S: Final = 60.0  # how often a directory is checked for a collection that went silent
+#: The files of a report: what each is called, and what it is.
+REPORT_FILES: Final = {
+    "html": ("report.html", "text/html; charset=utf-8"),
+    "json": ("report.json", "application/json"),
+    "csv": ("exposures.csv", "text/csv; charset=utf-8"),
+    "zip": ("report.zip", "application/zip"),
+}
+_UNSAFE_NAME: Final = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class _NotAsIndexedError(Exception):
@@ -199,6 +215,8 @@ class LiveService:
         self._ran = {"ok": 0, "failed": 0}
         self._workers: list[threading.Thread] = []
         self._stop_processing = threading.Event()
+        self._reporting = threading.Lock()  # one report at a time: each reads the whole session
+        self._idle_checked: dict[int, float] = {}  # root -> last time it was looked at for silence
 
     # ── index and scanners ───────────────────────────────────────────────────
     @property
@@ -334,6 +352,7 @@ class LiveService:
                 self._recorded(root_id, handed, report)
                 self._pending[root_id] = report.pending
                 self.check_alerts(root_id, now)
+                self._report_if_idle(root_id, now)
                 if report.error is None:
                     self._measure(scanner, root_id, path, stop)
                 took = time.perf_counter() - started
@@ -364,6 +383,7 @@ class LiveService:
             self._recorded(root_id, handed, reports[root_id])
             self._pending[root_id] = reports[root_id].pending
             self.check_alerts(root_id, when)
+            self._report_if_idle(root_id, when)
             if reports[root_id].error is None:
                 self._measure(scanner, root_id, path)
         return reports
@@ -947,6 +967,13 @@ class LiveService:
             if row is None:
                 raise NotFoundError("no such watch")
             watch = _watch_of(row)
+            ended = (
+                watch.active
+                and not forget
+                and bool(
+                    db.execute("SELECT report_auto FROM watches WHERE id = ?", (watch_id,)).fetchone()[0]
+                )
+            )
             if watch.active:
                 watch = replace(watch, active=False, stopped_at=now)
                 db.execute("UPDATE watches SET active = 0, stopped_at = ? WHERE id = ?", (now, watch_id))
@@ -963,10 +990,17 @@ class LiveService:
             db.execute(
                 "UPDATE alert_events SET ended = ? WHERE watch_id = ? AND ended IS NULL", (now, watch_id)
             )
+            gone_reports = []
             for doomed_id in doomed:
                 db.execute("DELETE FROM alert_states WHERE watch_id = ?", (doomed_id,))
                 db.execute("DELETE FROM alert_events WHERE watch_id = ?", (doomed_id,))
+                gone_reports += [
+                    r["name"] for r in db.execute("SELECT name FROM reports WHERE watch_id = ?", (doomed_id,))
+                ]
+                db.execute("DELETE FROM reports WHERE watch_id = ?", (doomed_id,))
                 db.execute("DELETE FROM watches WHERE id = ?", (doomed_id,))
+        for name in gone_reports:
+            self._remove_report_files(name)
         self._sync_scanners()
         with self._lock:
             for root_id in set(self._manual) - set(self._active_roots()):
@@ -974,7 +1008,231 @@ class LiveService:
             for doomed_id in doomed:
                 self._seen.pop(doomed_id, None)
         self._purge_orphans()
+        if ended:  # the end of a watch: the report of its session, unless its user said not to
+            try:
+                self.make_report(watch, "stop")
+            except Exception:
+                log.exception("the report of watch %s could not be made when it was stopped", watch_id)
         return watch
+
+    # ── reports ──────────────────────────────────────────────────────────────
+    @property
+    def reports_dir(self) -> Path:
+        return self._settings.live_state_dir / "reports"
+
+    def _remove_report_files(self, name: str) -> None:
+        if name and "/" not in name and name not in (".", ".."):
+            shutil.rmtree(self.reports_dir / name, ignore_errors=True)
+
+    def _report_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "trigger": row["trigger"],
+            "bytes": row["bytes"],
+            "exposures": row["exposures"],
+            "newest": row["newest"],
+        }
+
+    def reports(self, watch: WatchInfo) -> dict[str, Any]:
+        """The reports of a watch, newest first, and whether one is made when it ends. A report
+        whose files are gone (a restored index) is not listed."""
+        db = self.index.connection()
+        auto = bool(db.execute("SELECT report_auto FROM watches WHERE id = ?", (watch.id,)).fetchone()[0])
+        rows = db.execute(
+            "SELECT * FROM reports WHERE watch_id = ? ORDER BY created_at DESC, id DESC", (watch.id,)
+        ).fetchall()
+        return {
+            "auto": auto,
+            "idle_min": round(self._settings.live_report_idle_s / 60),
+            "reports": [self._report_row(r) for r in rows if (self.reports_dir / r["name"]).is_dir()],
+        }
+
+    def set_report_auto(self, watch: WatchInfo, on: bool) -> dict[str, Any]:
+        with self.index.write() as db:
+            db.execute("UPDATE watches SET report_auto = ? WHERE id = ?", (int(on), watch.id))
+        return self.reports(watch)
+
+    def report_file(self, watch: WatchInfo, report_id: int, kind: str) -> tuple[bytes, str, str, float]:
+        """The bytes of one file of a report of ``watch``, its media type, a name for the
+        download, and when the report was made."""
+        if kind not in REPORT_FILES:
+            raise InvalidRequestError(f"kind must be one of {', '.join(REPORT_FILES)}")
+        row = (
+            self.index.connection()
+            .execute(
+                "SELECT name, created_at FROM reports WHERE id = ? AND watch_id = ?", (report_id, watch.id)
+            )
+            .fetchone()
+        )
+        if row is None:
+            raise NotFoundError("no such report")
+        file_name, media = REPORT_FILES[kind]
+        try:
+            data = (self.reports_dir / row["name"] / file_name).read_bytes()
+        except OSError:
+            raise NotFoundError("the files of this report are gone") from None
+        session = _UNSAFE_NAME.sub("_", watch.logical.rsplit("/", 1)[-1]).strip("._")[:80] or "session"
+        stamp = time.strftime("%Y-%m-%d_%H%M", time.localtime(row["created_at"]))
+        extension = file_name.rsplit(".", 1)[1]
+        download = (
+            f"rapport_{session}_{stamp}.{extension}" if kind != "csv" else f"images_{session}_{stamp}.csv"
+        )
+        return data, media, download, float(row["created_at"])
+
+    def make_report(self, watch: WatchInfo, trigger: str = "manual") -> dict[str, Any]:
+        """Write the quality report of the session ``watch`` looks at, as it is now, and return
+        its listing. Asked for again within a few seconds, the report just made is returned."""
+        with self._reporting:
+            db = self.index.connection()
+            now = self.clock()
+            last = db.execute(
+                "SELECT * FROM reports WHERE watch_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                (watch.id,),
+            ).fetchone()
+            if (
+                trigger == "manual"
+                and last is not None
+                and 0 <= now - last["created_at"] < _REPORT_AGAIN_S
+                and (self.reports_dir / last["name"]).is_dir()
+            ):
+                return self._report_row(last)
+            own = db.execute(
+                "SELECT created_at, stopped_at, quality FROM watches WHERE id = ?", (watch.id,)
+            ).fetchone()
+            if own is None:
+                raise NotFoundError("no such watch")
+            rows = db.execute(
+                "SELECT e.id, e.name, e.category, e.state, e.primary_name, e.time, e.arrived, e.verified, "
+                "e.meta, e.metrics, e.processing, d.rel FROM exposures e JOIN dirs d ON d.id = e.dir_id "
+                "WHERE e.root_id = ? AND e.primary_name IS NOT NULL",
+                (watch.root_id,),
+            ).fetchall()
+            exposures = [
+                Exposure(
+                    id=r["id"],
+                    name=r["name"],
+                    rel=r["rel"],
+                    path="/".join(p for p in (watch.logical, r["rel"], r["primary_name"]) if p),
+                    category=r["category"],
+                    state=r["state"],
+                    time=r["time"],
+                    arrived=bool(r["arrived"]),
+                    verified=bool(r["verified"]),
+                    meta=json.loads(r["meta"]),
+                    metrics=json.loads(r["metrics"]) if r["metrics"] is not None else None,
+                    processing=json.loads(r["processing"]) if r["processing"] is not None else None,
+                )
+                for r in rows
+            ]
+            files = {r["id"]: (r["rel"], r["primary_name"]) for r in rows}
+            ctx = ReportContext(
+                session=watch.logical,
+                watch_id=watch.id,
+                watching_since=own["created_at"],
+                stopped_at=own["stopped_at"],
+                generated_at=now,
+                trigger=trigger,
+                version=__version__,
+                rules=QualityRules.from_json(own["quality"]),
+                ice=self._ice(db, watch),
+                microscope=self._microscope(db, watch.root_id),
+                programs=self._processing_of(db, watch),
+                alerts=[
+                    dict(a)
+                    for a in db.execute(
+                        "SELECT condition, started, ended FROM alert_events WHERE watch_id = ? "
+                        "ORDER BY started",
+                        (watch.id,),
+                    )
+                ],
+            )
+            report = build_report(exposures, ctx)
+            thumbs: dict[int, bytes] = {}
+            for card in report["best"] + report["worst"]:
+                rel, name = files[card["id"]]
+                path = self._plain_file(watch.root_path, rel, name)
+                if path is None:
+                    continue
+                with contextlib.suppress(ImageBioError, OSError, ValueError):
+                    thumbs[card["id"]] = self.thumbnail(path, _REPORT_THUMB_PX)[0]
+            page, numbers = render_html(report, thumbs), render_json(report)
+            table = render_csv(exposure_rows(exposures, ctx))
+            contents: dict[str, str | bytes] = {
+                "report.html": page,
+                "report.json": numbers,
+                "exposures.csv": table,
+            }
+            contents["report.zip"] = bundle(contents)
+
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+            name = f"w{watch.id}-{stamp}-{trigger}"
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
+            for n in range(2, 100):
+                if not (self.reports_dir / name).exists():
+                    break
+                name = f"w{watch.id}-{stamp}-{trigger}-{n}"
+            staging = self.reports_dir / f".{name}.part"
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(mode=0o750)
+            size = 0
+            for file_name, content in contents.items():
+                data = content.encode("utf-8") if isinstance(content, str) else content
+                (staging / file_name).write_bytes(data)
+                size += len(data)
+            staging.rename(self.reports_dir / name)  # whole, or not at all
+            with self.index.write() as tx:
+                cursor = tx.execute(
+                    "INSERT INTO reports (watch_id, created_at, trigger, name, bytes, exposures, newest) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        watch.id,
+                        now,
+                        trigger,
+                        name,
+                        size,
+                        report["counts"]["exposures"],
+                        report["session"]["last"],
+                    ),
+                )
+                row = tx.execute("SELECT * FROM reports WHERE id = ?", (cursor.lastrowid,)).fetchone()
+                old = tx.execute(
+                    "SELECT id, name FROM reports WHERE watch_id = ? ORDER BY created_at DESC, id DESC "
+                    "LIMIT -1 OFFSET ?",
+                    (watch.id, _REPORTS_KEPT),
+                ).fetchall()
+                for r in old:
+                    tx.execute("DELETE FROM reports WHERE id = ?", (r["id"],))
+            for r in old:
+                self._remove_report_files(r["name"])
+            return self._report_row(row)
+
+    def _report_if_idle(self, root_id: int, now: float) -> None:
+        """When a session that received images has received nothing for a while, its watches
+        that ask for it get their report, once (until images come again)."""
+        idle = self._settings.live_report_idle_s
+        if idle <= 0 or now - self._idle_checked.get(root_id, -math.inf) < _IDLE_CHECK_S:
+            return
+        self._idle_checked[root_id] = now
+        db = self.index.connection()
+        marks = ",".join("?" * len(_ACQUIRED))
+        last = db.execute(
+            f"SELECT MAX(completed_at) FROM exposures WHERE root_id = ? AND category IN ({marks}) "  # noqa: S608
+            "AND state = 'complete' AND arrived = 1",
+            (root_id, *_ACQUIRED),
+        ).fetchone()[0]
+        if last is None or now - last < idle:
+            return
+        due = db.execute(
+            _WATCH_SQL + "WHERE w.root_id = ? AND w.active = 1 AND w.report_auto = 1 AND NOT EXISTS "  # noqa: S608
+            "(SELECT 1 FROM reports p WHERE p.watch_id = w.id AND p.created_at >= ?)",
+            (root_id, last),
+        ).fetchall()
+        for row in due:
+            try:
+                self.make_report(_watch_of(row), "idle")
+            except Exception:
+                log.exception("the report of watch %s could not be made", row["id"])
 
     def seen(self, watch: WatchInfo) -> None:
         """Note that the user of ``watch`` was just allowed to look at it."""
@@ -1050,9 +1308,19 @@ class LiveService:
             "quality": self.quality(watch),
             "processing": self._processing_of(db, watch),
             "microscope": self._microscope(db, watch.root_id),
+            "reports": self._report_summary(db, watch),
             "last": dict(last) if last is not None else None,
             "disk": disk,
         }
+
+    @staticmethod
+    def _report_summary(db: sqlite3.Connection, watch: WatchInfo) -> dict[str, Any]:
+        """Enough for a client to know that a new report was made (one ended by itself)."""
+        row = db.execute(
+            "SELECT COUNT(*) AS n, MAX(id) AS last FROM reports WHERE watch_id = ?", (watch.id,)
+        ).fetchone()
+        auto = db.execute("SELECT report_auto FROM watches WHERE id = ?", (watch.id,)).fetchone()[0]
+        return {"count": row["n"], "last": row["last"], "auto": bool(auto)}
 
     @staticmethod
     def _ice_reference(db: sqlite3.Connection, root_id: int) -> dict[str, Any]:

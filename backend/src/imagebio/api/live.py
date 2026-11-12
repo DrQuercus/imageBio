@@ -152,6 +152,49 @@ def register_live_routes(app: FastAPI, settings: Settings, roots: RootSet, live:
         rules = AlertRules(names, no_image, disk_free, rate_drop)
         return _json(live.set_alerts(own_watch(request, watch_id), rules))
 
+    @app.get("/api/live/watches/{watch_id}/reports")
+    def live_watch_reports(request: Request, watch_id: int = _WATCH_ID) -> Response:
+        """The quality reports of a watch, newest first."""
+        _only(request, frozenset())
+        return _json(live.reports(own_watch(request, watch_id)))
+
+    @app.post("/api/live/watches/{watch_id}/reports")
+    def live_watch_report_make(request: Request, watch_id: int = _WATCH_ID) -> Response:
+        """Make the quality report of the session now."""
+        _only(request, frozenset())
+        return _json(live.make_report(own_watch(request, watch_id), "manual"))
+
+    @app.put("/api/live/watches/{watch_id}/reports")
+    def live_watch_report_auto(
+        request: Request, watch_id: int = _WATCH_ID, auto: bool = Query(...)
+    ) -> Response:
+        """Whether a report is made when the watch ends (stopped, or the collection silent)."""
+        _only(request, frozenset({"auto"}))
+        return _json(live.set_report_auto(own_watch(request, watch_id), auto))
+
+    @app.get("/api/live/watches/{watch_id}/reports/{report_id}/{kind}")
+    def live_watch_report_file(
+        request: Request,
+        watch_id: int = _WATCH_ID,
+        report_id: int = PathParam(ge=1, le=_MAX_INT),
+        kind: str = PathParam(pattern="^(html|json|csv|zip)$"),
+        view: bool = Query(False),
+    ) -> Response:
+        """One file of a report: the page (``html``; ``view=true`` to read it in the browser
+        rather than download it), the numbers (``json``), the images (``csv``), or all (``zip``)."""
+        _only(request, frozenset({"view"}))
+        data, media, name, _ = live.report_file(own_watch(request, watch_id), report_id, kind)
+        headers = {"Cache-Control": "private, no-store"}
+        if view and kind == "html":
+            # read in the browser, in a sandbox of its own: no script, nothing fetched, and not
+            # this application's origin, whatever the page held
+            headers["Content-Security-Policy"] = (
+                "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+            )
+        else:
+            headers["Content-Disposition"] = f'attachment; filename="{name}"'
+        return Response(data, media_type=media, headers=headers)
+
     @app.put("/api/live/watches/{watch_id}/microscope")
     def live_watch_microscope_set(
         request: Request,

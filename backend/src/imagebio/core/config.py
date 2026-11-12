@@ -336,6 +336,9 @@ class Settings:
     #: Mean free path of electrons in ice for this microscope (aperture-limited scattering), nm:
     #: ice thickness is then shown in nm. None: relative values only, unless a user gives one.
     live_mfp_nm: float | None = None
+    #: A quality report is made when a watched session has received nothing for this long
+    #: (seconds) after images arrived; 0: only when the watch is stopped, or asked for.
+    live_report_idle_s: float = 7200.0
     thumb_cache_bytes: int = 2 * 2**30
     #: Where the live monitor may send alerts.
     alert_channels: tuple[AlertChannel, ...] = ()
@@ -372,6 +375,8 @@ class Settings:
             )
         if self.live_mfp_nm is not None and not 50 <= self.live_mfp_nm <= 5000:
             raise ConfigError("live.mean_free_path_nm must be between 50 and 5000 (nanometres)")
+        if not (self.live_report_idle_s == 0 or 600 <= self.live_report_idle_s <= 7 * 86400):
+            raise ConfigError("live.report_after_idle_min must be 0 (never) or between 10 and 10080 minutes")
         if not 1 <= self.live_min_stable_s <= 3600:
             raise ConfigError("live.min_stable must be between 1 and 3600 seconds")
         # Without authentication, only loopback is acceptable. In "proxy" mode the identity
@@ -440,7 +445,17 @@ class Settings:
         cache = section("cache", {"plane_bytes", "max_open_datasets", "max_response_pixels", "thumb_bytes"})
         live = section(
             "live",
-            {"state_dir", "interval", "min_stable", "scan", "metrics", "ctf", "drift", "mean_free_path_nm"},
+            {
+                "state_dir",
+                "interval",
+                "min_stable",
+                "scan",
+                "metrics",
+                "ctf",
+                "drift",
+                "mean_free_path_nm",
+                "report_after_idle_min",
+            },
         )
         microscope = section("microscope", {"kv", "cs_mm", "amplitude_contrast"})
         alerts = section("alerts", {"smtp", "channels"})
@@ -576,6 +591,8 @@ class Settings:
             cs_mm=float(microscope.get("cs_mm", defaults.cs_mm)),
             amplitude_contrast=float(microscope.get("amplitude_contrast", defaults.amplitude_contrast)),
             live_mfp_nm=float(live["mean_free_path_nm"]) if "mean_free_path_nm" in live else None,
+            live_report_idle_s=60
+            * float(live.get("report_after_idle_min", defaults.live_report_idle_s / 60)),
             thumb_cache_bytes=parse_size(cache.get("thumb_bytes", defaults.thumb_cache_bytes)),
             alert_channels=tuple(channels),
             smtp=smtp,
