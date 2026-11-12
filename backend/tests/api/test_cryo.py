@@ -169,15 +169,17 @@ def test_a_plane_can_be_binned_in_fourier_space(client, tree: Tree):
     off = client.get(PLANE, params={**path, "bin": 4, "fbin": "true", "x": 30, "y": 16, "w": 64, "h": 40})
     assert off.status_code == 400 and "multiple of the bin" in off.json()["error"]["message"]
 
-    # after the other steps: mean of frames, then filter, then the reduction
+    # after the mean of frames; a filter comes after the reduction, at the pitch of the reduced
+    # grid (ADR 013), with or without fbin (tests/service/test_reduced_filter.py: same image)
     mean = frames[2:7].astype(np.float64).mean(axis=0).astype(np.float32)
     averaged = client.get(
         PLANE, params={"path": "public/frames.mrc", "t": 2, "t_end": 6, "bin": 2, "fbin": "true"}
     )
     np.testing.assert_allclose(decode(averaged), naive_fourier_crop(mean, (48, 64)), atol=2e-3)
-    filtered = client.get(PLANE, params={**path, "lp": 10, "bin": 2, "fbin": "true"})
-    expected = fourier_filter(frames[3], apix_x=1.25, lowpass=10)
-    np.testing.assert_allclose(decode(filtered), naive_fourier_crop(expected, (48, 64)), atol=2e-3)
+    expected = fourier_filter(naive_fourier_crop(frames[3], (48, 64)), apix_x=2.5, lowpass=10)
+    for fbin in ("true", "false"):
+        filtered = client.get(PLANE, params={**path, "lp": 10, "bin": 2, "fbin": fbin})
+        np.testing.assert_allclose(decode(filtered), expected, atol=2e-3)
 
     # at full resolution there is nothing to reduce: the stored values, as without it
     full = client.get(PLANE, params={**path, "fbin": "true"})
@@ -229,23 +231,15 @@ def test_lowpass_in_angstrom_uses_the_file_pixel_size(client, tree: Tree):
     np.testing.assert_allclose(
         decode(both), fourier_filter(frames[1], apix_x=1.25, lowpass=10, highpass=80), rtol=1e-5, atol=1e-4
     )
-    # averaged, then filtered, then cropped and binned
-    r = client.get(
-        PLANE,
-        params={
-            "path": "public/frames.mrc",
-            "t": 0,
-            "t_end": 11,
-            "lp": 20,
-            "bin": 2,
-            "x": 8,
-            "y": 16,
-            "w": 64,
-            "h": 40,
-        },
-    )
+    # averaged, reduced in Fourier space, filtered at the reduced pitch, then cut (ADR 013)
+    region = {"path": "public/frames.mrc", "t": 0, "t_end": 11, "lp": 20, "bin": 2, "y": 16, "w": 64, "h": 40}
+    r = client.get(PLANE, params={**region, "x": 8})
     mean = frames.astype(np.float64).mean(axis=0).astype(np.float32)
-    expected = bin_mean(fourier_filter(mean, apix_x=1.25, lowpass=20)[16:56, 8:72], 2)
+    expected = fourier_filter(naive_fourier_crop(mean, (48, 64)), apix_x=2.5, lowpass=20)[8:28, 4:36]
+    np.testing.assert_allclose(decode(r), expected, rtol=1e-5, atol=2e-3)
+    # a region off the grid of the bin: filtered at full resolution, cropped, binned by blocks
+    r = client.get(PLANE, params={**region, "x": 9})
+    expected = bin_mean(fourier_filter(mean, apix_x=1.25, lowpass=20)[16:56, 9:73], 2)
     np.testing.assert_allclose(decode(r), expected, rtol=1e-5, atol=1e-4)
     # the statistics follow: the filtered image has far less noise
     raw = client.get(STATS, params={"path": "public/frames.mrc", "t": 1}).json()
@@ -573,3 +567,27 @@ def test_a_power_beyond_float32_does_not_break_the_profile(client, tree: Tree):
     assert body["side"] == 32 and len(body["power"]) == 17
     assert any(p is None for p in body["power"])  # not a number JSON can carry
     assert client.get(SPECTRUM, params={"path": "public/huge.tif", "tile": 32}).status_code == 200
+
+
+def test_sharp_filters_and_statistics_of_a_reduced_view(client, tree: Tree):
+    frames = tree.frames  # type: ignore[attr-defined]
+    path = {"path": "public/frames.mrc", "t": 1}
+    soft = client.get(PLANE, params={**path, "lp": 10})
+    sharp = client.get(PLANE, params={**path, "lp": 10, "sharp": "true"})
+    assert sharp.status_code == 200 and sharp.headers["etag"] != soft.headers["etag"]
+    np.testing.assert_allclose(
+        decode(sharp), fourier_filter(frames[1], apix_x=1.25, lowpass=10, sharp=True), rtol=1e-5, atol=1e-4
+    )
+    # without a filter the profile means nothing: the same answer, the same tag
+    plain = client.get(PLANE, params=path)
+    assert client.get(PLANE, params={**path, "sharp": "true"}).headers["etag"] == plain.headers["etag"]
+
+    # the statistics of what a reduced view shows, for a view that follows a filter
+    view = decode(client.get(PLANE, params={**path, "lp": 10, "bin": 4}))
+    reduced = client.get(STATS, params={**path, "lp": 10, "bin": 4})
+    full = client.get(STATS, params={**path, "lp": 10})
+    assert reduced.status_code == 200 and reduced.headers["etag"] != full.headers["etag"]
+    assert reduced.json()["mean"] == pytest.approx(float(view.astype(np.float64).mean()), rel=1e-6)
+    assert reduced.json()["n_finite"] == view.size and full.json()["n_finite"] == frames[1].size
+    for bad in (0, 65, "x"):
+        assert client.get(STATS, params={**path, "bin": bad}).status_code == 400

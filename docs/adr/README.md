@@ -9,10 +9,11 @@ Une décision par fichier. Chaque fichier donne le contexte, la décision, ses c
 | [003](003-chemins-logiques-api-sans-etat.md) | Chemins logiques et API de datasets sans état | Acceptée |
 | [004](004-modele-de-donnees.md) | Modèle de données : axes TCZYX, plans 2D, calibration avec provenance | Acceptée |
 | [005](005-authentification.md) | Authentification déléguée au reverse proxy, écoute en local | Proposée (à confirmer) |
-| [006](006-traitements-cote-serveur.md) | Traitements du mode Cryo côté serveur, dans un ordre fixe | Acceptée |
+| [006](006-traitements-cote-serveur.md) | Traitements du mode Cryo côté serveur, dans un ordre fixe | Acceptée, amendée par 013 |
 | [007](007-live.md) | Mode Live : scrutation par dossier, index SQLite, suivi par numéro de séquence | Acceptée |
 | [008](008-pointes-et-galeries.md) | Pointés et galeries : lus par le serveur, jamais retournés d'office | Acceptée |
 | [009](009-perimetre-cryo-et-live.md) | Périmètre recentré sur le cryo et le suivi en direct : pas de cœur ImageJ | Acceptée |
 | [010](010-exploitation.md) | Exploitation : pile réduite, secret partagé avec le proxy, sauvegarde de l'index, `/metrics` | Acceptée |
 | [011](011-programmes-externes.md) | Programmes externes (MotionCor3, CTFFIND) : listes d'arguments déclarées, isolement, tour de rôle | Acceptée, jamais essayée avec les vrais programmes |
 | [012](012-rapport-de-collecte.md) | Rapport de qualité d'une collecte (HTML autonome, JSON, CSV) et microscope d'une session | Acceptée |
+| [013](013-filtrer-la-vue-reduite.md) | Une vue réduite filtrée est réduite dans Fourier, puis filtrée ; profil de filtre net | Acceptée |

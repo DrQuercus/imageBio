@@ -1,6 +1,6 @@
 # ADR 006 : traitements du mode Cryo côté serveur, dans un ordre fixe
 
-**État :** acceptée.
+**État :** acceptée ; points 2 et 3 amendés par l'[ADR 013](013-filtrer-la-vue-reduite.md) (une vue réduite filtrée est réduite dans Fourier, puis filtrée).
 
 ## Contexte
 

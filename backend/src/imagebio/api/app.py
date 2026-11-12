@@ -78,7 +78,7 @@ _FLOAT: Final = re.compile(r"-?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?")
 _COMPRESS_PROBE: Final = 256 * 1024
 _CACHE_CONTROL: Final = "private, no-cache"
 _GAIN_PARAMS: Final = frozenset({"gain", "gain_orient", "gain_inv"})
-_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix", "fbin"}) | _GAIN_PARAMS
+_PROCESSING_PARAMS: Final = frozenset({"t_end", "lp", "hp", "apix", "fbin", "sharp"}) | _GAIN_PARAMS
 _STATS_PARAMS: Final = frozenset({"path", "t", "c", "z"}) | _PROCESSING_PARAMS
 _PLANE_PARAMS: Final = _STATS_PARAMS | {"bin", "x", "y", "w", "h"}
 _SPECTRUM_PARAMS: Final = frozenset({"path", "t", "c", "z", "t_end", "tile"}) | _GAIN_PARAMS
@@ -284,9 +284,12 @@ def create_app(
         hp: float | None = Query(None, gt=0),
         apix: float | None = Query(None, gt=0),
         fbin: bool = Query(False),
+        sharp: bool = Query(False),
         gain: GainSpec | None = Depends(gain_of),
     ) -> Processing:
-        return Processing(t_end=t_end, lowpass=lp, highpass=hp, apix=apix, gain=gain, fourier_bin=fbin)
+        return Processing(
+            t_end=t_end, lowpass=lp, highpass=hp, apix=apix, gain=gain, fourier_bin=fbin, sharp=sharp
+        )
 
     # ── endpoints ────────────────────────────────────────────────────────────
     @app.get("/healthz")
@@ -397,7 +400,8 @@ def create_app(
         if any(given) and not all(given):
             raise InvalidRequestError("a region needs x, y, w and h together")
         region = (x, y, w, h) if all(given) else None
-        tag = ("plane", options_key(options), t, c, z, bin, region, proc.key())
+        # "2": filtered reduced views are reduced before they are filtered since lot A (ADR 013)
+        tag = ("plane", 2, options_key(options), t, c, z, bin, region, proc.key())
         etag = _etag(FileId.of(resolved.real), *tag)
         base_headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL, "Vary": "Accept-Encoding"}
         if _not_modified(request, etag):
@@ -419,12 +423,15 @@ def create_app(
         t: int = Query(0, ge=0),
         c: int = Query(0, ge=0),
         z: int = Query(0, ge=0),
+        bin: int = Query(1, ge=1, le=MAX_BIN),
         proc: Processing = Depends(processing_of),
     ) -> Response:
-        options = _check_query(request, _STATS_PARAMS)
+        """Statistics of the full-resolution plane, or (``bin``) of the whole plane as
+        ``/plane`` serves it at that bin."""
+        options = _check_query(request, _STATS_PARAMS | {"bin"})
         resolved = file_of(request, path)
-        stats, file_id = service.stats(resolved.real, t, c, z, options, proc)
-        etag = _etag(file_id, "stats", options_key(options), t, c, z, proc.key())
+        stats, file_id = service.stats(resolved.real, t, c, z, options, proc, bin)
+        etag = _etag(file_id, "stats", 2, options_key(options), t, c, z, proc.key(), bin)
         headers = {"ETag": etag, "Cache-Control": _CACHE_CONTROL}
         if _not_modified(request, etag):
             return Response(status_code=304, headers=headers)

@@ -1,8 +1,9 @@
 """Fourier-space processing for cryo-EM display: resolution filters in Å, power spectrum.
 
-Filters are Gaussian in frequency, defined by the *resolution* at which their gain is one half:
-a 20 Å low-pass keeps what is coarser than 20 Å. Frequencies are physical (cycles per Å), so
-the pixel size is required, and anisotropic pixels are handled.
+Filters are defined by the *resolution* at which their gain is one half: a 20 Å low-pass keeps
+what is coarser than 20 Å. Their profile is Gaussian (soft), or Butterworth of order 4 (sharp:
+flat up to near the cut-off, then steep). Frequencies are physical (cycles per Å), so the pixel
+size is required, and anisotropic pixels are handled.
 """
 
 from __future__ import annotations
@@ -64,6 +65,16 @@ def _resolution(name: str, value: float | None) -> float | None:
     return float(value)
 
 
+def _low(r2: npt.NDArray[np.float32], cutoff: float, sharp: bool) -> npt.NDArray[np.float32]:
+    """Gain of a low-pass of half-gain resolution ``cutoff`` Å at squared frequencies ``r2``."""
+    u = r2 * np.float32(cutoff * cutoff)  # (f d)^2
+    if not sharp:
+        return np.asarray(np.exp(-_LN2 * u), dtype=np.float32)
+    with np.errstate(over="ignore"):  # (f d)^8 beyond float32: the gain is 0, as it should be
+        one = np.float32(1.0)
+        return one / (one + (u * u) ** 2)
+
+
 def fourier_filter(
     a: Plane,
     *,
@@ -71,13 +82,18 @@ def fourier_filter(
     apix_y: float | None = None,
     lowpass: float | None = None,
     highpass: float | None = None,
+    sharp: bool = False,
 ) -> Plane:
-    """Gaussian low-pass, high-pass or band-pass, with cut-offs given as resolutions in Å.
+    """Low-pass, high-pass or band-pass, with cut-offs given as resolutions in Å.
 
     * ``lowpass=d`` removes detail finer than ``d`` Å: gain 0.5 at 1/d, 1 at zero frequency.
     * ``highpass=d`` removes variations coarser than ``d`` Å: gain 0.5 at 1/d. The mean of the
       image is kept, so the grey levels stay where they were.
     * Both: a band-pass (``lowpass`` must be the finer resolution).
+    * ``sharp``: the gain of a low-pass at frequency ``f`` is ``1 / (1 + (f d)^8)`` (a squared
+      Butterworth of order 4) instead of ``0.5 ** ((f d)^2)``. At 2d it keeps 99.6 % instead
+      of 84 %, at d/2 it lets 0.4 % through instead of 6 %; it rings a little near sharp
+      edges. A high-pass is one minus the low-pass of the same cut-off, in both profiles.
 
     The image is extended by mirror reflection before the transform, so that opposite edges do
     not bleed into each other (a plain FFT treats the image as periodic). NaN and Inf pixels
@@ -113,7 +129,8 @@ def fourier_filter(
     # deviation of d * sqrt(ln 2) / (pi * sqrt 2) Å ~ 0.19 d. Four of them on each side.
     # No more than half the image on each side: a cut-off as coarse as the field of view would
     # otherwise transform nine times the image for a border that no longer changes anything.
-    reach = max(lowpass or 0.0, highpass or 0.0) * 0.75
+    # A Butterworth response decays more slowly (it rings): twice as far.
+    reach = max(lowpass or 0.0, highpass or 0.0) * (1.5 if sharp else 0.75)
     pad_y = min(h // 2, math.ceil(reach / apix_y))
     pad_x = min(w // 2, math.ceil(reach / apix_x))
     big_h, big_w = next_fast_len(h + 2 * pad_y), next_fast_len(w + 2 * pad_x)
@@ -132,9 +149,9 @@ def fourier_filter(
     r2 = fy[:, None] ** 2 + fx[None, :] ** 2
     gain = np.ones_like(r2)
     if lowpass is not None:
-        gain *= np.exp(-_LN2 * r2 * np.float32(lowpass * lowpass))
+        gain *= _low(r2, lowpass, sharp)
     if highpass is not None:
-        gain *= 1.0 - np.exp(-_LN2 * r2 * np.float32(highpass * highpass))
+        gain *= 1.0 - _low(r2, highpass, sharp)
         gain[0, 0] = 1.0  # keep the mean
     spectrum = np.fft.rfft2(padded)
     spectrum *= gain

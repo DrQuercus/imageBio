@@ -76,11 +76,13 @@ class Processing:
 
     ``t_end``: the plane becomes the mean of frames ``t..t_end`` (inclusive). ``gain``: it is
     multiplied by a gain reference and its defective pixels are filled. ``lowpass`` and
-    ``highpass``: resolution filters in Å. ``apix``: Å per pixel given by the user, for files
-    that do not store their pixel size (it takes precedence over the file's value).
+    ``highpass``: resolution filters in Å, of the sharp (Butterworth) profile when ``sharp``.
+    ``apix``: Å per pixel given by the user, for files that do not store their pixel size (it
+    takes precedence over the file's value).
 
     ``fourier_bin`` is about the binning that follows: the plane is reduced by keeping the low
-    frequencies of its Fourier transform instead of averaging blocks of pixels.
+    frequencies of its Fourier transform instead of averaging blocks of pixels. A filtered
+    plane is always reduced that way, before it is filtered (ADR 013).
     """
 
     t_end: int | None = None
@@ -89,10 +91,15 @@ class Processing:
     apix: float | None = None
     gain: GainSpec | None = None
     fourier_bin: bool = False
+    sharp: bool = False
 
     @property
     def identity(self) -> bool:
-        return self.t_end is None and self.lowpass is None and self.highpass is None and self.gain is None
+        return self.t_end is None and not self.filtered and self.gain is None
+
+    @property
+    def filtered(self) -> bool:
+        return self.lowpass is not None or self.highpass is not None
 
     @property
     def unfiltered(self) -> Processing:
@@ -105,7 +112,7 @@ class Processing:
         return replace(self, fourier_bin=False) if self.fourier_bin else self
 
     def key(self) -> tuple[Any, ...]:
-        filtered = self.lowpass is not None or self.highpass is not None
+        filtered = self.filtered
         gain = self.gain.key() if self.gain is not None else None
         return (
             self.t_end,
@@ -114,10 +121,26 @@ class Processing:
             self.apix if filtered else None,
             gain,
             self.fourier_bin,
+            self.sharp and filtered,
         )
 
 
 NO_PROCESSING: Final = Processing()
+
+
+def _filter_pixel(info: DatasetInfo, proc: Processing) -> tuple[float, float]:
+    """Å per pixel of the stored plane along x and y, to filter it by resolution."""
+    apix_x = proc.apix or info.calibration.x.to_angstrom()
+    apix_y = proc.apix or info.calibration.y.to_angstrom()
+    if not apix_x or not apix_y:
+        raise InvalidRequestError("pixel size unknown: give it (apix, in Å) to filter by resolution")
+    return apix_x, apix_y
+
+
+def _filter(plane: Plane, proc: Processing, apix_x: float, apix_y: float) -> Plane:
+    return fourier_filter(
+        plane, apix_x=apix_x, apix_y=apix_y, lowpass=proc.lowpass, highpass=proc.highpass, sharp=proc.sharp
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,18 +246,48 @@ class PlaneService:
                 plane = self._mean_of_frames(dataset, file_id, okey, t, proc.t_end, c, z)
             if proc.gain is not None:
                 plane = apply_gain(plane, self._gain(proc.gain, (plane.shape[0], plane.shape[1])))
-            if proc.lowpass is None and proc.highpass is None:
+            if not proc.filtered:
                 return plane
-            cal = dataset.info.calibration
-            apix_x = proc.apix or cal.x.to_angstrom()
-            apix_y = proc.apix or cal.y.to_angstrom()
-            if not apix_x or not apix_y:
-                raise InvalidRequestError("pixel size unknown: give it (apix, in Å) to filter by resolution")
-            return fourier_filter(
-                plane, apix_x=apix_x, apix_y=apix_y, lowpass=proc.lowpass, highpass=proc.highpass
-            )
+            apix_x, apix_y = _filter_pixel(dataset.info, proc)
+            return _filter(plane, proc, apix_x, apix_y)
 
         return self._cache.get_or_load(("proc", file_id, okey, t, c, z, proc.key()), load)
+
+    def _reduced(
+        self, dataset: Any, file_id: FileId, okey: str, t: int, c: int, z: int, proc: Processing, bin: int
+    ) -> Plane:
+        """The whole plane after ``proc``, reduced ``bin`` times by Fourier cropping.
+
+        A filter is applied *after* the reduction, at the pixel size of the reduced plane. The
+        crop keeps the low frequencies of the transform as they are and the filter multiplies
+        each of them by its gain, so the two commute: the result is the reduction of the
+        filtered plane, except along the edges, which each treats in its own way (ADR 013).
+        Moving a filter then costs the transform of the reduced plane (some 35 ms for a 4k
+        image at bin 4), not that of the full plane (more than a second); the reduction of the
+        unfiltered plane is made once and kept.
+        """
+        info: DatasetInfo = dataset.info
+        shape = binned_shape(info.size_y, info.size_x, bin)
+        base = proc.unfiltered
+
+        def unfiltered() -> Plane:
+            return self._cache.get_or_load(
+                ("fourier", file_id, okey, t, c, z, base.key(), bin),
+                lambda: fourier_crop(self._source(dataset, file_id, okey, t, c, z, base), shape),
+            )
+
+        if not proc.filtered:
+            return unfiltered()
+        apix_x, apix_y = _filter_pixel(info, proc)
+        return self._cache.get_or_load(
+            ("filtered", file_id, okey, t, c, z, proc.key(), bin),
+            lambda: _filter(
+                unfiltered(),
+                proc,
+                apix_x * info.size_x / shape[1],  # the pitch of the reduced grid, axis by axis
+                apix_y * info.size_y / shape[0],
+            ),
+        )
 
     # ── API ──────────────────────────────────────────────────────────────────
     def info(self, path: Path, options: Mapping[str, Any] | None = None) -> tuple[DatasetInfo, FileId]:
@@ -259,6 +312,10 @@ class PlaneService:
 
         Without processing, ``bin == 1`` returns the stored values in their dtype; ``bin > 1``
         the float32 block means. A processed plane is float32.
+
+        A filtered plane at ``bin > 1`` is reduced by Fourier cropping, then filtered
+        (:meth:`_reduced`), as with ``fourier_bin``; a region must then start on a multiple of
+        the bin, or the plane is filtered at full resolution and binned by blocks, as before.
         """
         if not isinstance(bin, int) or isinstance(bin, bool) or not 1 <= bin <= MAX_BIN:
             raise InvalidRequestError(f"bin must be an integer between 1 and {MAX_BIN}")
@@ -278,22 +335,17 @@ class PlaneService:
                     f"the requested plane has {out_w} × {out_h} pixels, above the limit of "
                     f"{self._max_response_pixels}: use a larger bin or request a region"
                 )
+            aligned = x % bin == 0 and y % bin == 0
             if bin == 1 and region == full:
                 array = self._source(dataset, file_id, okey, t, c, z, proc)
-            elif proc.fourier_bin and bin > 1:
+            elif bin > 1 and (proc.fourier_bin or (proc.filtered and aligned)):
                 # the whole plane is reduced once, and regions are cut out of the result
-                if x % bin or y % bin:
+                if not aligned:
                     raise InvalidRequestError(
                         "with Fourier binning, a region must start on a multiple of the bin"
                     )
                 self._check_plane_size(info, bytes_per_pixel=24)  # float32 plane and its transform
-                whole = self._cache.get_or_load(
-                    ("fourier", file_id, okey, t, c, z, proc.key(), bin),
-                    lambda: fourier_crop(
-                        self._source(dataset, file_id, okey, t, c, z, proc),
-                        binned_shape(info.size_y, info.size_x, bin),
-                    ),
-                )
+                whole = self._reduced(dataset, file_id, okey, t, c, z, proc, bin)
                 array = whole[y // bin : y // bin + out_h, x // bin : x // bin + out_w]
             else:
                 array = self._cache.get_or_load(
@@ -312,18 +364,27 @@ class PlaneService:
         z: int = 0,
         options: Mapping[str, Any] | None = None,
         proc: Processing = NO_PROCESSING,
+        bin: int = 1,
     ) -> tuple[PlaneStats, FileId]:
-        """Statistics of the full-resolution plane ``(t, c, z)`` after ``proc``."""
+        """Statistics of plane ``(t, c, z)`` after ``proc``: of the full-resolution plane, or of
+        the whole plane reduced ``bin`` times as :meth:`plane` serves it. A view that follows
+        a filter while it moves asks for those of what it shows: a filter at full resolution
+        takes more than a second on a 4k image."""
         file_id = FileId.of(path)
         okey = options_key(options)
-        key = (file_id, okey, t, c, z, proc.key())
+        key = (file_id, okey, t, c, z, proc.key(), bin)
         with self._stats_lock:
             cached = self._stats.get(key)
             if cached is not None:
                 self._stats.move_to_end(key)
                 return cached, file_id
-        with self._pool.lease(path, options, file_id=file_id) as dataset:
-            result = plane_stats(self._source(dataset, file_id, okey, t, c, z, proc))
+        if bin != 1:
+            reduced = self.plane(path, t, c, z, bin=bin, options=options, proc=proc)
+            result, file_id = plane_stats(reduced.array), reduced.file_id
+            key = (file_id, okey, t, c, z, proc.key(), bin)
+        else:
+            with self._pool.lease(path, options, file_id=file_id) as dataset:
+                result = plane_stats(self._source(dataset, file_id, okey, t, c, z, proc))
         with self._stats_lock:
             self._stats[key] = result
             while len(self._stats) > _STATS_CACHE_ITEMS:

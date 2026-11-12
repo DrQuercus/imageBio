@@ -59,6 +59,38 @@ def test_highpass_gain_and_mean_preserved():
     assert amplitude(coarse, margin=200) < 0.05  # a slow gradient is removed
 
 
+@pytest.mark.parametrize("apix", [0.83, 1.0, 2.5])
+def test_the_sharp_profile_is_a_butterworth_of_order_4(apix: float):
+    cutoff = 20.0  # Å; gain at frequency f: 1 / (1 + (f / f_cutoff) ** 8)
+    for resolution, expected in (
+        (cutoff, 0.5),
+        (2 * cutoff, 1 / (1 + 2.0**-8)),
+        (cutoff / 2, 1 / (1 + 2.0**8)),
+    ):
+        a = wave((512, 512), resolution / apix, angle=0.3)
+        out = fourier_filter(a, apix_x=apix, lowpass=cutoff, sharp=True)
+        assert out.dtype == np.float32 and out.shape == a.shape
+        assert amplitude(out, margin=60) == pytest.approx(expected, abs=0.03), resolution
+    # flatter in the pass band and steeper beyond than the Gaussian of the same cut-off
+    a = wave((512, 512), 30.0 / apix, angle=0.3)
+    sharp = amplitude(fourier_filter(a, apix_x=apix, lowpass=cutoff, sharp=True), margin=60)
+    soft = amplitude(fourier_filter(a, apix_x=apix, lowpass=cutoff), margin=60)
+    assert sharp == pytest.approx(1 / (1 + (cutoff / 30) ** 8), abs=0.03) and soft < sharp - 0.15
+
+
+def test_the_sharp_high_pass_keeps_the_mean():
+    apix, cutoff = 1.0, 80.0  # gain: 1 - 1 / (1 + (f / f_cutoff) ** 8)
+    for resolution, expected in (
+        (cutoff, 0.5),
+        (cutoff / 2, 1 - 1 / (1 + 2.0**8)),
+        (cutoff * 2, 1 - 1 / (1 + 2.0**-8)),
+    ):
+        a = wave((768, 768), resolution / apix) + 1000.0
+        out = fourier_filter(a, apix_x=apix, highpass=cutoff, sharp=True)
+        assert amplitude(out, margin=160) == pytest.approx(expected, abs=0.04), resolution
+        assert out.mean() == pytest.approx(1000.0, abs=0.5)
+
+
 def test_bandpass_keeps_the_band():
     a = wave((512, 512), 6.0) + wave((512, 512), 30.0, angle=1.0) + wave((512, 512), 250.0, angle=2.0)
     out = fourier_filter(a, apix_x=1.0, lowpass=12.0, highpass=90.0)
@@ -152,11 +184,14 @@ def test_the_widest_accepted_values_give_finite_images():
     rng = np.random.default_rng(12)
     a = rng.normal(100, 10, (48, 64)).astype(np.float32)
     for apix in (1e-4, 1.0, 1e7):
-        flat = fourier_filter(a, apix_x=apix, lowpass=1e7)
-        assert np.isfinite(flat).all()
-        kept = fourier_filter(a, apix_x=apix, highpass=1e7)
-        # the grey level stays: it is the mean of the mirror-padded image, close to the image's own
-        assert np.isfinite(kept).all() and kept.mean() == pytest.approx(a.mean(), abs=0.5)
+        for sharp in (False, True):  # (f d)^8 overflows float32 at the far ends: a gain of 0 or 1
+            flat = fourier_filter(a, apix_x=apix, lowpass=1e7, sharp=sharp)
+            assert np.isfinite(flat).all()
+            kept = fourier_filter(a, apix_x=apix, highpass=1e7, sharp=sharp)
+            # the grey level stays: the mean of the mirror-padded image, close to the image's own
+            assert np.isfinite(kept).all() and kept.mean() == pytest.approx(a.mean(), abs=0.5)
+            fine = fourier_filter(a, apix_x=apix, lowpass=1e-3, highpass=1e7, sharp=sharp)
+            assert np.isfinite(fine).all()
     nothing = fourier_filter(a, apix_x=1e-4, lowpass=1e7)  # a cut-off of 1 mm on a field of 6 pm
     assert nothing.std() < 1e-3 and nothing.mean() == pytest.approx(a.mean(), abs=0.5)
     np.testing.assert_allclose(fourier_filter(a, apix_x=1.0, lowpass=1e-3), a, atol=1e-3)  # everything passes
